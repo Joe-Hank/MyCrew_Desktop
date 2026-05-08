@@ -1,0 +1,30 @@
+{
+  "name": "MyCrew_v3",
+  "displayName": "MyCrew",
+  "version": "0.0.0",
+  "description": "CrewAI + MCP 的本地服务窗口（PC 桌面应用）",
+  "stage": "scaffolding",
+  "kind": "desktop-app",
+  "stack": {
+    "shell": "Tauri 2.x (Rust)",
+    "frontend": "React 19 + Vite 6 + TypeScript 5 + Tailwind 4 + Shadcn/ui",
+    "stateManagement": ["React Query", "Zustand"],
+    "backend": "FastAPI + Uvicorn (Python sidecar)",
+    "crewEngine": "CrewAI",
+    "database": "SQLite + aiosqlite + Alembic",
+    "credentials": "tauri-plugin-stronghold + DPAPI fallback",
+    "packaging": "PyInstaller + Tauri build"
+  },
+  "entrypoints": {
+    "dev": "pnpm dev (TODO: configure)",
+    "build": "pnpm tauri build (TODO: configure)"
+  },
+  "docs": {
+    "plan": "./plan.md",
+    "architecture": "./docs/ARCHITECTURE.md",
+    "api": "./docs/API.md",
+    "adr": "./docs/ADR/"
+  },
+  "createdAt": "2026-05-08",
+  "originalNote": "项目命名应符合 Claude-PascalCase 规范，但保留用户已使用的 MyCrew_v3 名称避免引入额外风险。"
+}

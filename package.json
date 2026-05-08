@@ -1,0 +1,14 @@
+{
+  "name": "mycrew-v3",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "cd src-tauri && cargo tauri dev",
+    "build": "cd src-tauri && cargo tauri build",
+    "frontend:dev": "cd frontend && pnpm dev",
+    "frontend:build": "cd frontend && pnpm build",
+    "frontend:test": "cd frontend && pnpm test",
+    "lint": "cd frontend && pnpm lint",
+    "format": "cd frontend && pnpm format"
+  }
+}

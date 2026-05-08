@@ -1,0 +1,47 @@
+### 1、文档明确"不引入 ORM"，但没提迁移管理。风险：
+
+- 表结构随版本变，手写 SQL 无法追溯
+- 用户升级时 schema 不兼容导致数据损坏
+
+__建议__：引入 __Alembic__（不依赖 ORM，可写原生 SQL 迁移）。在 Phase 0 就建好 `backend/migrations/` 目录
+
+### 2、__核心问题__：
+v2 弃用 Tauri 是因为"用户体验不佳、核心功能不稳定"，但这更可能是当时紧耦合架构的问题，而非 Tauri 本身的问题。Tauri v2 在 2025 年后已大幅成熟。__建议在 Phase 0 花 3 天做一个 Tauri v2 原型验证__（spawn Python sidecar + 端口握手），如果可行，长期收益（体积、内存、安全性）巨大。
+
+### 3、状态管理边界需明确划分
+
+当前：`Zustand + React Query`
+
+在事件驱动架构下，大部分实时状态走 __WS 推送 → React Query cache 更新__。建议明确划分：
+
+- __服务端状态__（项目列表/任务/MCP/日志）→ React Query 独占
+- __UI 状态__（抽屉开关/选中项/拖拽态/主题）→ Zustand
+
+避免两边混用导致的缓存一致性问题。建议在 stores 目录下命名规范：`useProjectQuery` vs `useUIStore`。
+
+### 4、插件化扩展协议（§12）—— 对 MVP 过度设计
+
+`PluginManifest + PluginRegistry` 将 LLM/MCP/Tool 统一抽象，但实际：
+
+- LLM adapter 是内置固定实现，不需要"扫描发现"
+- MCP 连接走标准 MCP SDK，不需要自定义协议
+- __只有 Tool（src/tools/）需要动态发现__
+
+__建议__：MVP 只实现 Tool 扫描 + 签名校验（BaseTool 子类发现）。`PluginPort` 推迟到将来需要第三方 LLM provider 插件时。
+
+### 5、立项对话（Inception）—— 建议分阶段交付
+
+这是整个应用最复杂的前端组件（黄金分割三栏 + 流式对话 + 任务蓝图编辑 + 文件索引 + 重新评估架构），也是风险最高的 LLM 交互。
+
+__建议拆分为 3 子阶段__：
+
+- __Phase 5a__：对话 + 结构化 JSON 输出 + 确认生成项目（任务蓝图只读）
+- __Phase 5b__：任务蓝图可编辑 + 文件索引
+- __Phase 5c__：历史会话 + 草稿恢复
+
+### 6、其它
+    同时只能运行一个项目 —— 预留扩展空间
+    ADR-003 讨论过，简化了调度器。__建议在 `projects` 表中将 `state` 字段设计为支持并发运行的格式__（如用独立的 `is_running` boolean），将来改成并发时不需改 schema。
+
+    集成测试层缺失
+    当前测试分层：pytest（后端）、Vitest（前端组件）、Playwright（E2E）。__缺失__ Electron ↔ Python 进程间通信的集成测试。建议 Phase 1 就引入脚本验证：spawn → 握手 → 崩溃恢复 → 优雅关闭 → 无僵尸进程。

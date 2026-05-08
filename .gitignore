@@ -1,0 +1,62 @@
+# Node / pnpm
+node_modules/
+.pnpm-store/
+dist/
+build/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+.coverage
+htmlcov/
+
+# Rust / Tauri
+target/
+src-tauri/target/
+src-tauri/binaries/
+
+# Vite / TypeScript
+.vite/
+*.tsbuildinfo
+
+# IDE
+.idea/
+.vscode/
+!.vscode/settings.json.example
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 运行时数据（敏感 + 体积大）
+data/db/
+data/logs/
+data/cache/
+data/secrets/
+data/runtime/
+output/
+
+# 不忽略 data 子目录的 README 与 .gitkeep
+!data/**/README.md
+!data/**/.gitkeep
+
+# 环境变量
+.env
+.env.local
+.env.*.local
+
+# 本地配置
+.claude/settings.local.json
+data/config/*.yaml
+!data/config/README.md
+
+# 测试产物
+/tests/playwright-report/
+/tests/test-results/

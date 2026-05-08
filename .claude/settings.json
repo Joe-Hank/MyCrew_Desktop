@@ -1,0 +1,40 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__figma__get_metadata",
+      "Read(//f/ClaudeData/MyCrew_v2/docs/**)",
+      "Bash(grep -oE 'id=\\\\\\\\\"[0-9]+:[0-9]+\\\\\\\\\" name=\\\\\\\\\"\\(主页|任务|团队|设置|backup\\)\\\\\\\\\"' \"C:/Users/26636/.claude/projects/f--ClaudeData-MyCrew-v3/49c0ea81-ee7a-4ec6-ad63-84a0e9a794ed/tool-results/mcp-figma-get_metadata-1778167978483.txt\")",
+      "Bash(find \"F:\\\\ClaudeData\\\\MyCrew_v2\\\\src\\\\crewai_workflow\" -name \"*.py\" -type f | head -50)",
+      "Read(//f/ClaudeData/MyCrew_v2/src/crewai_workflow/**)",
+      "Bash(grep -r \"input\\(\" \"F:\\\\ClaudeData\\\\MyCrew_v2\\\\src\" --include=\"*.py\" | grep -v \".venv\" | head -50)",
+      "Read(//f/ClaudeData/MyCrew_v2/src/**)",
+      "Bash(ls -la \"F:\\\\ClaudeData\\\\MyCrew_v2\\\\desktop\")",
+      "Read(//f/ClaudeData/MyCrew_v2/desktop/**)",
+      "Bash(ls -la \"F:\\\\ClaudeData\\\\MyCrew_v2\\\\output\" | head -20)",
+      "Read(//f/ClaudeData/MyCrew_v2/output/**)",
+      "mcp__notion__notion-search",
+      "mcp__notion__notion-fetch",
+      "mcp__claude_ai_Notion__notion-fetch",
+      "mcp__figma__get_screenshot",
+      "PowerShell(pnpm --version)",
+      "PowerShell(npm --version)",
+      "PowerShell(cargo --version)",
+      "PowerShell(python --version)",
+      "PowerShell(rustc --version)",
+      "PowerShell(where.exe cargo 2>$null; where.exe rustc 2>$null; where.exe rustup 2>$null; where.exe pnpm 2>$null; $env:PATH -split ';' | Where-Object { $_ -match 'cargo|rust|pnpm' })",
+      "PowerShell(Get-ChildItem \"$env:USERPROFILE\\\\.cargo\\\\bin\" -ErrorAction SilentlyContinue | Select-Object Name; Get-Content \"$env:USERPROFILE\\\\.rustup\\\\settings.toml\" -ErrorAction SilentlyContinue)",
+      "PowerShell(Get-ChildItem \"$env:USERPROFILE\\\\.rustup\" -ErrorAction SilentlyContinue | Select-Object Name)",
+      "PowerShell(npm list -g pnpm 2>$null)",
+      "PowerShell(npm list -g --depth=0 2>$null)",
+      "Read(//c//**)",
+      "PowerShell(cmd /c \"`\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\Common7\\\\Tools\\\\VsDevCmd.bat`\" -arch=amd64 >nul 2>&1 && cargo install tauri-cli --version `\"^2`\" 2>&1\" 2>&1)",
+      "PowerShell(cmd /c \"`\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\Common7\\\\Tools\\\\VsDevCmd.bat`\" -arch=amd64 >nul 2>&1 && cd /d f:\\\\ClaudeData\\\\MyCrew_v3\\\\src-tauri && cargo check 2>&1\")",
+      "PowerShell(New-Item -ItemType Directory -Force -Path \"f:\\\\ClaudeData\\\\MyCrew_v3\\\\frontend\\\\dist\")",
+      "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\", \"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\", \"User\"\\); Set-Location \"f:\\\\ClaudeData\\\\MyCrew_v3\\\\src-tauri\"; cargo check 2>&1)",
+      "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\", \"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\", \"User\"\\); Set-Location \"f:\\\\ClaudeData\\\\MyCrew_v3\\\\frontend\"; pnpm add -D typescript-eslint @eslint/js 2>&1)",
+      "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\", \"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\", \"User\"\\); Set-Location \"f:\\\\ClaudeData\\\\MyCrew_v3\\\\frontend\"; pnpm exec tsc --noEmit 2>&1)",
+      "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\", \"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\", \"User\"\\); Set-Location \"f:\\\\ClaudeData\\\\MyCrew_v3\\\\frontend\"; Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue; pnpm build 2>&1)",
+      "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\", \"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\", \"User\"\\); Set-Location \"f:\\\\ClaudeData\\\\MyCrew_v3\\\\frontend\"; pnpm add -D @vitejs/plugin-react@4 2>&1)"
+    ]
+  }
+}
