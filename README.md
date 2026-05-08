@@ -47,8 +47,23 @@ MyCrew_v3/
 - [docs/API.md](./docs/API.md) — REST + WS 契约（Phase 1 起持续更新）
 - [docs/ADR/](./docs/ADR/) — 关键架构决策记录
 
-## 快速开始（待 Phase 0 完成后填）
+## 快速开始
 
+```bash
+# 前置：Node.js 24+, pnpm 11+, Rust 1.95+, Python 3.12+
+
+# 安装前端依赖
+cd frontend && pnpm install && cd ..
+
+# 创建 Python 虚拟环境并安装后端依赖
+cd backend && python -m venv .venv && .venv\Scripts\pip install -e ".[dev]" && cd ..
+
+# 启动开发模式（Tauri 会同时拉起 Vite 和 Rust 窗口）
+cd src-tauri && cargo tauri dev
 ```
-# TODO: 填写 pnpm tauri dev 启动方式
-```
+
+详情参见 [plan.md](./plan.md)。
+
+## License
+
+[MIT](./LICENSE)
