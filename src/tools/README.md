@@ -31,6 +31,7 @@ class MyTool(BaseTool):
 
 | 子目录 | 用途 |
 |---|---|
+| `toolCrafter/` | 创建自定义Tool的模板，开发人员用，与项目无关 |
 | `builtin/` | 项目内置 Tool（与 MCP 服务器配套的手写包装） |
 | 直接放本目录 | 用户/开发者自定义的"业务"Tool |
 

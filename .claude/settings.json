@@ -34,7 +34,24 @@
       "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\", \"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\", \"User\"\\); Set-Location \"f:\\\\ClaudeData\\\\MyCrew_v3\\\\frontend\"; pnpm add -D typescript-eslint @eslint/js 2>&1)",
       "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\", \"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\", \"User\"\\); Set-Location \"f:\\\\ClaudeData\\\\MyCrew_v3\\\\frontend\"; pnpm exec tsc --noEmit 2>&1)",
       "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\", \"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\", \"User\"\\); Set-Location \"f:\\\\ClaudeData\\\\MyCrew_v3\\\\frontend\"; Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue; pnpm build 2>&1)",
-      "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\", \"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\", \"User\"\\); Set-Location \"f:\\\\ClaudeData\\\\MyCrew_v3\\\\frontend\"; pnpm add -D @vitejs/plugin-react@4 2>&1)"
+      "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\", \"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\", \"User\"\\); Set-Location \"f:\\\\ClaudeData\\\\MyCrew_v3\\\\frontend\"; pnpm add -D @vitejs/plugin-react@4 2>&1)",
+      "PowerShell(Set-Location \"f:\\\\ClaudeData\\\\MyCrew_v3\"; git diff --cached --name-only 2>&1 | Where-Object { $_ -match \"\\(\\\\.local\\\\.json|config/unity\\)\" })",
+      "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\", \"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\", \"User\"\\); Set-Location \"f:\\\\ClaudeData\\\\MyCrew_v3\\\\src-tauri\"; cargo tauri dev 2>&1)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git remote *)",
+      "Bash(git branch *)",
+      "Bash(git push *)",
+      "Bash(git fetch *)",
+      "Bash(git pull *)",
+      "PowerShell(cd f:\\\\ClaudeData\\\\MyCrew_v3\\\\backend; Start-Process -FilePath python -ArgumentList \"-m\",\"bootstrap.main\" -NoNewWindow -PassThru -RedirectStandardOutput \"$env:TEMP\\\\mycrew_out.txt\" -RedirectStandardError \"$env:TEMP\\\\mycrew_err.txt\" | ForEach-Object { $_.Id })",
+      "PowerShell(Start-Sleep -Seconds 5; Write-Output \"=== STDOUT ===\"; Get-Content \"$env:TEMP\\\\mycrew_out.txt\" -ErrorAction SilentlyContinue; Write-Output \"=== STDERR ===\"; Get-Content \"$env:TEMP\\\\mycrew_err.txt\" -ErrorAction SilentlyContinue)",
+      "PowerShell(cd f:\\\\ClaudeData\\\\MyCrew_v3\\\\backend; Start-Process -FilePath python -ArgumentList \"-m\",\"bootstrap.main\" -NoNewWindow -PassThru -RedirectStandardOutput \"$env:TEMP\\\\mycrew_out2.txt\" -RedirectStandardError \"$env:TEMP\\\\mycrew_err2.txt\" | ForEach-Object { $_.Id })",
+      "PowerShell(Start-Sleep -Seconds 6; Write-Output \"=== STDOUT ===\"; Get-Content \"$env:TEMP\\\\mycrew_out2.txt\" -ErrorAction SilentlyContinue; Write-Output \"=== STDERR ===\"; Get-Content \"$env:TEMP\\\\mycrew_err2.txt\" -ErrorAction SilentlyContinue)",
+      "PowerShell(cd f:\\\\ClaudeData\\\\MyCrew_v3\\\\backend; Start-Process -FilePath python -ArgumentList \"-m\",\"bootstrap.main\" -NoNewWindow -PassThru -RedirectStandardOutput \"$env:TEMP\\\\mycrew_out4.txt\" -RedirectStandardError \"$env:TEMP\\\\mycrew_err4.txt\" | ForEach-Object { $_.Id })",
+      "PowerShell(Start-Sleep -Seconds 4; Write-Output \"=== STDOUT ===\"; Get-Content \"$env:TEMP\\\\mycrew_out4.txt\" -ErrorAction SilentlyContinue; Write-Output \"=== STDERR ===\"; Get-Content \"$env:TEMP\\\\mycrew_err4.txt\" -ErrorAction SilentlyContinue)",
+      "PowerShell(python -c \"import sqlite3; conn=sqlite3.connect\\(r'f:\\\\ClaudeData\\\\MyCrew_v3\\\\data\\\\db\\\\mycrew.db'\\); tables=[r[0] for r in conn.execute\\('SELECT name FROM sqlite_master WHERE type=''table'' ORDER BY name'\\).fetchall\\(\\)]; print\\(f'Tables \\({len\\(tables\\)}\\):'\\); [print\\(f'  {t}'\\) for t in tables]; perms=conn.execute\\('SELECT id,kind,allowed FROM permissions'\\).fetchall\\(\\); print\\(f'Permissions \\({len\\(perms\\)}\\):'\\); [print\\(f'  {p[0]}: {p[1]}={p[2]}'\\) for p in perms]\")",
+      "PowerShell(Stop-Process -Id 16468 -Force -ErrorAction SilentlyContinue)"
     ]
   }
 }
