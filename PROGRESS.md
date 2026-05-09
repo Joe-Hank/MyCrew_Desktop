@@ -8,10 +8,11 @@
 | 3 | MCP 连接池 + 首批包装 Tool | ✅ committed |
 | 4 | Harness 领域核心（状态机/DAG/事件总线/交互端口） | ✅ committed |
 | 5 | 主页 + 立项全流程（ProjectGrid/InceptionDrawer/会话历史/蓝图编辑） | ✅ committed |
-| 6 | 任务页（DAG 蓝图/ProjectHeader/TaskNode/IO 查看器/Agent 对话） | ✅ **未 commit** |
-| 7 | 团队页（Agent/Crew/Tool 三 Tab + EditorDrawer） | ✅ **未 commit** |
+| 6 | 任务页（DAG 蓝图/ProjectHeader/TaskNode/IO 查看器/Agent 对话） | ✅ committed |
+| 7 | 团队页（Agent/Crew/Tool 三 Tab + EditorDrawer） | ✅ committed |
 | 8 | 设置页完善 + 权限拦截 + 视觉对齐 | ✅ committed |
 | 9 | 打磨与打包（主题/错误边界/PyInstaller/Tauri sidecar） | ✅ committed |
+| 10 | Figma 原型对齐（设置页/团队页/主页 → 药丸Tab+表格+底部状态栏） | ✅ committed |
 
 ## Phase 9 新增/修改文件
 
