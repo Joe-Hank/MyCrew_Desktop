@@ -7,7 +7,7 @@ const navItems = [
   { to: "/settings", label: "设置", icon: "⚙️" },
 ] as const;
 
-function Sidebar() {
+function Sidebar({ connected }: { connected: boolean }) {
   return (
     <aside className="flex w-[200px] flex-col border-r border-zinc-200 bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900">
       <div className="flex h-14 items-center justify-center border-b border-zinc-200 text-lg font-bold dark:border-zinc-800">
@@ -35,7 +35,15 @@ function Sidebar() {
       </nav>
 
       <div className="border-t border-zinc-200 p-3 text-xs text-zinc-500 dark:border-zinc-800">
-        v0.1.0
+        <div className="flex items-center gap-1.5">
+          <span
+            className={`inline-block h-2 w-2 rounded-full ${
+              connected ? "bg-green-500" : "bg-red-500"
+            }`}
+          />
+          <span>{connected ? "已连接" : "未连接"}</span>
+        </div>
+        <div className="mt-1">v0.1.0</div>
       </div>
     </aside>
   );
