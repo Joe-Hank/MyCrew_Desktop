@@ -13,6 +13,8 @@ from domain.harness.task_runner import TaskRunner, TaskOutput
 from domain.qa.dag_validator import validate_dag
 from domain.qa.output_validator import validate_output_schema
 from domain.events import DomainEvent
+from infra.llm.base import LlmMessage
+from infra.llm.gateway import llm_gateway
 from infra.repo import crud
 from infra.event_bus.in_memory_bus import event_bus
 
@@ -198,22 +200,157 @@ class WorkflowService:
 
     async def _run_agent(self, project_id: str, task_id: str,
                           task_input: Any) -> str:
-        # Phase 5+ will wire CrewAI Agent execution here.
-        # For now, return a placeholder indicating the task ran.
-        log.info("workflow.agent_run_placeholder",
+        """Execute a task via its bound Agent's LLM.
+
+        Builds a prompt from the agent's role/goal/backstory + task detail +
+        upstream inputs, then calls the agent's configured LLM.
+        """
+        agent = await crud.get_by_id("agents", task_input.agent_id)
+        if not agent:
+            raise ValueError(f"Agent {task_input.agent_id} not found")
+
+        # Resolve agent's LLM
+        provider_id, model_name = await self._resolve_agent_llm(agent)
+
+        # Build agent system prompt
+        system_prompt = (
+            f"你是一个 AI Agent。\n"
+            f"角色: {agent.get('role', 'Assistant')}\n"
+            f"目标: {agent.get('goal', '完成分配的任务')}\n"
+            f"背景: {agent.get('backstory', '')}\n\n"
+            f"请根据任务要求完成工作，输出详细的结果。"
+        )
+
+        # Build task prompt with upstream context
+        task_prompt = f"## 任务: {task_input.title}\n\n{task_input.detail}\n"
+
+        if task_input.upstream_outputs:
+            task_prompt += "\n## 上游任务输出（供参考）:\n"
+            for upstream_id, output in task_input.upstream_outputs.items():
+                task_prompt += f"\n### 来自任务 {upstream_id}:\n"
+                task_prompt += f"```json\n{json.dumps(output, ensure_ascii=False, indent=2)}\n```\n"
+
+        if task_input.output_schema and task_input.output_schema != {}:
+            task_prompt += (
+                f"\n## 输出要求:\n"
+                f"请确保你的输出能够被提取为以下 JSON Schema 格式:\n"
+                f"```json\n{json.dumps(task_input.output_schema, ensure_ascii=False, indent=2)}\n```\n"
+            )
+
+        messages = [
+            LlmMessage(role="system", content=system_prompt),
+            LlmMessage(role="user", content=task_prompt),
+        ]
+
+        thinking_mode = bool(agent.get("thinking_mode", 0))
+
+        response = await llm_gateway.chat(
+            provider_id, model_name, messages,
+            thinking_mode=thinking_mode,
+        )
+
+        log.info("workflow.agent_executed",
                  project_id=project_id, task_id=task_id,
-                 agent_id=task_input.agent_id)
-        return f"[Agent {task_input.agent_id} output for task {task_id}]"
+                 agent_id=task_input.agent_id,
+                 tokens=response.usage.total_tokens)
+
+        return response.text
 
     async def _extract_structured_output(self, project_id: str, task_id: str,
                                           raw_text: str,
                                           schema: dict) -> dict:
-        # Phase 5+ will call the Task's bound LLM for structured extraction.
-        # For now, attempt to parse raw_text as JSON directly.
+        """Use the task's agent LLM to extract structured output from raw text.
+
+        First tries direct JSON parsing. If that fails, calls LLM with JSON mode
+        to extract structured data matching the schema.
+        """
+        # Try direct JSON parse first
         try:
-            return json.loads(raw_text)
+            parsed = json.loads(raw_text)
+            if isinstance(parsed, dict):
+                return parsed
         except (json.JSONDecodeError, TypeError):
-            return {"_raw": raw_text}
+            pass
+
+        # Try extracting JSON block from markdown
+        import re
+        match = re.search(r"```json\s*\n(.*?)\n```", raw_text, re.DOTALL)
+        if match:
+            try:
+                parsed = json.loads(match.group(1))
+                if isinstance(parsed, dict):
+                    return parsed
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        # Fall back to LLM extraction
+        task = await crud.get_by_id("tasks", task_id)
+        agent_id = task.get("agent_id", "") if task else ""
+        agent = await crud.get_by_id("agents", agent_id) if agent_id else None
+
+        provider_id, model_name = await self._resolve_agent_llm(agent)
+
+        extraction_prompt = (
+            "从以下文本中提取结构化数据，严格按照给定的 JSON Schema 输出纯 JSON（不要包含 markdown 代码块标记）。\n\n"
+            f"## 目标 Schema:\n```json\n{json.dumps(schema, ensure_ascii=False, indent=2)}\n```\n\n"
+            f"## 原始文本:\n{raw_text}\n\n"
+            "请输出纯 JSON:"
+        )
+
+        messages = [
+            LlmMessage(role="system", content="你是一个数据提取助手。只输出纯 JSON，不要任何其他文字。"),
+            LlmMessage(role="user", content=extraction_prompt),
+        ]
+
+        try:
+            response = await llm_gateway.chat(
+                provider_id, model_name, messages,
+                json_mode=True,
+                temperature=0.1,
+            )
+            extracted = json.loads(response.text)
+            if isinstance(extracted, dict):
+                return extracted
+        except (json.JSONDecodeError, TypeError, Exception) as exc:
+            log.warning("workflow.extraction_failed",
+                        task_id=task_id, error=str(exc))
+
+        # Last resort: wrap raw text
+        return {"_raw": raw_text}
+
+    async def _resolve_agent_llm(self, agent: dict | None) -> tuple[str, str]:
+        """Resolve an agent's LLM to (provider_id, model_name).
+
+        Falls back to default_agent_model from app_settings.
+        """
+        if agent and agent.get("llm_id"):
+            llm_id = agent["llm_id"]
+            if ":" in llm_id:
+                parts = llm_id.split(":", 1)
+                return parts[0], parts[1]
+            # Just provider_id
+            models = await crud.get_all("llm_models", "provider_id = ?", (llm_id,))
+            if models:
+                return llm_id, models[0]["model_name"]
+
+        # Fall back to default agent model
+        row = await crud.get_all("app_settings", "key = ?", ("default_agent_model",))
+        if row and row[0].get("value"):
+            val = row[0]["value"]
+            if ":" in val:
+                parts = val.split(":", 1)
+                return parts[0], parts[1]
+
+        # Last fallback: any available provider
+        providers = await crud.get_all("llm_providers")
+        if providers:
+            provider = providers[0]
+            models = await crud.get_all("llm_models",
+                                         "provider_id = ?", (provider["id"],))
+            if models:
+                return provider["id"], models[0]["model_name"]
+
+        raise ValueError("未配置任何 LLM，无法执行 Agent 任务")
 
     # ── Persistence ───────────────────────────────────────
 

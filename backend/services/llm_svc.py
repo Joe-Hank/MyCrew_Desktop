@@ -1,9 +1,11 @@
+"""LLM service — CRUD for providers/models + quota/availability checks."""
 from __future__ import annotations
 
 import json
 
 import structlog
 
+from infra.llm.gateway import llm_gateway
 from infra.repo import crud
 
 log = structlog.get_logger()
@@ -76,7 +78,37 @@ class LlmService:
         log.info("llm.model_deleted", id=model_id)
 
     async def get_quota(self) -> list[dict]:
-        return []
+        """Check availability/quota for all configured providers.
+
+        Returns a list of provider status objects with availability info.
+        Rules from plan §11.2:
+        - Returns percentage → integer percentage
+        - Returns token count → unit M integer
+        - Otherwise → green dot (available) / red dot (unavailable)
+        """
+        providers = await crud.get_all("llm_providers")
+        results = []
+
+        for provider in providers:
+            status = {
+                "provider_id": provider["id"],
+                "name": provider["name"],
+                "type": provider["type"],
+                "available": False,
+                "display": "red",  # red = unavailable, green = available
+            }
+
+            try:
+                available = await llm_gateway.check_availability(provider["id"])
+                status["available"] = available
+                status["display"] = "green" if available else "red"
+            except Exception as exc:
+                log.warning("llm.quota_check_failed",
+                            provider_id=provider["id"], error=str(exc))
+
+            results.append(status)
+
+        return results
 
 
 llm_svc = LlmService()

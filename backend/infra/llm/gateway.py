@@ -1,0 +1,178 @@
+"""LLM Gateway — unified entry point for all LLM calls in the application.
+
+Resolves provider+model from DB config, creates adapter, and provides
+chat/stream/chat_json methods. Caches adapters per (provider_id, model_name).
+"""
+from __future__ import annotations
+
+from typing import AsyncIterator
+
+import structlog
+
+from infra.llm.base import (
+    BaseLLMAdapter,
+    LlmConfig,
+    LlmDelta,
+    LlmMessage,
+    LlmResponse,
+)
+from infra.llm.registry import create_adapter
+from infra.repo import crud
+
+log = structlog.get_logger()
+
+
+class LlmGateway:
+    """Singleton gateway for all LLM interactions.
+
+    Usage:
+        response = await llm_gateway.chat(provider_id, model_name, messages)
+        async for delta in llm_gateway.stream(provider_id, model_name, messages):
+            ...
+    """
+
+    def __init__(self) -> None:
+        self._adapters: dict[str, BaseLLMAdapter] = {}
+
+    async def chat(
+        self,
+        provider_id: str,
+        model_name: str,
+        messages: list[LlmMessage],
+        *,
+        thinking_mode: bool = False,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        json_mode: bool = False,
+    ) -> LlmResponse:
+        """Send a chat completion request."""
+        adapter = await self._get_or_create_adapter(
+            provider_id, model_name, thinking_mode=thinking_mode
+        )
+        kwargs: dict = {}
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+
+        if json_mode:
+            return await adapter.chat_json(messages, **kwargs)
+        return await adapter.chat(messages, **kwargs)
+
+    async def stream(
+        self,
+        provider_id: str,
+        model_name: str,
+        messages: list[LlmMessage],
+        *,
+        thinking_mode: bool = False,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+    ) -> AsyncIterator[LlmDelta]:
+        """Stream a chat completion response."""
+        adapter = await self._get_or_create_adapter(
+            provider_id, model_name, thinking_mode=thinking_mode
+        )
+        kwargs: dict = {}
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+
+        async for delta in adapter.stream(messages, **kwargs):
+            yield delta
+
+    async def check_availability(self, provider_id: str) -> bool:
+        """Check if a provider is reachable (minimal token request)."""
+        try:
+            provider = await crud.get_by_id("llm_providers", provider_id)
+            if not provider:
+                return False
+            models = await crud.get_all("llm_models", "provider_id = ?", (provider_id,))
+            if not models:
+                return False
+
+            model = models[0]
+            config = self._build_config(provider, model, thinking_mode=False)
+            adapter = create_adapter(config)
+
+            # Minimal request to check connectivity
+            response = await adapter.chat(
+                [LlmMessage(role="user", content="hi")],
+                max_tokens=1,
+            )
+            return bool(response.text)
+        except Exception as exc:
+            log.warning("llm.availability_check_failed",
+                        provider_id=provider_id, error=str(exc))
+            return False
+
+    async def shutdown(self) -> None:
+        """Close all cached adapter connections."""
+        for key, adapter in self._adapters.items():
+            try:
+                if hasattr(adapter, "close"):
+                    await adapter.close()
+            except Exception:
+                pass
+        self._adapters.clear()
+
+    # ── Internal ───────────────────────────────────────────
+
+    async def _get_or_create_adapter(
+        self,
+        provider_id: str,
+        model_name: str,
+        *,
+        thinking_mode: bool = False,
+    ) -> BaseLLMAdapter:
+        cache_key = f"{provider_id}:{model_name}:{thinking_mode}"
+
+        if cache_key in self._adapters:
+            return self._adapters[cache_key]
+
+        provider = await crud.get_by_id("llm_providers", provider_id)
+        if not provider:
+            raise ValueError(f"LLM provider {provider_id} not found")
+
+        # Find the model record
+        models = await crud.get_all(
+            "llm_models",
+            "provider_id = ? AND model_name = ?",
+            (provider_id, model_name),
+        )
+        model = models[0] if models else None
+
+        config = self._build_config(provider, model, thinking_mode=thinking_mode)
+        adapter = create_adapter(config)
+        self._adapters[cache_key] = adapter
+
+        log.info("llm.adapter_created",
+                 provider_id=provider_id, model=model_name,
+                 type=config.provider_type)
+        return adapter
+
+    def _build_config(
+        self,
+        provider: dict,
+        model: dict | None,
+        *,
+        thinking_mode: bool = False,
+    ) -> LlmConfig:
+        model_name = model["model_name"] if model else ""
+        max_tokens = model.get("max_tokens", 4096) if model else 4096
+        supports_thinking = bool(model.get("supports_thinking", 0)) if model else False
+
+        return LlmConfig(
+            provider_type=provider["type"],
+            api_key=provider.get("api_key_ref", "") or "",
+            base_url=provider.get("base_url") or None,
+            model_name=model_name,
+            max_tokens=max_tokens if max_tokens else 4096,
+            supports_thinking=supports_thinking,
+            thinking_mode=thinking_mode and supports_thinking,
+        )
+
+
+# Singleton instance
+llm_gateway = LlmGateway()

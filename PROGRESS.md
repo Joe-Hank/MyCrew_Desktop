@@ -13,71 +13,57 @@
 | 8 | 设置页完善 + 权限拦截 + 视觉对齐 | ✅ committed |
 | 9 | 打磨与打包（主题/错误边界/PyInstaller/Tauri sidecar） | ✅ committed |
 | 10 | Figma 原型对齐（设置页/团队页/主页 → 药丸Tab+表格+底部状态栏） | ✅ committed |
+| 11 | LLM Gateway + 真实 LLM 调用接入 | ✅ committed |
 
-## Phase 9 新增/修改文件
+## Phase 11 新增/修改文件
 
-- `frontend/src/stores/useThemeStore.ts` — Zustand 持久化主题 store（light/dark/system 三态循环）
-- `frontend/src/components/layout/ErrorBoundary.tsx` — React 错误边界，带重试按钮
-- `frontend/src/components/layout/AppShell.tsx` — 集成 ErrorBoundary + 主题初始化
-- `frontend/src/components/layout/Sidebar.tsx` — 增加 ThemeToggle 组件
-- `backend/mycrew_backend.spec` — PyInstaller 打包规格（单文件 exe）
-- `src-tauri/tauri.conf.json` — 增加 `externalBin` sidecar 配置
-- `scripts/build.py` — 一键构建脚本（PyInstaller → copy binary → cargo tauri build）
+### 新增
+- `backend/infra/llm/__init__.py` — LLM 基础设施包入口，导出所有类型和 gateway 单例
+- `backend/infra/llm/base.py` — 基础类型（LlmConfig/LlmMessage/LlmResponse/LlmDelta/LlmUsage）+ 抽象基类 BaseLLMAdapter（含重试/超时逻辑）
+- `backend/infra/llm/openai_adapter.py` — OpenAI 兼容适配器（覆盖 OpenAI/DeepSeek/Qwen/Gemini/Ollama/Custom），使用 httpx 直接调用
+- `backend/infra/llm/anthropic_adapter.py` — Anthropic Claude 适配器（支持 extended thinking 模式）
+- `backend/infra/llm/registry.py` — Provider type → Adapter class 注册表
+- `backend/infra/llm/gateway.py` — LlmGateway 单例（统一入口：chat/stream/chat_json/check_availability），按 (provider_id, model_name) 缓存 adapter 实例
 
-## Phase 8 新增/修改文件
+### 修改
+- `backend/services/inception_svc.py` — 替换 mock `_call_llm` 为真实 LLM 调用；新增 `stream_message` 流式方法；新增 `_build_messages`/`_resolve_llm`/`_get_default_inception_llm` 辅助方法；finalize 时自动补 final_qa task
+- `backend/services/workflow_svc.py` — 替换 placeholder `_run_agent` 为真实 Agent LLM 调用（构建 system prompt + task prompt + upstream context）；替换 placeholder `_extract_structured_output` 为三级提取策略（直接 JSON 解析 → markdown JSON 块 → LLM JSON mode 提取）；新增 `_resolve_agent_llm` 方法
+- `backend/services/llm_svc.py` — `get_quota` 方法改为调用 `llm_gateway.check_availability` 做真实探活
 
-### 后端
-- `backend/services/permission_guard.py` — 权限拦截模块：`require_permission(kind)` + `check_tool_permissions(tool_name, args)` 启发式检查
-- `backend/api/routes_mcp.py` — `/internal/call` 端点增加权限检查（调用 `check_tool_permissions`）
-- `backend/api/routes_files.py` — `/files/index` 和 `/files/read` 增加 `file_read` 权限检查
+## 架构要点
 
-### 前端
-- `frontend/src/components/settings/EditorDrawer.tsx` — **新增**：LLM 编辑表单（名称/类型/API Key/Base URL + 内嵌模型列表编辑器）+ MCP 编辑表单（名称/协议/命令/参数/环境变量/超时/启用/自动启动）
-- `frontend/src/components/settings/DefaultLlmSelector.tsx` — **新增**：双默认 LLM 选择器（立项默认 + Agent 默认），存储到 `app_settings`
-- `frontend/src/components/settings/PermissionMatrix.tsx` — 重写：增加图标、描述文字、提示信息、无障碍标签
-- `frontend/src/components/settings/LlmList.tsx` — 重写：显示类型标签、模型数量、Base URL
-- `frontend/src/components/settings/McpList.tsx` — 重写：显示协议标签、启用状态、命令/URL 信息
-- `frontend/src/pages/SettingsPage.tsx` — 重写：集成 EditorDrawer + DefaultLlmSelector + 新建按钮
-- `frontend/src/queries/useLlmQuery.ts` — 增加类型定义（LlmProvider/LlmModel）+ LLM_TYPES 常量 + Model CRUD hooks
-- `frontend/src/components/layout/Sidebar.tsx` — 视觉对齐：活跃态蓝色高亮、rounded-lg、min-width
-- `frontend/src/pages/TeamPage.tsx` — 视觉对齐：统一 Tab 样式（与设置页一致）+ 新建按钮 + 数量徽标
+### LLM 调用链路
+```
+inception_svc / workflow_svc
+    → llm_gateway.chat(provider_id, model_name, messages)
+        → registry.create_adapter(config)
+            → OpenAICompatibleAdapter / AnthropicAdapter
+                → httpx POST to provider API
+```
 
-### 视觉对齐要点
-- 所有页面 Tab 栏统一样式：`border-b-2 border-blue-500` 活跃态 + 数量徽标
-- 列表项统一 hover 效果：`hover:bg-zinc-50 dark:hover:bg-zinc-800/50`
-- 编辑器抽屉统一宽度 `w-[320px]`
-- Sidebar 活跃项改为蓝色系（`bg-blue-50 text-blue-600`）
-- 空状态统一使用 emoji + 提示文案
-- Tauri 窗口已配置 minWidth=960, minHeight=600 保证响应式
+### 支持的 Provider 类型
+| type | 适配器 | 默认 Base URL |
+|------|--------|--------------|
+| openai | OpenAICompatibleAdapter | api.openai.com/v1 |
+| deepseek | OpenAICompatibleAdapter | api.deepseek.com/v1 |
+| qwen | OpenAICompatibleAdapter | dashscope.aliyuncs.com/compatible-mode/v1 |
+| gemini | OpenAICompatibleAdapter | generativelanguage.googleapis.com/v1beta/openai |
+| ollama | OpenAICompatibleAdapter | localhost:11434/v1 |
+| custom | OpenAICompatibleAdapter | 用户自定义 |
+| anthropic | AnthropicAdapter | api.anthropic.com/v1 |
+
+### 结构化输出提取策略（三级）
+1. 直接 `json.loads(raw_text)` — Agent 直接输出 JSON 时命中
+2. 正则提取 ` ```json ... ``` ` 代码块 — Agent 用 markdown 包裹 JSON 时命中
+3. LLM JSON mode 二次调用 — 以上都失败时，用同一 LLM 做结构化提取
 
 ## 当前统计
 - 后端 65+ API routes
 - 前端 tsc 零错误
-- 所有 Phase 0-9 已 commit 并 push 到 `origin/phase-6-7-8` 分支
+- 所有 Phase 0-11 已 commit 并 push 到 `origin/main`
 
-## 所有 Phase 完成 ✅
-
-plan.md 中定义的 Phase 0-9 全部实现完毕。
-
-### 收尾工作（已完成）
-- ✅ 合并 `phase-6-7-8` 分支到 `main`（fast-forward）
-- ✅ 文档补全：`docs/BUILD.md`（构建指南）+ `docs/USER_GUIDE.md`（用户指南）
-- ✅ E2E 测试配置：`frontend/playwright.config.ts` + `frontend/e2e/smoke.spec.ts`（6 个冒烟用例）
-- ✅ package.json 添加 `e2e` / `e2e:install` 脚本
-
-### 待 push（网络恢复后）
-本地 main 有 2 个 commit 待 push：
-- `ddc18b0` docs: add BUILD.md and USER_GUIDE.md
-- `3ae0774` test: add Playwright E2E smoke tests config
-
-### 运行 E2E 测试
-```bash
-cd frontend
-pnpm add -D @playwright/test
-pnpm e2e:install
-pnpm e2e
-```
-
-### 剩余可选工作
-- 实际 PyInstaller 打包验证（需要完整 Python 环境 + 依赖安装）
+## 下一步可选工作
+- 实际 PyInstaller 打包验证
 - cargo tauri build 出安装包
+- 端到端联调测试（启动后端 + 前端，配置 LLM，跑一次完整立项→执行流程）
+- 补充后端单元测试（pytest）
