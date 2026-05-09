@@ -1,4 +1,6 @@
 import { NavLink } from "react-router-dom";
+import { useEffect } from "react";
+import { useThemeStore, applyTheme } from "../../stores/useThemeStore";
 
 const navItems = [
   { to: "/", label: "主页", icon: "🏠" },
@@ -6,6 +8,9 @@ const navItems = [
   { to: "/team", label: "团队", icon: "👥" },
   { to: "/settings", label: "设置", icon: "⚙️" },
 ] as const;
+
+const THEME_ICONS = { light: "☀️", dark: "🌙", system: "💻" } as const;
+const THEME_CYCLE = ["light", "dark", "system"] as const;
 
 function Sidebar({ connected }: { connected: boolean }) {
   return (
@@ -36,9 +41,10 @@ function Sidebar({ connected }: { connected: boolean }) {
         ))}
       </nav>
 
-      {/* Footer */}
+      {/* Theme toggle + Footer */}
       <div className="border-t border-zinc-200 p-3 dark:border-zinc-800">
-        <div className="flex items-center gap-1.5 text-xs text-zinc-500">
+        <ThemeToggle />
+        <div className="mt-2 flex items-center gap-1.5 text-xs text-zinc-500">
           <span
             className={`inline-block h-2 w-2 rounded-full ${
               connected ? "bg-green-500" : "bg-red-500"
@@ -49,6 +55,40 @@ function Sidebar({ connected }: { connected: boolean }) {
         <div className="mt-1 text-[10px] text-zinc-400">v0.1.0</div>
       </div>
     </aside>
+  );
+}
+
+function ThemeToggle() {
+  const { theme, setTheme } = useThemeStore();
+
+  useEffect(() => {
+    applyTheme(theme);
+  }, [theme]);
+
+  // Listen for system preference changes
+  useEffect(() => {
+    if (theme !== "system") return;
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const handler = () => applyTheme("system");
+    mq.addEventListener("change", handler);
+    return () => mq.removeEventListener("change", handler);
+  }, [theme]);
+
+  function cycle() {
+    const idx = THEME_CYCLE.indexOf(theme);
+    const next = THEME_CYCLE[(idx + 1) % THEME_CYCLE.length] as typeof theme;
+    setTheme(next);
+  }
+
+  return (
+    <button
+      onClick={cycle}
+      className="flex items-center gap-1.5 rounded px-2 py-1 text-xs text-zinc-500 transition-colors hover:bg-zinc-200 dark:hover:bg-zinc-800"
+      title={`主题: ${theme}`}
+    >
+      <span>{THEME_ICONS[theme]}</span>
+      <span className="capitalize">{theme === "system" ? "跟随系统" : theme === "dark" ? "深色" : "浅色"}</span>
+    </button>
   );
 }
 

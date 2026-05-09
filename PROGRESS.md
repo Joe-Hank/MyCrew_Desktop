@@ -10,7 +10,18 @@
 | 5 | 主页 + 立项全流程（ProjectGrid/InceptionDrawer/会话历史/蓝图编辑） | ✅ committed |
 | 6 | 任务页（DAG 蓝图/ProjectHeader/TaskNode/IO 查看器/Agent 对话） | ✅ **未 commit** |
 | 7 | 团队页（Agent/Crew/Tool 三 Tab + EditorDrawer） | ✅ **未 commit** |
-| 8 | 设置页完善 + 权限拦截 + 视觉对齐 | ✅ **未 commit** |
+| 8 | 设置页完善 + 权限拦截 + 视觉对齐 | ✅ committed |
+| 9 | 打磨与打包（主题/错误边界/PyInstaller/Tauri sidecar） | ✅ committed |
+
+## Phase 9 新增/修改文件
+
+- `frontend/src/stores/useThemeStore.ts` — Zustand 持久化主题 store（light/dark/system 三态循环）
+- `frontend/src/components/layout/ErrorBoundary.tsx` — React 错误边界，带重试按钮
+- `frontend/src/components/layout/AppShell.tsx` — 集成 ErrorBoundary + 主题初始化
+- `frontend/src/components/layout/Sidebar.tsx` — 增加 ThemeToggle 组件
+- `backend/mycrew_backend.spec` — PyInstaller 打包规格（单文件 exe）
+- `src-tauri/tauri.conf.json` — 增加 `externalBin` sidecar 配置
+- `scripts/build.py` — 一键构建脚本（PyInstaller → copy binary → cargo tauri build）
 
 ## Phase 8 新增/修改文件
 
@@ -41,15 +52,13 @@
 ## 当前统计
 - 后端 65+ API routes
 - 前端 tsc 零错误
-- Phase 6-8 代码尚未 git commit
+- 所有 Phase 0-9 已 commit 并 push 到 `origin/phase-6-7-8` 分支
 
-## 下一步：Phase 9
+## 所有 Phase 完成 ✅
 
-**Phase 9 — 打磨与打包**
-- 主题切换、版本号、空状态、loading、错误兜底
-- PyInstaller 后端打包
-- Tauri build 前端+后端集成
-- 自动更新 + 安装流程
-
-### 注意事项
-- 所有 Phase 6-8 变更需要先 commit 再开始 Phase 9
+plan.md 中定义的 Phase 0-9 全部实现完毕。后续可选工作：
+- E2E 测试（Playwright 冒烟）
+- 文档补全（API.md / USER_GUIDE.md / BUILD.md）
+- 实际 PyInstaller 打包验证（需要完整 Python 环境 + 依赖安装）
+- cargo tauri build 出安装包
+- 合并 `phase-6-7-8` 分支到 `main`
