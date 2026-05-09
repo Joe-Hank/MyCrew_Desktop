@@ -2,103 +2,111 @@ import { useState } from "react";
 import { useLlmProviders, type LlmProvider } from "../queries/useLlmQuery";
 import { useMcpServers } from "../queries/useMcpQuery";
 import { usePermissions } from "../queries/useConfigQuery";
-import LlmList from "../components/settings/LlmList";
-import McpList from "../components/settings/McpList";
-import PermissionMatrix from "../components/settings/PermissionMatrix";
-import EditorDrawer, { type SettingsEditorTarget } from "../components/settings/EditorDrawer";
-import DefaultLlmSelector from "../components/settings/DefaultLlmSelector";
+import LlmTable from "../components/settings/LlmTable";
+import McpTable from "../components/settings/McpTable";
+import PermissionTable from "../components/settings/PermissionTable";
+import LlmEditOverlay from "../components/settings/LlmEditOverlay";
+import McpEditOverlay from "../components/settings/McpEditOverlay";
 
 type Tab = "llm" | "mcp" | "permission";
 
+export type EditTarget =
+  | { kind: "llm"; data: LlmProvider | null }
+  | { kind: "mcp"; data: Record<string, unknown> | null }
+  | null;
+
 function SettingsPage() {
   const [activeTab, setActiveTab] = useState<Tab>("llm");
-  const [editor, setEditor] = useState<SettingsEditorTarget | null>(null);
+  const [editTarget, setEditTarget] = useState<EditTarget>(null);
 
   const { data: providers = [] } = useLlmProviders();
   const { data: servers = [] } = useMcpServers();
-  const { data: permissions = [] } = usePermissions();
+  usePermissions(); // prefetch for PermissionTable
 
   const tabs: { key: Tab; label: string; count: number }[] = [
     { key: "llm", label: "LLM", count: (providers as unknown[]).length },
     { key: "mcp", label: "MCP", count: (servers as unknown[]).length },
-    { key: "permission", label: "系统权限", count: (permissions as unknown[]).length },
+    { key: "permission", label: "系统权限", count: 0 },
   ];
 
-  function handleSelectLlm(id: string) {
-    const provider = (providers as LlmProvider[]).find((p) => p.id === id);
-    setEditor({ kind: "llm", data: provider ?? null });
+  function handleNewLlm() {
+    setEditTarget({ kind: "llm", data: null });
   }
 
-  function handleSelectMcp(id: string) {
-    const server = (servers as Record<string, unknown>[]).find(
-      (s) => (s.id as string) === id
-    );
-    setEditor({ kind: "mcp", data: server ?? null });
+  function handleEditLlm(provider: LlmProvider) {
+    setEditTarget({ kind: "llm", data: provider });
   }
 
-  function handleNew() {
-    if (activeTab === "llm") {
-      setEditor({ kind: "llm", data: null });
-    } else if (activeTab === "mcp") {
-      setEditor({ kind: "mcp", data: null });
-    }
+  function handleNewMcp() {
+    setEditTarget({ kind: "mcp", data: null });
+  }
+
+  function handleEditMcp(server: Record<string, unknown>) {
+    setEditTarget({ kind: "mcp", data: server });
   }
 
   return (
-    <div className="flex h-full flex-col">
-      {/* Tab bar + new button */}
-      <div className="flex items-center justify-between border-b border-zinc-200 px-4 dark:border-zinc-800">
-        <div className="flex items-center gap-1">
+    <div className="relative flex h-full flex-col">
+      {/* Tab bar */}
+      <div className="flex items-center justify-between px-6 pt-4">
+        {/* Pill tabs */}
+        <div className="flex items-center rounded-2xl bg-zinc-200/60 p-1 dark:bg-zinc-800/60">
           {tabs.map((tab) => (
             <button
               key={tab.key}
               onClick={() => {
                 setActiveTab(tab.key);
-                setEditor(null);
+                setEditTarget(null);
               }}
-              className={`flex items-center gap-1.5 px-4 py-3 text-sm font-medium transition-colors ${
+              className={`rounded-xl px-4 py-2 text-sm font-semibold transition-all ${
                 activeTab === tab.key
-                  ? "border-b-2 border-blue-500 text-blue-600 dark:text-blue-400"
+                  ? "bg-white text-blue-600 shadow dark:bg-zinc-900 dark:text-blue-400"
                   : "text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200"
               }`}
             >
               {tab.label}
-              <span className="rounded-full bg-zinc-200 px-1.5 py-0.5 text-xs dark:bg-zinc-700">
-                {tab.count}
-              </span>
+              {tab.count > 0 && `（${tab.count}）`}
             </button>
           ))}
         </div>
 
+        {/* Action button */}
         {activeTab !== "permission" && (
           <button
-            onClick={handleNew}
-            className="rounded bg-blue-500 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-blue-600"
+            onClick={activeTab === "llm" ? handleNewLlm : handleNewMcp}
+            className="rounded-2xl bg-blue-500 px-5 py-2.5 text-sm font-medium text-white shadow transition-colors hover:bg-blue-600"
           >
-            + 新建
+            {activeTab === "llm" ? "LLM配置  +" : "MCP配置  +"}
           </button>
         )}
       </div>
 
-      {/* Default LLM selectors (only on LLM tab) */}
-      {activeTab === "llm" && (
-        <DefaultLlmSelector providers={providers as LlmProvider[]} />
-      )}
-
-      {/* Content area */}
-      <div className="flex flex-1 overflow-hidden">
-        <div className={`flex-1 overflow-auto ${editor ? "border-r border-zinc-200 dark:border-zinc-700" : ""}`}>
-          {activeTab === "llm" && <LlmList onSelect={handleSelectLlm} />}
-          {activeTab === "mcp" && <McpList onSelect={handleSelectMcp} />}
-          {activeTab === "permission" && <PermissionMatrix />}
-        </div>
-
-        {editor && (
-          <div className="w-[320px] shrink-0">
-            <EditorDrawer target={editor} onClose={() => setEditor(null)} />
-          </div>
+      {/* Table content */}
+      <div className="flex-1 overflow-auto px-6 pt-4">
+        {activeTab === "llm" && (
+          <LlmTable onEdit={handleEditLlm} />
+        )}
+        {activeTab === "mcp" && (
+          <McpTable onEdit={handleEditMcp} />
+        )}
+        {activeTab === "permission" && (
+          <PermissionTable />
         )}
       </div>
+
+      {/* Edit overlay */}
+      {editTarget?.kind === "llm" && (
+        <LlmEditOverlay
+          data={editTarget.data}
+          onClose={() => setEditTarget(null)}
+        />
+      )}
+      {editTarget?.kind === "mcp" && (
+        <McpEditOverlay
+          data={editTarget.data}
+          onClose={() => setEditTarget(null)}
+        />
+      )}
     </div>
   );
 }
