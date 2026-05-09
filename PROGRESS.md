@@ -57,9 +57,27 @@
 
 ## 所有 Phase 完成 ✅
 
-plan.md 中定义的 Phase 0-9 全部实现完毕。后续可选工作：
-- E2E 测试（Playwright 冒烟）
-- 文档补全（API.md / USER_GUIDE.md / BUILD.md）
+plan.md 中定义的 Phase 0-9 全部实现完毕。
+
+### 收尾工作（已完成）
+- ✅ 合并 `phase-6-7-8` 分支到 `main`（fast-forward）
+- ✅ 文档补全：`docs/BUILD.md`（构建指南）+ `docs/USER_GUIDE.md`（用户指南）
+- ✅ E2E 测试配置：`frontend/playwright.config.ts` + `frontend/e2e/smoke.spec.ts`（6 个冒烟用例）
+- ✅ package.json 添加 `e2e` / `e2e:install` 脚本
+
+### 待 push（网络恢复后）
+本地 main 有 2 个 commit 待 push：
+- `ddc18b0` docs: add BUILD.md and USER_GUIDE.md
+- `3ae0774` test: add Playwright E2E smoke tests config
+
+### 运行 E2E 测试
+```bash
+cd frontend
+pnpm add -D @playwright/test
+pnpm e2e:install
+pnpm e2e
+```
+
+### 剩余可选工作
 - 实际 PyInstaller 打包验证（需要完整 Python 环境 + 依赖安装）
 - cargo tauri build 出安装包
-- 合并 `phase-6-7-8` 分支到 `main`
