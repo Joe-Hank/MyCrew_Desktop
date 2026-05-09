@@ -51,7 +51,12 @@
       "PowerShell(cd f:\\\\ClaudeData\\\\MyCrew_v3\\\\backend; Start-Process -FilePath python -ArgumentList \"-m\",\"bootstrap.main\" -NoNewWindow -PassThru -RedirectStandardOutput \"$env:TEMP\\\\mycrew_out4.txt\" -RedirectStandardError \"$env:TEMP\\\\mycrew_err4.txt\" | ForEach-Object { $_.Id })",
       "PowerShell(Start-Sleep -Seconds 4; Write-Output \"=== STDOUT ===\"; Get-Content \"$env:TEMP\\\\mycrew_out4.txt\" -ErrorAction SilentlyContinue; Write-Output \"=== STDERR ===\"; Get-Content \"$env:TEMP\\\\mycrew_err4.txt\" -ErrorAction SilentlyContinue)",
       "PowerShell(python -c \"import sqlite3; conn=sqlite3.connect\\(r'f:\\\\ClaudeData\\\\MyCrew_v3\\\\data\\\\db\\\\mycrew.db'\\); tables=[r[0] for r in conn.execute\\('SELECT name FROM sqlite_master WHERE type=''table'' ORDER BY name'\\).fetchall\\(\\)]; print\\(f'Tables \\({len\\(tables\\)}\\):'\\); [print\\(f'  {t}'\\) for t in tables]; perms=conn.execute\\('SELECT id,kind,allowed FROM permissions'\\).fetchall\\(\\); print\\(f'Permissions \\({len\\(perms\\)}\\):'\\); [print\\(f'  {p[0]}: {p[1]}={p[2]}'\\) for p in perms]\")",
-      "PowerShell(Stop-Process -Id 16468 -Force -ErrorAction SilentlyContinue)"
+      "PowerShell(Stop-Process -Id 16468 -Force -ErrorAction SilentlyContinue)",
+      "PowerShell(Set-Location \"f:\\\\ClaudeData\\\\MyCrew_v3\\\\backend\"; $env:PYTHONPATH = \".\"; & python tests/test_harness.py)",
+      "PowerShell(Set-Location \"f:\\\\ClaudeData\\\\MyCrew_v3\\\\backend\"; $env:PYTHONPATH = \".\"; & python -c \"from bootstrap.app import create_app; app = create_app\\(\\); print\\(f'routes: {len\\(app.routes\\)}'\\); print\\('OK'\\)\")",
+      "Bash(Test-Path \"f:\\\\ClaudeData\\\\MyCrew_v3\\\\frontend\\\\src\\\\components\\\\task\")",
+      "Bash(awk '/### Phase 7/,/### Phase 8/ {print NR\": \"$0}' /f/ClaudeData/MyCrew_v3/plan.md)",
+      "Bash(awk '/### 11.6 MCP/,/### 12/ {print NR\": \"$0}' /f/ClaudeData/MyCrew_v3/plan.md)"
     ]
   }
 }
