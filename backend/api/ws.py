@@ -65,8 +65,11 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 continue
             msg_type = msg.get("type", "")
             if msg_type == "prompt.response":
-                log.info("ws.prompt_response", request_id=msg.get("payload", {}).get("request_id"))
-                # TODO Phase 4: route to InteractionPort future resolution
+                payload = msg.get("payload", {})
+                request_id = payload.get("request_id", "")
+                log.info("ws.prompt_response", request_id=request_id)
+                from infra.interaction.ws_interaction import ws_interaction
+                ws_interaction.resolve(request_id, payload)
             elif msg_type == "ping":
                 await ws.send_text(json.dumps({
                     "type": "pong",

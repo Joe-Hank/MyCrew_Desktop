@@ -17,9 +17,19 @@ async def health_check():
 
 @router.get("/lifecycle/state")
 async def lifecycle_state():
+    from services.workflow_svc import workflow_svc
+    from services.mcp_svc import mcp_svc
+
+    active = workflow_svc.get_active_projects()
+    status = await mcp_svc.get_status_summary()
     return {
         "ok": True,
-        "data": {"running_projects": 0, "active_tasks": 0, "mcp_count": 0},
+        "data": {
+            "running_projects": len(active),
+            "active_tasks": 0,
+            "mcp_online": status.get("online", 0),
+            "mcp_total": status.get("total", 0),
+        },
     }
 
 

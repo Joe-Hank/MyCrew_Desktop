@@ -120,6 +120,14 @@ class ToolCreate(BaseModel):
     source: str = "user"
 
 
+# --- MCP Tool Call ---
+
+class McpToolCall(BaseModel):
+    server_id: str
+    tool_name: str
+    arguments: dict = Field(default_factory=dict)
+
+
 # --- Config ---
 
 class ConfigUpdate(BaseModel):

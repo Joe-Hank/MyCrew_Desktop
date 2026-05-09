@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import structlog
 
 from infra.repo import crud
+from infra.mcp.pool import mcp_pool
 
 log = structlog.get_logger()
 
@@ -12,13 +14,25 @@ JSON_FIELDS = ["args", "env_ref", "discovered_tools"]
 
 
 class McpService:
+    def __init__(self) -> None:
+        self._pool = mcp_pool
+
+    # ── CRUD ──────────────────────────────────────────────
+
     async def list_servers(self) -> list[dict]:
         rows = await crud.get_all("mcp_servers")
-        return [self._deserialize(r) for r in rows]
+        result = [self._deserialize(r) for r in rows]
+        for server in result:
+            server["runtime_status"] = self._pool.get_connection_status(server["id"])
+        return result
 
     async def get_server(self, server_id: str) -> dict | None:
         row = await crud.get_by_id("mcp_servers", server_id)
-        return self._deserialize(row) if row else None
+        if not row:
+            return None
+        result = self._deserialize(row)
+        result["runtime_status"] = self._pool.get_connection_status(server_id)
+        return result
 
     async def create_server(self, data: dict) -> dict:
         row = await crud.insert("mcp_servers", self._serialize({
@@ -47,19 +61,64 @@ class McpService:
         return self._deserialize(result) if result else None
 
     async def delete_server(self, server_id: str) -> None:
+        await self._pool.remove_server(server_id)
         await crud.delete_by_id("mcp_servers", server_id)
         log.info("mcp.server_deleted", id=server_id)
 
+    # ── Pool operations ───────────────────────────────────
+
+    async def connect_server(self, server_id: str) -> dict:
+        server = await self.get_server(server_id)
+        if not server:
+            raise KeyError(f"Server {server_id} not found")
+        return await self._pool.connect_server(server_id, server)
+
+    async def disconnect_server(self, server_id: str) -> None:
+        await self._pool.disconnect_server(server_id)
+
+    async def restart_server(self, server_id: str) -> dict:
+        server = await self.get_server(server_id)
+        if not server:
+            raise KeyError(f"Server {server_id} not found")
+        if self._pool.get_connection_status(server_id) == "disconnected":
+            return await self._pool.connect_server(server_id, server)
+        return await self._pool.restart_server(server_id)
+
+    async def call_tool(self, server_id: str, tool_name: str,
+                        arguments: dict[str, Any]) -> str:
+        return await self._pool.call(server_id, tool_name, arguments)
+
     async def refresh_all(self) -> dict:
-        return {"refreshed": 0}
+        servers = await self.list_servers()
+        return await self._pool.refresh_all(servers)
+
+    async def start_pool(self) -> None:
+        servers = await self.list_servers()
+        self._pool.set_tools_sync(self._sync_tools_to_db)
+        await self._pool.start(servers)
 
     async def shutdown_all(self) -> None:
-        pass
+        await self._pool.stop()
 
     async def get_status_summary(self) -> dict:
         total = await crud.count("mcp_servers")
         enabled = await crud.count("mcp_servers", "enabled = 1")
-        return {"total": total, "online": 0, "offline": enabled}
+        pool_status = self._pool.get_status_summary()
+        return {
+            "total": total,
+            "enabled": enabled,
+            "online": pool_status["online"],
+            "offline": pool_status["offline"],
+            "servers": pool_status["servers"],
+        }
+
+    # ── Internal helpers ──────────────────────────────────
+
+    async def _sync_tools_to_db(self, server_id: str, tools: list[dict]) -> None:
+        await crud.update_by_id("mcp_servers", server_id, {
+            "discovered_tools": json.dumps(tools),
+        })
+        log.info("mcp.tools_synced", server_id=server_id, count=len(tools))
 
     def _serialize(self, data: dict) -> dict:
         out = dict(data)
