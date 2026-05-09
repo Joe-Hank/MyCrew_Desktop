@@ -50,6 +50,23 @@ async def send_message(session_id: str, body: SendMessage):
         return {"ok": True, "data": data}
     except KeyError:
         raise HTTPException(404, detail="session not found")
+    except ValueError as exc:
+        return {"ok": False, "error": {"code": "llm_error", "message": str(exc)}}
+
+
+@router.post("/sessions/{session_id}/messages/stream")
+async def stream_message(session_id: str, body: SendMessage):
+    """Send message and stream LLM response via WS (inception.delta events).
+
+    Returns the final result after streaming completes.
+    """
+    try:
+        data = await inception_svc.stream_message(session_id, body.content)
+        return {"ok": True, "data": data}
+    except KeyError:
+        raise HTTPException(404, detail="session not found")
+    except ValueError as exc:
+        return {"ok": False, "error": {"code": "llm_error", "message": str(exc)}}
 
 
 @router.post("/sessions/{session_id}/index")
