@@ -37,10 +37,10 @@ PROJECT_TRANSITIONS: dict[ProjectState, set[ProjectState]] = {
 }
 
 TASK_TRANSITIONS: dict[TaskState, set[TaskState]] = {
-    TaskState.PENDING: {TaskState.RUNNING, TaskState.BLOCKED, TaskState.ABORTED},
+    TaskState.PENDING: {TaskState.RUNNING, TaskState.PAUSED, TaskState.BLOCKED, TaskState.ABORTED},
     TaskState.RUNNING: {TaskState.DONE, TaskState.FAILED, TaskState.PAUSED,
                         TaskState.VALIDATION_FAILED, TaskState.ABORTED},
-    TaskState.PAUSED: {TaskState.RUNNING, TaskState.ABORTED},
+    TaskState.PAUSED: {TaskState.PENDING, TaskState.RUNNING, TaskState.ABORTED},
     TaskState.DONE: set(),
     TaskState.FAILED: {TaskState.RUNNING, TaskState.ABORTED},
     TaskState.ABORTED: set(),

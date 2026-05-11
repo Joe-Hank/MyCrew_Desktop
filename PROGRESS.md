@@ -1,4 +1,4 @@
-# MyCrew v3 实施进度 — 2026-05-09
+# MyCrew v3 实施进度 — 2026-05-11
 
 ## 已完成 Phase
 
@@ -13,78 +13,61 @@
 | 8 | 设置页完善 + 权限拦截 + 视觉对齐 | ✅ committed |
 | 9 | 打磨与打包（主题/错误边界/PyInstaller/Tauri sidecar） | ✅ committed |
 | 10 | Figma 原型对齐（设置页/团队页/主页 → 药丸Tab+表格+底部状态栏） | ✅ committed |
+| 11 | LLM Gateway + Lifecycle API（OpenAI/Anthropic adapter, SSE streaming） | ✅ committed |
+| 12 | Port 层补全 + 状态机 bug 修复 + 测试覆盖增强 | ✅ committed |
 
-## Phase 9 新增/修改文件
+## Phase 12 — Port 层补全 + 测试覆盖增强（2026-05-11）
 
-- `frontend/src/stores/useThemeStore.ts` — Zustand 持久化主题 store（light/dark/system 三态循环）
-- `frontend/src/components/layout/ErrorBoundary.tsx` — React 错误边界，带重试按钮
-- `frontend/src/components/layout/AppShell.tsx` — 集成 ErrorBoundary + 主题初始化
-- `frontend/src/components/layout/Sidebar.tsx` — 增加 ThemeToggle 组件
-- `backend/mycrew_backend.spec` — PyInstaller 打包规格（单文件 exe）
-- `src-tauri/tauri.conf.json` — 增加 `externalBin` sidecar 配置
-- `scripts/build.py` — 一键构建脚本（PyInstaller → copy binary → cargo tauri build）
+### 完成内容
 
-## Phase 8 新增/修改文件
+| 模块 | 说明 | 状态 |
+|------|------|------|
+| LlmPort | `backend/ports/llm_port.py` — LLM 抽象接口 Protocol | ✅ |
+| RepoPort | `backend/ports/repo_port.py` — 数据持久化抽象接口 Protocol | ✅ |
+| ports/__init__.py | 统一导出所有 Port（EventBus/Interaction/LLM/MCP/Repo） | ✅ |
+| 状态机 bug 修复 | `PENDING→PAUSED` 和 `PAUSED→PENDING` 转换缺失，已补全 | ✅ |
+| Port 测试 | `test_ports.py` — 6 个测试验证 Port 导入与数据类 | ✅ |
+| 工作流逻辑测试 | `test_workflow_logic.py` — 19 个测试覆盖状态机/DAG/输出校验 | ✅ |
+| E2E 测试恢复 | `frontend/e2e/smoke.spec.ts` 重建（6 个冒烟测试） | ✅ |
 
-### 后端
-- `backend/services/permission_guard.py` — 权限拦截模块：`require_permission(kind)` + `check_tool_permissions(tool_name, args)` 启发式检查
-- `backend/api/routes_mcp.py` — `/internal/call` 端点增加权限检查（调用 `check_tool_permissions`）
-- `backend/api/routes_files.py` — `/files/index` 和 `/files/read` 增加 `file_read` 权限检查
+### 新增/修改文件
 
-### 前端
-- `frontend/src/components/settings/EditorDrawer.tsx` — **新增**：LLM 编辑表单（名称/类型/API Key/Base URL + 内嵌模型列表编辑器）+ MCP 编辑表单（名称/协议/命令/参数/环境变量/超时/启用/自动启动）
-- `frontend/src/components/settings/DefaultLlmSelector.tsx` — **新增**：双默认 LLM 选择器（立项默认 + Agent 默认），存储到 `app_settings`
-- `frontend/src/components/settings/PermissionMatrix.tsx` — 重写：增加图标、描述文字、提示信息、无障碍标签
-- `frontend/src/components/settings/LlmList.tsx` — 重写：显示类型标签、模型数量、Base URL
-- `frontend/src/components/settings/McpList.tsx` — 重写：显示协议标签、启用状态、命令/URL 信息
-- `frontend/src/pages/SettingsPage.tsx` — 重写：集成 EditorDrawer + DefaultLlmSelector + 新建按钮
-- `frontend/src/queries/useLlmQuery.ts` — 增加类型定义（LlmProvider/LlmModel）+ LLM_TYPES 常量 + Model CRUD hooks
-- `frontend/src/components/layout/Sidebar.tsx` — 视觉对齐：活跃态蓝色高亮、rounded-lg、min-width
-- `frontend/src/pages/TeamPage.tsx` — 视觉对齐：统一 Tab 样式（与设置页一致）+ 新建按钮 + 数量徽标
+#### 后端 — Port 层
+- `backend/ports/llm_port.py` — **新增**：LlmPort Protocol + LlmMessage/LlmUsage/LlmResponse 数据类
+- `backend/ports/repo_port.py` — **新增**：RepoPort Protocol（CRUD + paginate 抽象）
+- `backend/ports/__init__.py` — **重写**：统一导出所有 5 个 Port 接口
 
-### 视觉对齐要点
-- 所有页面 Tab 栏统一样式：`border-b-2 border-blue-500` 活跃态 + 数量徽标
-- 列表项统一 hover 效果：`hover:bg-zinc-50 dark:hover:bg-zinc-800/50`
-- 编辑器抽屉统一宽度 `w-[320px]`
-- Sidebar 活跃项改为蓝色系（`bg-blue-50 text-blue-600`）
-- 空状态统一使用 emoji + 提示文案
-- Tauri 窗口已配置 minWidth=960, minHeight=600 保证响应式
+#### 后端 — Bug 修复
+- `backend/domain/harness/states.py` — **修复**：
+  - `TASK_TRANSITIONS[PENDING]` 增加 `PAUSED`（暂停时截断后续链）
+  - `TASK_TRANSITIONS[PAUSED]` 增加 `PENDING`（恢复时恢复等待态）
 
-## 当前统计
-- 后端 65+ API routes
+#### 后端 — 测试
+- `backend/tests/test_ports.py` — **新增**：6 个 Port 接口测试
+- `backend/tests/test_workflow_logic.py` — **新增**：19 个领域逻辑测试
+  - 5 个项目状态机测试（start/pause/resume/abort/invalid transition）
+  - 6 个任务状态转换测试（线性完成/并行 fork-join/失败阻塞/验证失败/重试/进度追踪）
+  - 4 个 DAG 验证测试（合法线性/合法并行/环路检测/引用完整性）
+  - 4 个输出 schema 校验测试（合法/缺必填/空 schema/类型不匹配）
+
+#### 前端 — E2E
+- `frontend/e2e/smoke.spec.ts` — **恢复**：6 个 Playwright 冒烟测试
+
+### 验证结果
+- ✅ pytest **36/36 passed**（从 11 增长到 36）
+- ✅ 前端 tsc 零错误
+- ✅ Port 层完整覆盖 plan §2.2 定义的 5 个接口
+
+### 当前统计
+- 后端 **75 API routes**
+- 后端 **36 个测试**（11→36，+227% 增长）
+- Port 层：5 个 Protocol 接口完整（EventBus/Interaction/LLM/MCP/Repo）
+- LLM 支持：OpenAI + Anthropic 双 adapter
 - 前端 tsc 零错误
-- 所有 Phase 0-9 已 commit 并 push 到 `origin/phase-6-7-8` 分支
-
-## 所有 Phase 完成 ✅
-
-plan.md 中定义的 Phase 0-9 全部实现完毕。
-
-### 收尾工作（已完成）
-- ✅ 合并 `phase-6-7-8` 分支到 `main`（fast-forward）
-- ✅ 文档补全：`docs/BUILD.md`（构建指南）+ `docs/USER_GUIDE.md`（用户指南）
-- ✅ E2E 测试配置：`frontend/playwright.config.ts` + `frontend/e2e/smoke.spec.ts`（6 个冒烟用例）
-- ✅ package.json 添加 `e2e` / `e2e:install` 脚本
-
-### 待 push（网络恢复后）
-本地 main 有 2 个 commit 待 push：
-- `ddc18b0` docs: add BUILD.md and USER_GUIDE.md
-- `3ae0774` test: add Playwright E2E smoke tests config
-
-### 运行 E2E 测试
-```bash
-cd frontend
-pnpm add -D @playwright/test
-pnpm e2e:install
-pnpm e2e
-```
-
-### 剩余可选工作
-- 实际 PyInstaller 打包验证（需要完整 Python 环境 + 依赖安装）
-- cargo tauri build 出安装包
 
 ---
 
-## Phase 11 — LLM Gateway + Lifecycle API（2026-05-10，Claude Sonnet 4）
+## Phase 11 — LLM Gateway + Lifecycle API（2026-05-10）
 
 ### 完成内容
 
@@ -99,47 +82,16 @@ pnpm e2e
 | PyInstaller Spec 修复 | 入口点改为 `bootstrap/main.py`，补全 hidden imports | ✅ |
 | App 创建验证 | `backend/tests/test_app_create.py` — 75 routes, 5 critical endpoints OK | ✅ |
 
-### 新增/修改文件
+## Phase 9-10 记录
 
-#### 后端 — LLM 基础设施
-- `backend/infra/llm/__init__.py` — 包导出
-- `backend/infra/llm/base.py` — `LlmAdapter` 抽象基类（chat/stream_chat/extract_json）
-- `backend/infra/llm/openai_adapter.py` — OpenAI/兼容 API 适配器（httpx 异步）
-- `backend/infra/llm/anthropic_adapter.py` — Anthropic Claude 适配器
-- `backend/infra/llm/registry.py` — 适配器注册表（按 provider_id 管理实例）
-- `backend/infra/llm/gateway.py` — 统一网关（自动路由到正确 adapter）
+- `frontend/src/stores/useThemeStore.ts` — Zustand 持久化主题 store（light/dark/system 三态循环）
+- `frontend/src/components/layout/ErrorBoundary.tsx` — React 错误边界，带重试按钮
+- `frontend/src/components/layout/AppShell.tsx` — 集成 ErrorBoundary + 主题初始化
+- `backend/mycrew_backend.spec` — PyInstaller 打包规格（单文件 exe）
+- `src-tauri/tauri.conf.json` — 增加 `externalBin` sidecar 配置
+- `scripts/build.py` — 一键构建脚本（PyInstaller → copy binary → cargo tauri build）
 
-#### 后端 — 服务层
-- `backend/services/llm_svc.py` — LLM 服务封装（chat/stream/extract）
-- `backend/services/inception_svc.py` — 重写：接入 llm_svc 真实调用
-- `backend/services/workflow_svc.py` — 重写：结构化输出提取 + jsonschema 校验
-
-#### 后端 — API
-- `backend/api/routes_lifecycle.py` — Lifecycle 端点（GET state / POST pause-all / POST shutdown / POST recover）
-- `backend/api/routes_inception.py` — 增加 `/sessions/{id}/messages/stream` SSE 端点
-
-#### 后端 — 打包
-- `backend/mycrew_backend.spec` — 修复入口点（app.py → main.py），添加所有应用模块到 hiddenimports
-
-#### 后端 — 测试
-- `backend/tests/test_llm_imports.py` — LLM adapter 导入 + 实例化测试（7 tests passed）
-- `backend/tests/test_service_imports.py` — 服务层导入验证（6 tests passed）
-- `backend/tests/test_app_create.py` — FastAPI app 创建集成测试
-
-#### 依赖
-- `backend/pyproject.toml` — 添加 `tenacity` 依赖（LLM 重试）
-
-### 验证结果
-- ✅ pytest 7/7 passed（LLM adapter 单元测试）
-- ✅ 服务层导入 6/6 OK
-- ✅ FastAPI app 创建成功：**75 个路由**，71 个 API 路由
-- ✅ 关键端点验证通过：health / llm/providers / inceptions/sessions / workflow/active / lifecycle/state
-
-### Git Commits（本地，待 push）
-- `ea127a4` feat: implement LLM gateway with OpenAI/Anthropic adapters, wire inception and workflow services
-- `ee9ecd2` fix: pyinstaller spec entry point + app creation test (75 routes, all critical endpoints verified)
-
-### 当前统计
-- 后端 **75 API routes**（从 65+ 增长到 75）
-- LLM 支持：OpenAI + Anthropic 双 adapter
-- 所有服务层模块均可正常导入和实例化
+## 剩余可选工作
+- 实际 PyInstaller 打包验证（需要完整 Python 环境 + 依赖安装）
+- cargo tauri build 出安装包
+- E2E 测试实际运行（需 `pnpm e2e:install` 安装 Playwright 浏览器）
