@@ -70,6 +70,49 @@ export function useCreateInceptionSession() {
   });
 }
 
+/** Streaming variant — backend emits `inception.delta` per LLM token via WS,
+ *  then `inception.message` with the full assistant text at the end.
+ *  Subscribe to those events in the component to render token-by-token. */
+export function useStreamInceptionMessage() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ sessionId, content }: { sessionId: string; content: string }) =>
+      apiFetch(`/inceptions/sessions/${sessionId}/messages/stream`, {
+        method: "POST",
+        body: JSON.stringify({ content }),
+      }),
+    onMutate: async ({ sessionId, content }) => {
+      const key = ["inception", "session", sessionId];
+      await qc.cancelQueries({ queryKey: key });
+      const prev = qc.getQueryData<SessionDetail | null>(key);
+
+      const optimisticMsg: InceptionMessage = {
+        id: `__pending_${Date.now()}`,
+        session_id: sessionId,
+        role: "user",
+        content,
+        ts: new Date().toISOString(),
+      };
+
+      if (prev) {
+        qc.setQueryData<SessionDetail>(key, {
+          ...prev,
+          messages: [...prev.messages, optimisticMsg],
+        });
+      }
+      return { prev };
+    },
+    onError: (_err, vars, ctx) => {
+      if (ctx?.prev !== undefined) {
+        qc.setQueryData(["inception", "session", vars.sessionId], ctx.prev);
+      }
+    },
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: ["inception", "session", vars.sessionId] });
+    },
+  });
+}
+
 export function useSendInceptionMessage() {
   const qc = useQueryClient();
   return useMutation({
@@ -78,6 +121,37 @@ export function useSendInceptionMessage() {
         method: "POST",
         body: JSON.stringify({ content }),
       }),
+    // Optimistic update: the LLM round-trip can take many seconds, so
+    // immediately reflect the user's message in the cache. Otherwise the
+    // user's own typed text doesn't appear in the chat until the AI replies.
+    onMutate: async ({ sessionId, content }) => {
+      const key = ["inception", "session", sessionId];
+      await qc.cancelQueries({ queryKey: key });
+      const prev = qc.getQueryData<SessionDetail | null>(key);
+
+      const optimisticMsg: InceptionMessage = {
+        id: `__pending_${Date.now()}`,
+        session_id: sessionId,
+        role: "user",
+        content,
+        ts: new Date().toISOString(),
+      };
+
+      if (prev) {
+        qc.setQueryData<SessionDetail>(key, {
+          ...prev,
+          messages: [...prev.messages, optimisticMsg],
+        });
+      }
+
+      return { prev };
+    },
+    onError: (_err, vars, ctx) => {
+      // Roll back on failure so the user sees their message didn't actually send
+      if (ctx?.prev !== undefined) {
+        qc.setQueryData(["inception", "session", vars.sessionId], ctx.prev);
+      }
+    },
     onSuccess: (_data, vars) => {
       qc.invalidateQueries({ queryKey: ["inception", "session", vars.sessionId] });
     },

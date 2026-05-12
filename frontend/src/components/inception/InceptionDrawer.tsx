@@ -4,6 +4,7 @@ import {
   useInceptionSession,
   useInceptionSessions,
   useCreateInceptionSession,
+  useStreamInceptionMessage,
   useSendInceptionMessage,
   useFinalizeInception,
   type Blueprint,
@@ -25,7 +26,8 @@ function InceptionDrawer() {
   const { data: session } = useInceptionSession(activeSessionId);
   const { data: providers } = useLlmProviders();
   const createSession = useCreateInceptionSession();
-  const sendMessage = useSendInceptionMessage();
+  const streamMessage = useStreamInceptionMessage();
+  const sendMessage = useSendInceptionMessage();  // non-streaming fallback (used by Re-evaluate)
   const finalize = useFinalizeInception();
 
   const [input, setInput] = useState("");
@@ -34,6 +36,9 @@ function InceptionDrawer() {
   const [thinking, setThinking] = useState(false);
   const [reEvaluating, setReEvaluating] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  // Streaming assistant text accumulated from inception.delta WS events.
+  // Reset on each new send; cleared when the final inception.message arrives.
+  const [streamingText, setStreamingText] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const handleBlueprintEvent = useCallback(
@@ -48,9 +53,37 @@ function InceptionDrawer() {
 
   useEvent("inception.tasks_drafted", handleBlueprintEvent);
 
+  // Listen for streamed LLM tokens — append each delta to the streamingText
+  // buffer, scoped to the current session.
+  const handleDelta = useCallback(
+    (msg: { payload: Record<string, unknown> }) => {
+      if (msg.payload.session_id !== activeSessionId) return;
+      const text = (msg.payload.text as string) ?? "";
+      if (text) setStreamingText((prev) => prev + text);
+    },
+    [activeSessionId],
+  );
+  useEvent("inception.delta", handleDelta);
+
+  // When the final assistant message arrives, clear the streaming buffer
+  // (the real message is already in the cache via mutation onSuccess).
+  const handleFullMessage = useCallback(
+    (msg: { payload: Record<string, unknown> }) => {
+      if (msg.payload.session_id !== activeSessionId) return;
+      if (msg.payload.role === "assistant") setStreamingText("");
+    },
+    [activeSessionId],
+  );
+  useEvent("inception.message", handleFullMessage);
+
+  // Reset streaming buffer when switching sessions
+  useEffect(() => {
+    setStreamingText("");
+  }, [activeSessionId]);
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [session?.messages]);
+  }, [session?.messages, streamingText]);
 
   if (!drawerOpen) return null;
 
@@ -80,7 +113,8 @@ function InceptionDrawer() {
     const sid = await ensureSession();
     if (!sid) return;
     setInput("");
-    await sendMessage.mutateAsync({ sessionId: sid, content });
+    setStreamingText("");  // reset before new stream
+    await streamMessage.mutateAsync({ sessionId: sid, content });
   }
 
   async function handleFinalize() {
@@ -270,6 +304,21 @@ function InceptionDrawer() {
                       <div className="whitespace-pre-wrap">{msg.content}</div>
                     </div>
                   ))}
+                  {streamingText && (
+                    <div
+                      className="mb-4 mr-auto max-w-[70%] rounded-xl px-4 py-2.5 text-sm leading-relaxed"
+                      style={{
+                        backgroundColor: "var(--color-surface-alt)",
+                        color: "var(--color-ink-soft)",
+                      }}
+                    >
+                      <div className="whitespace-pre-wrap">
+                        {streamingText}
+                        <span className="ml-0.5 inline-block h-3 w-1 animate-pulse"
+                              style={{ backgroundColor: "var(--color-ink-muted)" }} />
+                      </div>
+                    </div>
+                  )}
                   <div ref={messagesEndRef} />
                 </>
               )}
