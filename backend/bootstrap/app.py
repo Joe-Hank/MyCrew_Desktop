@@ -15,6 +15,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     log.info("startup.begin")
     ensure_dirs()
 
+    # STEP 0: register main loop so worker-thread tools can hop back to it
+    import asyncio
+    from infra.runtime import set_main_loop
+    set_main_loop(asyncio.get_running_loop())
+
     # STEP 1: load app config
     from infra.config_loader import load_app_config
     app_config = load_app_config()
@@ -24,6 +29,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from infra.repo.sqlite_repo import init_db, close_db
     await init_db()
     log.info("startup.db_ready")
+
+    # STEP 2.5: seed builtin tools + Plan Maker agent (idempotent)
+    from bootstrap.seed_builtin_tools import ensure_builtin_tools
+    from bootstrap.seed_plan_maker import ensure_plan_maker_agent
+    tool_ids = await ensure_builtin_tools()
+    await ensure_plan_maker_agent(tool_ids)
+    log.info("startup.seeded")
 
     # WS connection manager — imported up front because steps 3/4/5 all use it
     from api.ws import manager

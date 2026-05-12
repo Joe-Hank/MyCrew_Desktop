@@ -89,9 +89,21 @@ def _load_builtin_tools(tool_names: list[str]) -> list:
         "list_directory": ListDirectory,
         "execute_blender_code": ExecuteBlenderCode,
         "get_scene_info": GetSceneInfo,
+        # NB: "create_workflow" is intentionally NOT registered here. It must
+        # be instantiated via make_create_workflow_tool(session_id) in
+        # inception_svc — instantiating it without a bound session_id is a
+        # bug. If a non-Plan-Maker agent has create_workflow in its tool_ids
+        # it will be silently skipped (with a log).
     }
 
+    # Tools that should be ignored when discovered in a generic agent's tool_ids
+    # (they need special instantiation done elsewhere).
+    SPECIAL_TOOLS = {"create_workflow"}
+
     for n in tool_names:
+        if n in SPECIAL_TOOLS:
+            log.info("crewai_runner.tool_skipped", tool=n, reason="special_instantiation")
+            continue
         cls = registry.get(n)
         if cls is None:
             log.info("crewai_runner.tool_skipped", tool=n, reason="no_builtin")

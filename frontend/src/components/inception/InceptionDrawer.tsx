@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
+import { useNavigate } from "react-router-dom";
 import { useInceptionStore } from "../../stores/useInceptionStore";
 import { usePrefsStore } from "../../stores/usePrefsStore";
 import {
@@ -7,12 +8,12 @@ import {
   useCreateInceptionSession,
   useStreamInceptionMessage,
   useSendInceptionMessage,
-  useFinalizeInception,
   type Blueprint,
   type InceptionSession,
 } from "../../queries/useInceptionQuery";
 import { useLlmProviders } from "../../queries/useLlmQuery";
 import { useEvent } from "../../hooks/useEvent";
+import { apiFetch } from "../../net/api";
 import TaskBlueprintEditor from "./TaskBlueprintEditor";
 
 // On first launch (no persisted preference), fall back to the *first
@@ -21,6 +22,7 @@ import TaskBlueprintEditor from "./TaskBlueprintEditor";
 // restored on next launch — see usePrefsStore.
 
 function InceptionDrawer() {
+  const navigate = useNavigate();
   const {
     drawerOpen,
     closeDrawer,
@@ -34,7 +36,6 @@ function InceptionDrawer() {
   const createSession = useCreateInceptionSession();
   const streamMessage = useStreamInceptionMessage();
   const sendMessage = useSendInceptionMessage();  // non-streaming fallback (used by Re-evaluate)
-  const finalize = useFinalizeInception();
 
   // Persisted prefs (LLM / model / thinking restored from localStorage)
   const selectedLlm = usePrefsStore((s) => s.inceptionLlm) ?? "";
@@ -50,6 +51,11 @@ function InceptionDrawer() {
   // Streaming assistant text accumulated from inception.delta WS events.
   // Reset on each new send; cleared when the final inception.message arrives.
   const [streamingText, setStreamingText] = useState("");
+  // Project id created by Plan Maker's create_workflow tool call. When non-null,
+  // the right blueprint panel becomes editable and the bottom buttons activate.
+  const [createdProjectId, setCreatedProjectId] = useState<string | null>(null);
+  // Cache the last user prompt so 重新生成 can re-send it after deleting the project.
+  const [lastPrompt, setLastPrompt] = useState<string>("");
   const abortRef = useRef<AbortController | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -64,6 +70,20 @@ function InceptionDrawer() {
   );
 
   useEvent("inception.tasks_drafted", handleBlueprintEvent);
+
+  // The new path: Plan Maker called create_workflow → project is persisted →
+  // right panel becomes available with the editable blueprint preview.
+  const handleWorkflowCreated = useCallback(
+    (msg: { payload: Record<string, unknown> }) => {
+      if (msg.payload.session_id !== activeSessionId) return;
+      const bp = msg.payload.blueprint as Blueprint | undefined;
+      const pid = msg.payload.project_id as string | undefined;
+      if (bp) setDraftBlueprint(bp);
+      if (pid) setCreatedProjectId(pid);
+    },
+    [activeSessionId, setDraftBlueprint],
+  );
+  useEvent("inception.workflow_created", handleWorkflowCreated);
 
   // Listen for streamed LLM tokens — append each delta to the streamingText
   // buffer, scoped to the current session.
@@ -88,9 +108,11 @@ function InceptionDrawer() {
   );
   useEvent("inception.message", handleFullMessage);
 
-  // Reset streaming buffer when switching sessions
+  // Reset streaming buffer + project binding when switching sessions
   useEffect(() => {
     setStreamingText("");
+    setCreatedProjectId(null);
+    setLastPrompt("");
   }, [activeSessionId]);
 
   // First-launch fallback: if the user has no persisted choice, pick the
@@ -144,6 +166,7 @@ function InceptionDrawer() {
     if (!sid) return;
     setInput("");
     setStreamingText("");  // reset before new stream
+    setLastPrompt(content);  // cache for 重新生成
     const controller = new AbortController();
     abortRef.current = controller;
     try {
@@ -173,13 +196,58 @@ function InceptionDrawer() {
     abortRef.current?.abort();
   }
 
-  async function handleFinalize() {
-    if (!activeSessionId) return;
-    await finalize.mutateAsync({
-      sessionId: activeSessionId,
-      blueprint: draftBlueprint ?? undefined,
-    });
+  /** 保存项目：项目已在 DB 中（Plan Maker 已经调过 create_workflow），
+   * 只需关闭 drawer 返回 home。home page 自然会显示新项目卡。 */
+  function handleSave() {
+    if (!createdProjectId) return;
     closeDrawer();
+    navigate("/");
+  }
+
+  /** 重新生成：DELETE 已创建的项目，清空蓝图状态，
+   * 用上一条用户输入重新触发 Plan Maker。 */
+  async function handleRegenerate() {
+    if (!createdProjectId || !activeSessionId) return;
+    try {
+      // 1. delete via existing project DELETE endpoint (needs name confirmation per backend)
+      //    project_svc.delete_project requires {name} body. We fetch project name first.
+      const detail = await apiFetch<{ name: string }>(`/projects/${createdProjectId}`);
+      const name = detail.data?.name ?? "";
+      if (name) {
+        await apiFetch(`/projects/${createdProjectId}`, {
+          method: "DELETE",
+          body: JSON.stringify({ name }),
+        });
+      }
+    } catch (exc) {
+      // eslint-disable-next-line no-console
+      console.warn("inception.regenerate_delete_failed", exc);
+    }
+    // 2. Clear local state so the panel hides until next workflow_created event
+    setDraftBlueprint(null);
+    setCreatedProjectId(null);
+    // 3. Re-send the cached prompt to trigger a new Plan Maker run
+    if (lastPrompt) {
+      setStreamingText("");
+      const controller = new AbortController();
+      abortRef.current = controller;
+      try {
+        await streamMessage.mutateAsync({
+          sessionId: activeSessionId,
+          content: lastPrompt,
+          signal: controller.signal,
+        });
+      } catch (err) {
+        const name = (err as { name?: string })?.name;
+        if (name !== "AbortError") {
+          // eslint-disable-next-line no-console
+          console.warn("inception.regenerate_stream_failed", err);
+        }
+      } finally {
+        abortRef.current = null;
+        setStreamingText("");
+      }
+    }
   }
 
   async function handleReEvaluate() {
@@ -375,6 +443,28 @@ function InceptionDrawer() {
                       </div>
                     </div>
                   )}
+                  {/* "Thinking..." placeholder — Plan Maker is between steps,
+                      so no delta has arrived yet. Step-level streaming feels
+                      slow without this indicator. */}
+                  {streamMessage.isPending && !streamingText && (
+                    <div
+                      className="mb-4 mr-auto flex max-w-[70%] items-center gap-2 rounded-xl px-4 py-2.5 text-sm"
+                      style={{
+                        backgroundColor: "var(--color-surface-alt)",
+                        color: "var(--color-ink-muted)",
+                      }}
+                    >
+                      <span className="flex gap-1">
+                        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-current"
+                              style={{ animationDelay: "0ms" }} />
+                        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-current"
+                              style={{ animationDelay: "150ms" }} />
+                        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-current"
+                              style={{ animationDelay: "300ms" }} />
+                      </span>
+                      <span>Plan Maker 思考中...</span>
+                    </div>
+                  )}
                   <div ref={messagesEndRef} />
                 </>
               )}
@@ -433,10 +523,11 @@ function InceptionDrawer() {
             </div>
           </div>
 
-          {/* Blueprint panel (only shown when blueprint exists) */}
-          {draftBlueprint && (
+          {/* Blueprint panel — shown only after Plan Maker's create_workflow tool
+              has persisted the project (createdProjectId is non-null). */}
+          {createdProjectId && draftBlueprint && (
             <div
-              className="flex w-[45%] flex-col p-4"
+              className="flex w-[45%] min-w-[360px] flex-col p-4 transition-all duration-200"
               style={{ backgroundColor: "var(--color-surface)" }}
             >
               <TaskBlueprintEditor
@@ -449,8 +540,10 @@ function InceptionDrawer() {
           )}
         </div>
 
-        {/* Bottom confirm bar */}
-        {draftBlueprint && (
+        {/* Bottom action bar — only after Plan Maker persists.
+            Two buttons: regenerate (deletes + reruns) | save (closes drawer).
+            Both disabled while Plan Maker is mid-stream. */}
+        {createdProjectId && draftBlueprint && (
           <div
             className="px-6 py-4"
             style={{
@@ -458,14 +551,28 @@ function InceptionDrawer() {
               borderTop: "1px solid var(--color-border-soft)",
             }}
           >
-            <button
-              onClick={handleFinalize}
-              disabled={finalize.isPending || draftBlueprint.tasks.length === 0}
-              className="w-full rounded-lg py-3 text-base font-medium text-white transition-opacity disabled:opacity-50"
-              style={{ backgroundColor: "var(--color-brand-500)" }}
-            >
-              {finalize.isPending ? "生成中..." : "确认"}
-            </button>
+            <div className="flex gap-3">
+              <button
+                onClick={handleRegenerate}
+                disabled={streamMessage.isPending}
+                className="rounded-lg border bg-white px-5 py-3 text-sm font-medium transition-colors hover:bg-zinc-50 disabled:opacity-40"
+                style={{
+                  borderColor: "var(--color-border-soft)",
+                  color: "var(--color-ink-label)",
+                }}
+                title="删除当前方案并让 Plan Maker 重新生成"
+              >
+                {streamMessage.isPending ? "生成中..." : "重新生成"}
+              </button>
+              <button
+                onClick={handleSave}
+                disabled={streamMessage.isPending}
+                className="flex-1 rounded-lg py-3 text-base font-medium text-white transition-opacity disabled:opacity-40"
+                style={{ backgroundColor: "var(--color-brand-500)" }}
+              >
+                保存项目
+              </button>
+            </div>
           </div>
         )}
       </div>
