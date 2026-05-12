@@ -15,10 +15,10 @@ import { useLlmProviders } from "../../queries/useLlmQuery";
 import { useEvent } from "../../hooks/useEvent";
 import TaskBlueprintEditor from "./TaskBlueprintEditor";
 
-// First-launch defaults — used only when the user has no persisted preference
-const DEFAULT_PROVIDER_NAME = "DeepSeek";
-const DEFAULT_MODEL_NAME = "deepseek-v4-pro";
-const DEFAULT_THINKING = true;
+// On first launch (no persisted preference), fall back to the *first
+// available* provider and its first model. Thinking stays off unless the
+// user enables it. Once they make a choice it's saved to localStorage and
+// restored on next launch — see usePrefsStore.
 
 function InceptionDrawer() {
   const {
@@ -93,8 +93,9 @@ function InceptionDrawer() {
     setStreamingText("");
   }, [activeSessionId]);
 
-  // First-launch defaults: pick DeepSeek + v4-pro + thinking if the user
-  // has no persisted preference and the providers list contains them.
+  // First-launch fallback: if the user has no persisted choice, pick the
+  // first available provider and its first model. A persisted preference
+  // (selectedLlm truthy) always wins.
   useEffect(() => {
     if (selectedLlm || !providers) return;
     const list = (providers as unknown as Array<{
@@ -102,15 +103,13 @@ function InceptionDrawer() {
       name: string;
       models?: Array<{ model_name: string }>;
     }>) ?? [];
-    const ds = list.find((p) => p.name === DEFAULT_PROVIDER_NAME);
-    if (!ds) return;
-    setSelectedLlm(ds.id);
-    const hasModel = ds.models?.some((m) => m.model_name === DEFAULT_MODEL_NAME);
-    if (hasModel) {
-      setSelectedModel(DEFAULT_MODEL_NAME);
-      setThinking(DEFAULT_THINKING);
-    }
-  }, [providers, selectedLlm, setSelectedLlm, setSelectedModel, setThinking]);
+    if (list.length === 0) return;
+    const first = list[0];
+    if (!first) return;
+    setSelectedLlm(first.id);
+    const firstModel = first.models?.[0]?.model_name;
+    if (firstModel) setSelectedModel(firstModel);
+  }, [providers, selectedLlm, setSelectedLlm, setSelectedModel]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
