@@ -63,26 +63,28 @@ def generate_wrapper_skeleton(
     params_str = ", ".join(f"{n}={n}" for n in param_names)
     run_params = ", ".join(f"{n}: ..." for n in param_names) if param_names else ""
 
-    return f'''from pydantic import BaseModel, Field
-from crewai.tools import BaseTool
+    return f'''from typing import ClassVar
 
-from infra.mcp.pool import mcp_pool
+from pydantic import BaseModel, Field
 
-MCP_SERVER_ID = "{mcp_server_id}"
+from src.tools.builtin._base import GuardedMCPTool
 
 
 class {args_class}(BaseModel):
 {fields_block}
 
 
-class {class_name}(BaseTool):
+class {class_name}(GuardedMCPTool):
     name: str = "{tool_name}"
     description: str = "{tool_description}"
     args_schema: type[BaseModel] = {args_class}
 
+    mcp_server_id: ClassVar[str] = "{mcp_server_id}"
+    mcp_tool_name: ClassVar[str] = "{tool_name}"
+    # Set permission_kind to file_read/file_write/cmd_exec/git/... for static
+    # enforcement, or leave None to rely on name-based heuristics.
+    permission_kind: ClassVar[str | None] = None
+
     def _run(self, {run_params}) -> str:
-        import asyncio
-        return asyncio.get_event_loop().run_until_complete(
-            mcp_pool.call(MCP_SERVER_ID, "{tool_name}", {{{params_str}}})
-        )
+        return self._guarded_call({{{params_str}}})
 '''

@@ -2,6 +2,7 @@ import { type ReactNode, useEffect } from "react";
 import Sidebar from "./Sidebar";
 import LogDrawer from "./LogDrawer";
 import ErrorBoundary from "./ErrorBoundary";
+import PromptModal from "./PromptModal";
 import { useBackendConnection } from "../../hooks/useBackendConnection";
 import { useThemeStore, applyTheme } from "../../stores/useThemeStore";
 
@@ -29,6 +30,7 @@ function AppShell({ children }: { children: ReactNode }) {
         </ErrorBoundary>
         <LogDrawer />
       </div>
+      <PromptModal />
     </div>
   );
 }

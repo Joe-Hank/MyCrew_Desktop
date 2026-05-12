@@ -58,6 +58,7 @@
 
 /* ── 深色模式覆盖（保留功能，但优先保证浅色对齐 Figma）─── */
 :root.dark {
+  /* 语义 token */
   --color-surface: #0d0f12;
   --color-surface-alt: #1a1d22;
   --color-card: #16181d;
@@ -72,6 +73,22 @@
   --color-ink-faint: #7a7a7a;
   --color-ink-disabled: #5a5a5a;
   --color-ink-ghost: #4a4a4a;
+
+  /* Tailwind 原生 color tokens 重映射 —— 让组件里的 bg-white / bg-zinc-* /
+     hover:bg-zinc-50 等硬编码颜色在深色模式自动切换。
+     避免逐文件加 dark: 变体的繁琐工作。 */
+  --color-white: #16181d;             /* bg-white → card-dark */
+  --color-zinc-50: #1a1d22;           /* hover:bg-zinc-50 → surface-alt */
+  --color-zinc-100: #1c1f25;          /* hover:bg-zinc-100 → card-alt */
+  --color-zinc-200: #2a2d33;          /* borders */
+  --color-zinc-300: #3a3d44;
+  --color-zinc-400: #7a7a7a;
+  --color-zinc-500: #8b94a8;
+  --color-zinc-600: #c0c0c5;          /* text-zinc-600 → ink-label */
+  --color-zinc-700: #d4d4d8;
+  --color-zinc-800: #e5e7eb;
+  --color-zinc-900: #f3f4f6;
+  --color-zinc-950: #ffffff;
 }
 
 :root {

@@ -1,6 +1,13 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useProject, useDeleteProject, type Project, type Task } from "../../queries/useProjectQuery";
+import {
+  useProject,
+  useDeleteProject,
+  useCloneProject,
+  useUpdateRootPath,
+  type Project,
+  type Task,
+} from "../../queries/useProjectQuery";
 
 const stateLabels: Record<string, string> = {
   ready: "未启动",
@@ -32,13 +39,28 @@ function ProjectCard({
   const { data: detail } = useProject(project.id);
   const [deleteConfirm, setDeleteConfirm] = useState(false);
   const [deleteInput, setDeleteInput] = useState("");
+  const [pathModal, setPathModal] = useState(false);
+  const [pathInput, setPathInput] = useState(project.root_path ?? "");
   const deleteMut = useDeleteProject();
+  const cloneMut = useCloneProject();
+  const rootPathMut = useUpdateRootPath();
+
+  function handlePathSave() {
+    if (!pathInput.trim()) return;
+    rootPathMut.mutate({ id: project.id, root_path: pathInput.trim() });
+    setPathModal(false);
+  }
+
+  function handleIterate() {
+    if (cloneMut.isPending) return;
+    if (!confirm(`将基于"${project.name}"创建一个副本进行迭代？`)) return;
+    cloneMut.mutate(project.id);
+  }
 
   const progress = project.progress_pct ?? 0;
   const tasks = detail?.tasks ?? [];
   const isTerminal = ["completed", "completed_with_warnings", "completed_with_issues", "aborted"].includes(project.state);
   const isRunning = project.state === "running";
-  const isReady = project.state === "ready";
   const btn = primaryButtonLabel(project.state, progress);
 
   const dateStr = project.created_at?.substring(0, 10) ?? "";
@@ -144,24 +166,25 @@ function ProjectCard({
           configured={!!project.root_path}
           onClick={(e) => {
             e.stopPropagation();
-            // TODO: open path picker
+            setPathInput(project.root_path ?? "");
+            setPathModal(true);
           }}
         />
 
         <button
           onClick={(e) => {
             e.stopPropagation();
-            // TODO: open iterate flow
+            handleIterate();
           }}
-          disabled={isReady}
+          disabled={!isTerminal || cloneMut.isPending}
           className="rounded-lg border bg-white px-3 py-2 text-sm transition-colors disabled:opacity-50"
           style={{
             borderColor: "var(--color-border-soft)",
-            color: isReady ? "var(--color-ink-disabled)" : "var(--color-ink-label)",
+            color: isTerminal ? "var(--color-ink-label)" : "var(--color-ink-disabled)",
           }}
-          title="迭代"
+          title={isTerminal ? "基于本项目创建一个迭代副本" : "项目结束后可迭代"}
         >
-          迭代
+          {cloneMut.isPending ? "..." : "迭代"}
         </button>
       </div>
 
@@ -189,6 +212,44 @@ function ProjectCard({
           tasks.map((task, idx) => <TaskPill key={task.id} task={task} index={idx} />)
         )}
       </div>
+
+      {/* Path config overlay */}
+      {pathModal && (
+        // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
+        <div
+          className="absolute inset-0 z-10 flex flex-col items-stretch justify-center rounded-[10px] bg-white/95 p-4"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <p className="mb-2 text-xs" style={{ color: "var(--color-ink-soft)" }}>
+            配置项目根路径（Agent 文件操作的工作目录）
+          </p>
+          <input
+            value={pathInput}
+            onChange={(e) => setPathInput(e.target.value)}
+            placeholder="例如：F:\\Projects\\MyGame"
+            className="mb-3 w-full rounded border px-2 py-1 text-xs"
+            style={{ borderColor: "var(--color-border-soft)" }}
+            autoFocus
+          />
+          <div className="flex justify-end gap-2">
+            <button
+              onClick={() => setPathModal(false)}
+              className="rounded-lg border bg-white px-3 py-1.5 text-xs"
+              style={{ borderColor: "var(--color-border-soft)" }}
+            >
+              取消
+            </button>
+            <button
+              onClick={handlePathSave}
+              disabled={!pathInput.trim() || rootPathMut.isPending}
+              className="rounded-lg px-3 py-1.5 text-xs text-white disabled:opacity-50"
+              style={{ backgroundColor: "var(--color-brand-500)" }}
+            >
+              保存
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Delete confirm overlay */}
       {deleteConfirm && (

@@ -235,27 +235,41 @@ class MCPPool:
         await self._broadcast_status_change(server_id, conn)
 
     async def _heartbeat_loop(self) -> None:
+        """Heartbeat loop with defensive outer try/except — a single failed
+        check should never silently kill the whole task. We catch and continue.
+        """
         while True:
-            await asyncio.sleep(HEARTBEAT_INTERVAL)
-            for server_id, conn in list(self._connections.items()):
-                if conn.status != "connected":
-                    if conn.status == "error":
-                        reconnected = await conn.try_reconnect()
-                        if reconnected:
-                            await self._sync_discovered_tools(server_id, conn)
-                            await self._broadcast_status_change(server_id, conn)
-                    continue
+            try:
+                await asyncio.sleep(HEARTBEAT_INTERVAL)
+                for server_id, conn in list(self._connections.items()):
+                    try:
+                        if conn.status != "connected":
+                            if conn.status == "error":
+                                reconnected = await conn.try_reconnect()
+                                if reconnected:
+                                    await self._sync_discovered_tools(server_id, conn)
+                                    await self._broadcast_status_change(server_id, conn)
+                            continue
 
-                alive = await conn.health_check()
-                if not alive:
-                    log.warning("mcp.pool.heartbeat_failed", server_id=server_id)
-                    conn.status = "error"
-                    conn.error_message = "heartbeat failed"
-                    await self._broadcast_status_change(server_id, conn)
-                    reconnected = await conn.try_reconnect()
-                    if reconnected:
-                        await self._sync_discovered_tools(server_id, conn)
-                        await self._broadcast_status_change(server_id, conn)
+                        alive = await conn.health_check()
+                        if not alive:
+                            log.warning("mcp.pool.heartbeat_failed", server_id=server_id)
+                            conn.status = "error"
+                            conn.error_message = "heartbeat failed"
+                            await self._broadcast_status_change(server_id, conn)
+                            reconnected = await conn.try_reconnect()
+                            if reconnected:
+                                await self._sync_discovered_tools(server_id, conn)
+                                await self._broadcast_status_change(server_id, conn)
+                    except Exception as exc:
+                        log.error("mcp.pool.heartbeat_iter_failed",
+                                  server_id=server_id, error=str(exc))
+            except asyncio.CancelledError:
+                raise  # graceful shutdown
+            except Exception as exc:
+                log.error("mcp.pool.heartbeat_loop_failed", error=str(exc))
+                # Don't let one bad tick kill the loop forever — sleep & continue
+                await asyncio.sleep(5)
 
     async def _sync_discovered_tools(self, server_id: str, conn: MCPConnection) -> None:
         if self._sync_tools_fn and conn.discovered_tools:

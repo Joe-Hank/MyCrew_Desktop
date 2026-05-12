@@ -200,19 +200,52 @@ class WorkflowService:
 
     async def _run_agent(self, project_id: str, task_id: str,
                           task_input: Any) -> str:
-        """Execute a task via its bound Agent's LLM.
+        """Execute a task via its bound Agent.
 
-        Builds a prompt from the agent's role/goal/backstory + task detail +
-        upstream inputs, then calls the agent's configured LLM.
+        Prefers a real CrewAI Agent/Crew/Task pipeline (with tools + memory
+        plumbing) when the agent has tools or the agent record requests it.
+        Falls back to a direct LLM completion when CrewAI fails to start
+        (e.g. litellm provider mismatch), so a missing tool config never
+        blocks task execution.
         """
         agent = await crud.get_by_id("agents", task_input.agent_id)
         if not agent:
             raise ValueError(f"Agent {task_input.agent_id} not found")
 
-        # Resolve agent's LLM
         provider_id, model_name = await self._resolve_agent_llm(agent)
 
-        # Build agent system prompt
+        # Try CrewAI first
+        try:
+            from services.crewai_runner import run_task_with_crewai
+            text = await run_task_with_crewai(
+                agent_row=agent,
+                task_input=task_input,
+                provider_id=provider_id,
+                model_name=model_name,
+            )
+            log.info("workflow.agent_executed_via_crewai",
+                     project_id=project_id, task_id=task_id,
+                     agent_id=task_input.agent_id)
+            return text
+        except Exception as exc:
+            log.warning("workflow.crewai_failed_falling_back",
+                        project_id=project_id, task_id=task_id, error=str(exc))
+
+        # Fallback: direct LLM call (legacy path; loses tool support)
+        return await self._run_agent_direct_llm(
+            project_id, task_id, task_input, agent, provider_id, model_name,
+        )
+
+    async def _run_agent_direct_llm(
+        self,
+        project_id: str,
+        task_id: str,
+        task_input: Any,
+        agent: dict,
+        provider_id: str,
+        model_name: str,
+    ) -> str:
+        """Direct-LLM fallback when CrewAI can't be used (legacy behaviour)."""
         system_prompt = (
             f"你是一个 AI Agent。\n"
             f"角色: {agent.get('role', 'Assistant')}\n"
@@ -221,9 +254,7 @@ class WorkflowService:
             f"请根据任务要求完成工作，输出详细的结果。"
         )
 
-        # Build task prompt with upstream context
         task_prompt = f"## 任务: {task_input.title}\n\n{task_input.detail}\n"
-
         if task_input.upstream_outputs:
             task_prompt += "\n## 上游任务输出（供参考）:\n"
             for upstream_id, output in task_input.upstream_outputs.items():
@@ -241,19 +272,16 @@ class WorkflowService:
             LlmMessage(role="system", content=system_prompt),
             LlmMessage(role="user", content=task_prompt),
         ]
-
         thinking_mode = bool(agent.get("thinking_mode", 0))
 
         response = await llm_gateway.chat(
             provider_id, model_name, messages,
             thinking_mode=thinking_mode,
         )
-
-        log.info("workflow.agent_executed",
+        log.info("workflow.agent_executed_via_llm",
                  project_id=project_id, task_id=task_id,
                  agent_id=task_input.agent_id,
                  tokens=response.usage.total_tokens)
-
         return response.text
 
     async def _extract_structured_output(self, project_id: str, task_id: str,

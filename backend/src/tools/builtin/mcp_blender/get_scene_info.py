@@ -1,22 +1,26 @@
+from typing import ClassVar
+
 from pydantic import BaseModel
-from crewai.tools import BaseTool
 
-from infra.mcp.pool import mcp_pool
-
-MCP_SERVER_ID = "blender"
+from src.tools.builtin._base import GuardedMCPTool
 
 
 class GetSceneInfoArgs(BaseModel):
     pass
 
 
-class GetSceneInfo(BaseTool):
+class GetSceneInfo(GuardedMCPTool):
     name: str = "get_scene_info"
-    description: str = "Get information about the current Blender scene including objects, materials, and render settings"
+    description: str = (
+        "Get information about the current Blender scene including objects, "
+        "materials, and render settings"
+    )
     args_schema: type[BaseModel] = GetSceneInfoArgs
 
+    mcp_server_id: ClassVar[str] = "blender"
+    mcp_tool_name: ClassVar[str] = "get_scene_info"
+    # Pure inspection — no side effects
+    permission_kind: ClassVar[str | None] = None
+
     def _run(self) -> str:
-        import asyncio
-        return asyncio.get_event_loop().run_until_complete(
-            mcp_pool.call(MCP_SERVER_ID, "get_scene_info", {})
-        )
+        return self._guarded_call({})

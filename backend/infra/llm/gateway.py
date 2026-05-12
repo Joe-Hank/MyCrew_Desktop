@@ -55,9 +55,42 @@ class LlmGateway:
         if temperature is not None:
             kwargs["temperature"] = temperature
 
-        if json_mode:
-            return await adapter.chat_json(messages, **kwargs)
-        return await adapter.chat(messages, **kwargs)
+        # Broadcast call_started event (best-effort; doesn't fail the call)
+        await self._broadcast_event("llm.call_started", {
+            "provider_id": provider_id,
+            "model": model_name,
+            "thinking_mode": thinking_mode,
+            "json_mode": json_mode,
+        })
+
+        try:
+            if json_mode:
+                response = await adapter.chat_json(messages, **kwargs)
+            else:
+                response = await adapter.chat(messages, **kwargs)
+        except Exception as exc:
+            await self._broadcast_event("llm.call_failed", {
+                "provider_id": provider_id,
+                "model": model_name,
+                "error": str(exc),
+            })
+            raise
+
+        await self._broadcast_event("llm.call_finished", {
+            "provider_id": provider_id,
+            "model": model_name,
+            "tokens": response.usage.total_tokens if response.usage else 0,
+        })
+        return response
+
+    @staticmethod
+    async def _broadcast_event(event: str, payload: dict) -> None:
+        try:
+            # Lazy import to avoid circular dep at module load time
+            from api.ws import manager
+            await manager.broadcast(event, payload)
+        except Exception as exc:
+            log.debug("llm.event_broadcast_failed", event=event, error=str(exc))
 
     async def stream(
         self,

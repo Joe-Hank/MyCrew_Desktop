@@ -15,8 +15,42 @@
 | 10 | Figma 原型对齐（设置页/团队页/主页 → 药丸Tab+表格+底部状态栏） | ✅ committed |
 | 11 | LLM Gateway + Lifecycle API（OpenAI/Anthropic adapter, SSE streaming） | ✅ committed |
 | 12 | Port 层补全 + 状态机 bug 修复 + 测试覆盖增强 | ✅ committed |
-| 13 | 测试补强（36→140 pytest）+ log_svc 桩填充 + 代码审查报告 | 🔄 pending commit |
-| 14 | Figma UI 全面对齐（Phase A-F：tokens/sidebar/home/task/team/settings/inception） | 🔄 pending commit |
+| 13 | 测试补强（36→140 pytest）+ log_svc 桩填充 + 代码审查报告 | ✅ committed |
+| 14 | Figma UI 全面对齐（Phase A-F：tokens/sidebar/home/task/team/settings/inception） | ✅ committed |
+| 15 | v2 配置全数导入（6 LLM + 15 model + 7 MCP + 4 tool + 17 agent + 8 crew） | ✅ committed |
+| 16 | MVP 收尾（Wave 1-4：quick wins + MCP 拦截 + CrewAI + InteractionPort + 路径/迭代 + dark mode + experience_repo + heartbeat） | 🔄 pending commit |
+
+---
+
+## Phase 16 — MVP 收尾（2026-05-12）
+
+按"关键 → 体验 → 选配"优先级 + 依赖关系完成剩余 9 项。
+
+### Wave 1 — Quick wins
+- `routes_lifecycle.py` `active_tasks` 真实计数（从 0 硬编码改为 SQL 聚合）
+- 新增迁移 `0002_indexes.py`：tasks(project_id) / tasks(status) / tasks(project_id,status) 复合索引 + inception_messages(session_id) + llm_models(provider_id) + projects(state)
+- `log_svc` 改用 SQLite `logs` 表持久化 + 保留内存环形缓冲作为 tail cache
+- 新增 `diagnostic_svc.py` + `POST /lifecycle/diagnostic-bundle`（ZIP 含 logs + 脱敏 configs + system info）
+- `llm_gateway.chat()` 加 `llm.call_started/call_finished/call_failed` WS 事件广播
+
+### Wave 2 — 架构补完
+- **MCP 工具拦截 wire-up**：新增 `_base.py::GuardedMCPTool` 基类；4 个 BaseTool 改为继承基类 + 声明 `permission_kind`；skeleton_generator 模板同步更新
+- **CrewAI 实际接入**：新增 `services/crewai_runner.py`，真实构建 Agent/Task/Crew + LiteLLM；`workflow_svc._run_agent` 优先走 CrewAI，失败时降级到 LlmGateway 直调
+- **InteractionPort 接线**：前端新增 `layout/PromptModal.tsx`，全局监听 `prompt.request` 渲染 choice/text/confirm 三种 UI，应答发回 `prompt.response`
+
+### Wave 3 — UI 占位补完
+- 主页卡片"路径"按钮：嵌入式输入 → `useUpdateRootPath`
+- 主页卡片"迭代"按钮：终态项目可点击 → `useCloneProject`
+- **深色模式**：用 `:root.dark` 重映射 Tailwind `--color-white`/`--color-zinc-*` token，硬编码 `bg-white/zinc-*` 自动切换，免逐文件改 `dark:` 变体
+
+### Wave 4 — 选配
+- **experience_repo SQLite**：迁移 `0003_experiences.py` + `infra/experience/sqlite_experience_repo.py`，填掉 plan §6 最后一个 NotImplementedError 桩
+- **MCP heartbeat 加固**：`_heartbeat_loop` 加外层 try/except，单次故障不再静默杀死 task
+
+### 验证
+- ✅ pytest **150 passed**（140 → 150，新增 test_experience_repo.py × 10）
+- ✅ `npx tsc --noEmit` 零错误
+- ✅ `npx vite build` 778ms / 139 modules
 
 ---
 
