@@ -306,9 +306,9 @@ function InceptionDrawer() {
       <div
         className="flex flex-1 flex-col overflow-hidden"
       >
-        {/* Top toolbar */}
+        {/* Top toolbar — compact so it fits in the narrow VSCode-sidebar drawer */}
         <div
-          className="flex items-center gap-3 px-5 py-3"
+          className="flex items-center gap-1.5 px-3 py-2"
           style={{ borderBottom: "1px solid var(--color-border-soft)", backgroundColor: "var(--color-card)" }}
         >
           {/* LLM picker */}
@@ -319,8 +319,9 @@ function InceptionDrawer() {
               setSelectedModel("");
             }}
             disabled={!!activeSessionId}
-            className="rounded-md bg-white px-3 py-1.5 text-sm outline-none disabled:opacity-60"
+            className="min-w-0 max-w-[110px] rounded bg-white px-1.5 py-1 text-xs outline-none disabled:opacity-60"
             style={{ border: "1px solid var(--color-border-soft)" }}
+            title="LLM"
           >
             <option value="">— LLM —</option>
             {providerList.map((p) => (
@@ -333,8 +334,9 @@ function InceptionDrawer() {
             value={selectedModel}
             onChange={(e) => setSelectedModel(e.target.value)}
             disabled={!selectedLlm || !!activeSessionId}
-            className="rounded-md bg-white px-3 py-1.5 text-sm outline-none disabled:opacity-60"
+            className="min-w-0 max-w-[120px] rounded bg-white px-1.5 py-1 text-xs outline-none disabled:opacity-60"
             style={{ border: "1px solid var(--color-border-soft)" }}
+            title="模型"
           >
             <option value="">— 模型 —</option>
             {modelOptions.map((m) => (
@@ -343,31 +345,31 @@ function InceptionDrawer() {
           </select>
 
           {/* Thinking toggle */}
-          <div className="flex items-center gap-2 text-sm" style={{ color: "var(--color-ink-label)" }}>
+          <div className="flex items-center gap-1 text-xs" style={{ color: "var(--color-ink-label)" }}>
             <span>思考</span>
             <button
               onClick={() => !activeSessionId && setThinking(!thinking)}
               disabled={!!activeSessionId}
-              className="relative inline-flex h-5 w-9 items-center rounded-full transition-colors disabled:opacity-60"
+              className="relative inline-flex h-4 w-7 items-center rounded-full transition-colors disabled:opacity-60"
               style={{ backgroundColor: thinking ? "#10b981" : "var(--color-surface-alt)" }}
             >
               <span
-                className="absolute h-4 w-4 rounded-full bg-white shadow-sm transition-transform"
-                style={{ transform: thinking ? "translateX(18px)" : "translateX(2px)" }}
+                className="absolute h-3 w-3 rounded-full bg-white shadow-sm transition-transform"
+                style={{ transform: thinking ? "translateX(14px)" : "translateX(2px)" }}
               />
             </button>
           </div>
 
-          <div className="ml-auto flex items-center gap-2">
+          <div className="ml-auto flex items-center gap-1">
             {/* History button */}
             <div className="relative">
               <button
                 onClick={() => setHistoryOpen((v) => !v)}
-                className="flex h-9 w-9 items-center justify-center rounded-md bg-white transition-colors hover:bg-zinc-50"
+                className="flex h-7 w-7 items-center justify-center rounded bg-white transition-colors hover:bg-zinc-50"
                 style={{ border: "1px solid var(--color-border-soft)", color: "var(--color-ink-muted)" }}
                 title="历史会话"
               >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                   <circle cx="12" cy="12" r="10" />
                   <polyline points="12 6 12 12 16 14" />
                 </svg>
@@ -388,11 +390,11 @@ function InceptionDrawer() {
             {/* New session button */}
             <button
               onClick={handleNewSession}
-              className="flex h-9 w-9 items-center justify-center rounded-md bg-white transition-colors hover:bg-zinc-50"
+              className="flex h-7 w-7 items-center justify-center rounded bg-white transition-colors hover:bg-zinc-50"
               style={{ border: "1px solid var(--color-border-soft)", color: "var(--color-ink-muted)" }}
               title="新对话"
             >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <line x1="12" y1="5" x2="12" y2="19" />
                 <line x1="5" y1="12" x2="19" y2="12" />
               </svg>
@@ -401,10 +403,11 @@ function InceptionDrawer() {
             {/* Close button */}
             <button
               onClick={closeDrawer}
-              className="flex h-9 w-9 items-center justify-center rounded-md transition-colors hover:bg-zinc-100"
+              className="flex h-7 w-7 items-center justify-center rounded transition-colors hover:bg-zinc-100"
               style={{ color: "var(--color-ink-muted)" }}
+              title="关闭"
             >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <line x1="18" y1="6" x2="6" y2="18" />
                 <line x1="6" y1="6" x2="18" y2="18" />
               </svg>
