@@ -3,91 +3,128 @@ import { useEffect } from "react";
 import { useThemeStore, applyTheme } from "../../stores/useThemeStore";
 
 const navItems = [
-  { to: "/", label: "主页", icon: "🏠" },
-  { to: "/tasks", label: "任务", icon: "📋" },
-  { to: "/team", label: "团队", icon: "👥" },
-  { to: "/settings", label: "设置", icon: "⚙️" },
+  { to: "/", label: "首页" },
+  { to: "/tasks", label: "任务" },
+  { to: "/team", label: "团队" },
+  { to: "/settings", label: "设置" },
 ] as const;
-
-const THEME_ICONS = { light: "☀️", dark: "🌙", system: "💻" } as const;
-const THEME_CYCLE = ["light", "dark", "system"] as const;
 
 function Sidebar({ connected }: { connected: boolean }) {
   return (
-    <aside className="flex w-[200px] min-w-[200px] flex-col border-r border-zinc-200 bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900">
+    <aside
+      className="flex w-[110px] min-w-[110px] flex-col bg-white dark:bg-[var(--color-card)]"
+      style={{ borderRight: "1px solid var(--color-border-soft)" }}
+    >
       {/* Logo */}
-      <div className="flex h-14 items-center justify-center border-b border-zinc-200 dark:border-zinc-800">
-        <span className="text-lg font-bold tracking-tight">MyCrew</span>
+      <div className="flex h-16 items-center justify-center pt-2">
+        <span
+          className="text-xl font-bold tracking-tight"
+          style={{ color: "var(--color-ink-strong)" }}
+        >
+          MyCrew
+        </span>
       </div>
 
       {/* Navigation */}
-      <nav className="flex flex-1 flex-col gap-0.5 p-2">
+      <nav className="flex flex-1 flex-col items-stretch gap-1 px-2 pt-6">
         {navItems.map((item) => (
           <NavLink
             key={item.to}
             to={item.to}
             end={item.to === "/"}
             className={({ isActive }) =>
-              `flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-colors ${
-                isActive
-                  ? "bg-blue-50 font-medium text-blue-600 dark:bg-blue-950/40 dark:text-blue-400"
-                  : "text-zinc-600 hover:bg-zinc-200/60 dark:text-zinc-400 dark:hover:bg-zinc-800/60"
+              `flex items-center justify-center rounded-md py-2.5 text-base font-semibold transition-colors ${
+                isActive ? "text-[var(--color-brand-500)]" : "text-[var(--color-ink-muted)] hover:text-[var(--color-ink-label)]"
               }`
             }
           >
-            <span className="text-base">{item.icon}</span>
-            <span>{item.label}</span>
+            {item.label}
           </NavLink>
         ))}
       </nav>
 
-      {/* Theme toggle + Footer */}
-      <div className="border-t border-zinc-200 p-3 dark:border-zinc-800">
+      {/* Bottom: Theme toggle + version chip + connection dot */}
+      <div className="flex flex-col items-center gap-2 px-2 pb-3">
         <ThemeToggle />
-        <div className="mt-2 flex items-center gap-1.5 text-xs text-zinc-500">
+        <div
+          className="flex h-7 w-[72px] items-center justify-center rounded-full border text-[11px]"
+          style={{
+            borderColor: "var(--color-border-strong)",
+            color: "var(--color-ink-ghost)",
+            backgroundColor: "var(--color-card)",
+          }}
+        >
+          v0.3
+        </div>
+        <div
+          className="flex items-center gap-1"
+          title={connected ? "后端已连接" : "未连接"}
+        >
           <span
-            className={`inline-block h-2 w-2 rounded-full ${
+            className={`inline-block h-1.5 w-1.5 rounded-full ${
               connected ? "bg-green-500" : "bg-red-500"
             }`}
           />
-          <span>{connected ? "后端已连接" : "未连接"}</span>
         </div>
-        <div className="mt-1 text-[10px] text-zinc-400">v0.1.0</div>
       </div>
     </aside>
   );
 }
 
 function ThemeToggle() {
-  const { theme, setTheme } = useThemeStore();
+  const { theme, toggle } = useThemeStore();
 
   useEffect(() => {
     applyTheme(theme);
   }, [theme]);
 
-  // Listen for system preference changes
-  useEffect(() => {
-    if (theme !== "system") return;
-    const mq = window.matchMedia("(prefers-color-scheme: dark)");
-    const handler = () => applyTheme("system");
-    mq.addEventListener("change", handler);
-    return () => mq.removeEventListener("change", handler);
-  }, [theme]);
-
-  function cycle() {
-    const idx = THEME_CYCLE.indexOf(theme);
-    const next = THEME_CYCLE[(idx + 1) % THEME_CYCLE.length] as typeof theme;
-    setTheme(next);
-  }
+  const isLight = theme === "light";
 
   return (
     <button
-      onClick={cycle}
-      className="flex items-center gap-1.5 rounded px-2 py-1 text-xs text-zinc-500 transition-colors hover:bg-zinc-200 dark:hover:bg-zinc-800"
-      title={`主题: ${theme}`}
+      onClick={toggle}
+      title={`切换主题：${isLight ? "→ 深色" : "→ 浅色"}`}
+      className="relative flex h-9 w-[72px] items-center rounded-full p-1 transition-colors"
+      style={{ backgroundColor: "var(--color-surface-alt)" }}
     >
-      <span>{THEME_ICONS[theme]}</span>
-      <span className="capitalize">{theme === "system" ? "跟随系统" : theme === "dark" ? "深色" : "浅色"}</span>
+      {/* 滑块 */}
+      <div
+        className="absolute top-1 h-7 w-[30px] rounded-full bg-white shadow-sm transition-transform duration-200"
+        style={{
+          transform: isLight ? "translateX(0)" : "translateX(32px)",
+        }}
+      />
+      {/* Sun icon */}
+      <div className="relative z-10 flex h-7 w-[30px] items-center justify-center">
+        <svg
+          width="16"
+          height="16"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke={isLight ? "var(--color-ink)" : "var(--color-ink-disabled)"}
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <circle cx="12" cy="12" r="4" />
+          <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" />
+        </svg>
+      </div>
+      {/* Moon icon */}
+      <div className="relative z-10 flex h-7 w-[30px] items-center justify-center">
+        <svg
+          width="16"
+          height="16"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke={isLight ? "var(--color-ink-disabled)" : "var(--color-ink)"}
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+        </svg>
+      </div>
     </button>
   );
 }

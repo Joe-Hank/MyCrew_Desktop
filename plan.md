@@ -827,3 +827,50 @@ class ExecuteBlenderCode(BaseTool):
 - 工作区规范：`F:\ClaudeData\CLAUDE.md`
 - Figma 原型：`https://www.figma.com/design/1sr0yP4OSIpokBszeNkwYV/MyCrew`
   - 主页 node `5:25`、任务 `33:4683`、团队 `33:4685`、设置 `33:4684`
+
+---
+
+## 待定
+
+### MCP 工具调用授权与拦截设计（2026-05-12 草案）
+
+**问题域**：MCP 联动多程序时存在两层授权——**服务级**（MCP server 启用/连接，已实现）与**工具调用级**（Agent 调用某个 MCP 工具是否需要审批，**未实现**）。本节讨论后者。
+
+#### 决策维度
+
+| 策略 | 描述 | 利弊 |
+|------|------|------|
+| 完全信任 | 配置好 MCP 后所有 Agent 调用直接放行 | 流畅但不安全 |
+| 首次授权 | 每个 MCP×工具 首次调用弹窗 + 记住 | 兼顾安全/体验 |
+| 每次确认 | 每次调用弹窗 | 太繁琐，破坏 Agent 自主性 |
+| **按操作类型** | 将 MCP 工具按副作用归类到现有 `PermissionMatrix` 桶 | **推荐** |
+
+#### 推荐方案：三层组合
+
+1. **全局类型权限**（已有）：`PermissionMatrix` 提供的开关 — `file_read / file_write / file_delete / file_modify / folder_read / dir_create / cmd_exec / bg_cmd / git`
+2. **MCP 工具元数据标注**（待实现）：在 `src/tools/builtin/mcp_*/` 每个 BaseTool 子类增加 `permission_kind: PermissionKind` 元属性
+3. **运行时拦截**（待实现）：BaseTool `_run()` 前调用 `permission_svc.check(kind, target?)`；命中"已拒绝"抛错，"已允许"放行
+4. **InteractionPort 高危确认**（plan §15 已设计，待接入）：当工具调用涉及**具体路径/外部副作用**时通过 `prompt.request` 让前端弹窗等待用户 ✅
+
+#### 用户交互流
+
+- **配置态**：用户在设置-MCP 添加服务器 → 启用即"信任所有该服务的工具"（不做工具级白名单，避免繁琐）
+- **运行态**：
+  - 99% 操作：走全局权限矩阵静默放行
+  - 1% 高危操作（删除特定路径、外网写入）：触发 InteractionPort → 任务页 `AgentChatDrawer` 弹确认
+- **审计**：所有工具调用写日志栏（`>_ 日志`）：`[mcp.blender] execute_blender_code: ok`
+
+#### 落地清单
+
+1. 后端 — `services/permission_svc.py`：`check(kind, target='*')` 已存在，**需要将其调用 wire 到 BaseTool 拦截层**
+2. 后端 — 每个 MCP 包装工具子类增加 `permission_kind` 元属性（类变量或装饰器）
+3. 后端 — `_run()` 调用前注入权限检查；命中拒绝抛 `PermissionDenied`，由 workflow_svc 统一捕获记日志
+4. 前端 — 设置-系统权限页加帮助文字：说明这些开关会拦截 MCP 调用
+5. 前端 — 任务页 `AgentChatDrawer` 监听 `prompt.request` 事件，渲染 InteractionPort 确认 UI；用户 ✅ 后发 `prompt.response`
+
+#### 待决问题
+
+- **target 颗粒度**：是只校验 kind（粗粒度）还是也校验具体目标路径/资源（细粒度）？细粒度需要在 PermissionMatrix 上增加"路径白名单"功能（plan §17.5 已标 "不在 MVP 范围"）
+- **批量调用聚合**：Agent 短时间内多次调用同一工具是否聚合一次确认弹窗？建议同类型 30s 内只问一次
+- **历史快速恢复**：用户在确认弹窗里点"全部允许"后是否写回 `PermissionMatrix` 持久化？
+- **超时策略**：InteractionPort 等待超时（默认 60s）后默认拒绝还是默认通过？建议默认拒绝

@@ -1,4 +1,4 @@
-# MyCrew v3 实施进度 — 2026-05-11
+# MyCrew v3 实施进度 — 2026-05-12
 
 ## 已完成 Phase
 
@@ -15,6 +15,76 @@
 | 10 | Figma 原型对齐（设置页/团队页/主页 → 药丸Tab+表格+底部状态栏） | ✅ committed |
 | 11 | LLM Gateway + Lifecycle API（OpenAI/Anthropic adapter, SSE streaming） | ✅ committed |
 | 12 | Port 层补全 + 状态机 bug 修复 + 测试覆盖增强 | ✅ committed |
+| 13 | 测试补强（36→140 pytest）+ log_svc 桩填充 + 代码审查报告 | 🔄 pending commit |
+| 14 | Figma UI 全面对齐（Phase A-F：tokens/sidebar/home/task/team/settings/inception） | 🔄 pending commit |
+
+---
+
+## Phase 14 — Figma UI 全面对齐（2026-05-12）
+
+### 完成内容
+
+| 子阶段 | 内容 |
+|--------|------|
+| A | 全局 token 系统（CSS `@theme` + 品牌色 `#0c8ce9`）+ 侧边栏窄化（200→110px）+ 2 态主题切换 + 日志栏简化 |
+| B | 主页：2 列 → **4 列卡片网格** + **卡内嵌任务条** + **MCP/Token 双状态栏** + chevron 分页 |
+| C | 任务页：**选中任务 header** + **节点 5 图标操作栏** + **贝塞尔曲线连接** |
+| D | 团队页：Agents/Crews/Tools 表 + 行 ⋯ 菜单 + **左侧抽屉编辑器** |
+| E | 设置页：LLM/MCP/权限表 + 同款左侧抽屉 |
+| F | 立项流程：**全屏覆盖** + 顶部 LLM/模型/思考切换 + 左聊天右蓝图 + **底部确认按钮** |
+
+### 新增共享组件
+
+- `components/common/PillTabs.tsx` — 药丸式 Tab 组件（团队/设置共用）
+- `components/common/RowActionsMenu.tsx` — ⋯ 行操作菜单
+- `components/common/SideDrawer.tsx` — 左侧抽屉 + `DrawerFooter` + `FormField` + `inputCls`
+
+### 删除已废弃文件（14 个）
+
+- `task/ProjectHeader.tsx`、`home/McpStatusBar.tsx`
+- `team/{AgentList,CrewList,ToolList,EditorDrawer}.tsx`
+- `settings/{LlmList,McpList,PermissionMatrix,LlmEditOverlay,McpEditOverlay,EditorDrawer,DefaultLlmSelector}.tsx`
+- `inception/{SessionList,FileIndexer}.tsx`
+
+### 验证结果
+
+- ✅ `tsc --noEmit` 零错误
+- ✅ `vite build` 通过（138 modules, ~792ms）
+- ✅ 类型安全：全部用 CSS var 而非硬编码 zinc-*/blue-*
+- ⏳ **视觉验收待用户启动 dev 实际查看**（Phase 13 测试 36→140 后端逻辑验证已通过）
+
+### 关键决策
+
+- **暗色模式**：当前 token 系统支持，但页面级未全部适配 → 用户要求"先按白色版本做，黑色后面补"
+- **MCP 工具授权 UX**：用户单独追问，已设计完整方案并写入 `plan.md` 末尾 "待定" 章节，等后续 wire 接
+
+---
+
+## Phase 13 — 测试补强 + 代码审查（2026-05-12）
+
+### 完成内容
+
+| 模块 | 说明 |
+|------|------|
+| 代码审查报告 | `docs/REVIEW_2026-05-12.md`（架构 A、测试 C+、文档 A、综合 B+） |
+| conftest.py | `FakeCRUD/FakeEventBus/FakeLlmGateway/FakeMCPPool/FakeWSManager` 测试夹具 |
+| 新增测试 | 7 个新测试文件，36→**140** pytest（+289%） |
+| log_svc 桩填充 | NotImplementedError → 内存环形缓冲区实现 |
+| event_bus bug fix | `structlog.error()` 的 `event=` 参数冲突 |
+
+### 新增测试文件
+- `test_task_runner.py`（15 tests）— TaskRunner 输入/输出/重试/执行顺序
+- `test_state_machine_edge.py`（13 tests）— 状态机边界用例
+- `test_workflow_svc.py`（17 tests）— WorkflowService 编排逻辑
+- `test_inception_svc.py`（20 tests）— InceptionService 会话/蓝图
+- `test_project_svc.py`（14 tests）— ProjectService CRUD/克隆
+- `test_mcp_svc.py`（19 tests）— McpService CRUD/连接池/序列化
+- `test_event_bus.py`（6 tests）— InMemoryEventBus 订阅/错误隔离
+
+### 验证结果
+- ✅ pytest **140/140 passed**（11→36→140，累计 +1173%）
+- ✅ 后端 75 API routes 不变
+- ✅ 类型检查全过
 
 ## Phase 12 — Port 层补全 + 测试覆盖增强（2026-05-11）
 

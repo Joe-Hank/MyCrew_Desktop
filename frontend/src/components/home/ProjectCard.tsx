@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import type { Project } from "../../queries/useProjectQuery";
-import { useCloneProject, useDeleteProject } from "../../queries/useProjectQuery";
+import { useProject, useDeleteProject, type Project, type Task } from "../../queries/useProjectQuery";
 
 const stateLabels: Record<string, string> = {
   ready: "未启动",
@@ -13,15 +12,14 @@ const stateLabels: Record<string, string> = {
   aborted: "已中止",
 };
 
-const stateColors: Record<string, string> = {
-  ready: "bg-zinc-400",
-  running: "bg-blue-500 animate-pulse",
-  paused: "bg-yellow-500",
-  completed: "bg-green-500",
-  completed_with_warnings: "bg-yellow-500",
-  completed_with_issues: "bg-red-500",
-  aborted: "bg-zinc-500",
-};
+function primaryButtonLabel(state: string, progress: number): { text: string; tone: "primary" | "resume" } {
+  if (state === "running") return { text: "暂停", tone: "primary" };
+  if (state === "paused") return { text: "继续", tone: "resume" };
+  if (progress > 0 && !["completed", "completed_with_warnings", "completed_with_issues", "aborted"].includes(state)) {
+    return { text: "继续", tone: "resume" };
+  }
+  return { text: "开始", tone: "primary" };
+}
 
 function ProjectCard({
   project,
@@ -31,18 +29,19 @@ function ProjectCard({
   onStart: (id: string) => void;
 }) {
   const navigate = useNavigate();
+  const { data: detail } = useProject(project.id);
   const [deleteConfirm, setDeleteConfirm] = useState(false);
   const [deleteInput, setDeleteInput] = useState("");
-  const cloneMut = useCloneProject();
   const deleteMut = useDeleteProject();
 
   const progress = project.progress_pct ?? 0;
-  const taskInfo = project.task_count
-    ? `${project.done_count ?? 0}/${project.task_count}`
-    : "无任务";
-
-  const isRunning = project.state === "running";
+  const tasks = detail?.tasks ?? [];
   const isTerminal = ["completed", "completed_with_warnings", "completed_with_issues", "aborted"].includes(project.state);
+  const isRunning = project.state === "running";
+  const isReady = project.state === "ready";
+  const btn = primaryButtonLabel(project.state, progress);
+
+  const dateStr = project.created_at?.substring(0, 10) ?? "";
 
   function handleDelete() {
     if (deleteInput === project.name) {
@@ -54,85 +53,158 @@ function ProjectCard({
 
   return (
     <div
-      className="group relative flex cursor-pointer flex-col rounded-lg border border-zinc-200 bg-white p-4 transition-shadow hover:shadow-md dark:border-zinc-700 dark:bg-zinc-900"
+      className="group relative flex h-full cursor-pointer flex-col rounded-[10px] bg-white p-4 transition-shadow"
+      style={{
+        boxShadow: isRunning
+          ? "0 0 16px 3px rgba(12, 140, 233, 0.28)"
+          : "0 1px 2px rgba(0,0,0,0.04)",
+        border: "1px solid var(--color-border-soft)",
+      }}
       onClick={() => navigate(`/tasks/${project.id}`)}
     >
       {/* Header */}
-      <div className="mb-2 flex items-start justify-between">
-        <div className="flex items-center gap-2">
-          <span className={`inline-block h-2.5 w-2.5 rounded-full ${stateColors[project.state] ?? "bg-zinc-400"}`} />
-          <h3 className="text-sm font-semibold leading-tight">{project.name}</h3>
-        </div>
-        <span className="text-xs text-zinc-400">
-          {stateLabels[project.state] ?? project.state}
-        </span>
+      <div
+        className="mb-1 flex items-start justify-between"
+        onClick={(e) => e.stopPropagation()}
+        role="presentation"
+      >
+        <h3
+          className="truncate text-base font-semibold leading-tight"
+          style={{ color: "var(--color-ink-muted)" }}
+          title={project.name}
+        >
+          {project.name}
+        </h3>
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            setDeleteConfirm(true);
+          }}
+          className="ml-2 shrink-0 rounded p-1 transition-colors hover:bg-zinc-100"
+          title="删除"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+            style={{ color: "var(--color-ink-ghost)" }}>
+            <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+          </svg>
+        </button>
       </div>
 
-      {/* Progress */}
-      <div className="mb-3">
-        <div className="mb-1 flex justify-between text-xs text-zinc-500">
-          <span>进度 {Math.round(progress)}%</span>
-          <span>任务 {taskInfo}</span>
-        </div>
-        <div className="h-1.5 w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
-          <div
-            className="h-full rounded-full bg-blue-500 transition-all"
-            style={{ width: `${progress}%` }}
-          />
-        </div>
+      {/* Meta: date + progress */}
+      <div
+        className="mb-2 flex items-center justify-between text-[11px]"
+        style={{ color: "var(--color-ink-muted)" }}
+      >
+        <span>{dateStr}</span>
+        <span>{Math.round(progress)}%</span>
       </div>
 
-      {/* Meta */}
-      <div className="mb-3 text-xs text-zinc-400">
-        {project.created_at?.substring(0, 10)}
-        {project.root_path && (
-          <span className="ml-2 truncate" title={project.root_path}>
-            {project.root_path}
-          </span>
-        )}
+      {/* Progress bar */}
+      <div
+        className="mb-3 h-1.5 w-full overflow-hidden rounded-full"
+        style={{ backgroundColor: "var(--color-surface-alt)" }}
+      >
+        <div
+          className="h-full rounded-full transition-all"
+          style={{
+            width: `${progress}%`,
+            backgroundColor: "var(--color-brand-500)",
+          }}
+        />
       </div>
 
-      {/* Actions */}
+      {/* Actions row */}
       {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions */}
-      <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
-        {!isTerminal && (
+      <div className="mb-3 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+        {!isTerminal ? (
           <button
             onClick={() => onStart(project.id)}
-            className="rounded bg-blue-500 px-3 py-1 text-xs font-medium text-white transition-colors hover:bg-blue-600"
+            className="flex-1 rounded-lg py-2 text-sm font-medium text-white transition-opacity hover:opacity-90"
+            style={{
+              backgroundColor: btn.tone === "resume" ? "#d39a3b" : "var(--color-brand-500)",
+            }}
           >
-            {progress > 0 && !isRunning ? "继续" : isRunning ? "暂停" : "开始"}
+            {btn.text}
+          </button>
+        ) : (
+          <button
+            disabled
+            className="flex-1 cursor-not-allowed rounded-lg py-2 text-sm"
+            style={{
+              backgroundColor: "var(--color-surface-alt)",
+              color: "var(--color-ink-disabled)",
+            }}
+          >
+            已结束
           </button>
         )}
-        {isTerminal && (
-          <span className="rounded bg-zinc-200 px-3 py-1 text-xs text-zinc-500 dark:bg-zinc-700">
-            已结束
-          </span>
-        )}
+
+        <PathButton
+          locked={!!project.root_path}
+          configured={!!project.root_path}
+          onClick={(e) => {
+            e.stopPropagation();
+            // TODO: open path picker
+          }}
+        />
+
         <button
-          onClick={() => cloneMut.mutate(project.id)}
-          disabled={cloneMut.isPending}
-          className="rounded border border-zinc-300 px-2 py-1 text-xs transition-colors hover:bg-zinc-100 dark:border-zinc-600 dark:hover:bg-zinc-800"
+          onClick={(e) => {
+            e.stopPropagation();
+            // TODO: open iterate flow
+          }}
+          disabled={isReady}
+          className="rounded-lg border bg-white px-3 py-2 text-sm transition-colors disabled:opacity-50"
+          style={{
+            borderColor: "var(--color-border-soft)",
+            color: isReady ? "var(--color-ink-disabled)" : "var(--color-ink-label)",
+          }}
+          title="迭代"
         >
-          复制
-        </button>
-        <button
-          onClick={() => setDeleteConfirm(true)}
-          className="rounded border border-red-200 px-2 py-1 text-xs text-red-500 transition-colors hover:bg-red-50 dark:border-red-800 dark:hover:bg-red-950"
-        >
-          删除
+          迭代
         </button>
       </div>
 
-      {/* Delete confirmation modal */}
+      {/* State label */}
+      <div
+        className="mb-2 text-[10px] uppercase tracking-wide"
+        style={{ color: "var(--color-ink-ghost)" }}
+      >
+        {stateLabels[project.state] ?? project.state}
+      </div>
+
+      {/* Task pills list */}
+      <div className="flex-1 space-y-2 overflow-y-auto pr-1">
+        {tasks.length === 0 ? (
+          <div
+            className="rounded-lg py-3 text-center text-[11px]"
+            style={{
+              backgroundColor: "var(--color-surface-alt)",
+              color: "var(--color-ink-ghost)",
+            }}
+          >
+            无任务
+          </div>
+        ) : (
+          tasks.map((task, idx) => <TaskPill key={task.id} task={task} index={idx} />)
+        )}
+      </div>
+
+      {/* Delete confirm overlay */}
       {deleteConfirm && (
-        <div className="absolute inset-0 z-10 flex flex-col items-center justify-center rounded-lg bg-white/95 p-4 dark:bg-zinc-900/95">
-          <p className="mb-2 text-xs text-zinc-600 dark:text-zinc-300">
+        // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
+        <div
+          className="absolute inset-0 z-10 flex flex-col items-center justify-center rounded-[10px] bg-white/95 p-4"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <p className="mb-2 text-xs" style={{ color: "var(--color-ink-soft)" }}>
             输入项目名 <strong>{project.name}</strong> 确认删除
           </p>
           <input
             value={deleteInput}
             onChange={(e) => setDeleteInput(e.target.value)}
-            className="mb-2 w-full rounded border border-zinc-300 px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-800"
+            className="mb-3 w-full rounded border px-2 py-1 text-xs"
+            style={{ borderColor: "var(--color-border-soft)" }}
             placeholder={project.name}
             autoFocus
           />
@@ -140,19 +212,93 @@ function ProjectCard({
             <button
               onClick={handleDelete}
               disabled={deleteInput !== project.name}
-              className="rounded bg-red-500 px-3 py-1 text-xs text-white disabled:opacity-50"
+              className="rounded-lg bg-red-500 px-3 py-1.5 text-xs text-white disabled:opacity-50"
             >
               确认删除
             </button>
             <button
-              onClick={() => { setDeleteConfirm(false); setDeleteInput(""); }}
-              className="rounded border border-zinc-300 px-3 py-1 text-xs dark:border-zinc-600"
+              onClick={() => {
+                setDeleteConfirm(false);
+                setDeleteInput("");
+              }}
+              className="rounded-lg border bg-white px-3 py-1.5 text-xs"
+              style={{ borderColor: "var(--color-border-soft)" }}
             >
               取消
             </button>
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function PathButton({
+  locked,
+  configured,
+  onClick,
+}: {
+  locked: boolean;
+  configured: boolean;
+  onClick: (e: React.MouseEvent) => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className="flex items-center gap-1 rounded-lg border bg-white px-3 py-2 text-sm transition-colors hover:bg-zinc-50"
+      style={{
+        borderColor: "var(--color-border-soft)",
+        color: configured ? "var(--color-ink-label)" : "var(--color-ink-disabled)",
+      }}
+      title={configured ? "已配置路径" : "配置路径"}
+    >
+      {locked && (
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <rect x="3" y="11" width="18" height="11" rx="2" />
+          <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+        </svg>
+      )}
+      路径
+    </button>
+  );
+}
+
+function TaskPill({ task, index }: { task: Task; index: number }) {
+  const agentLabel = task.agent_id ? task.agent_id.replace(/^agent_/, "") : "未分配";
+  const statusDot: Record<string, string> = {
+    pending: "#cbd5e1",
+    running: "var(--color-brand-500)",
+    done: "#10b981",
+    failed: "#ef4444",
+    validation_failed: "#f59e0b",
+    aborted: "#737373",
+    blocked: "#a78bfa",
+    paused: "#facc15",
+  };
+
+  return (
+    <div
+      className="rounded-lg px-3 py-2"
+      style={{ backgroundColor: "var(--color-surface-alt)" }}
+    >
+      <div className="flex items-start gap-2">
+        <span
+          className="mt-1 inline-block h-2 w-2 shrink-0 rounded-full"
+          style={{ backgroundColor: statusDot[task.status] ?? "#cbd5e1" }}
+        />
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-[12px] font-medium" style={{ color: "var(--color-ink-soft)" }}>
+            {`Task${index + 1}. ${task.title || "未命名"}`}
+          </div>
+          <div className="flex items-center gap-1.5 text-[10px]" style={{ color: "var(--color-ink-faint)" }}>
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+              <circle cx="12" cy="7" r="4" />
+            </svg>
+            <span className="truncate">{agentLabel}</span>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

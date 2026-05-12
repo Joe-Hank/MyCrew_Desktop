@@ -14,7 +14,6 @@ function LogDrawer() {
   const [expanded, setExpanded] = useState(false);
   const [activeTab, setActiveTab] = useState<string>(TABS[0]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [lastLine, setLastLine] = useState("就绪");
 
   const handleEvent = useCallback((msg: WsMessage) => {
     if (msg.type === "ws.connected" || msg.type === "ws.disconnected" || msg.type === "pong") {
@@ -26,7 +25,6 @@ function LogDrawer() {
       message: (msg.payload as Record<string, unknown>)?.message as string ?? msg.type,
     };
     setLogs((prev) => [...prev.slice(-499), entry]);
-    setLastLine(`[${msg.type}] ${entry.message}`);
   }, []);
 
   useAnyEvent(handleEvent);
@@ -34,28 +32,48 @@ function LogDrawer() {
   if (!expanded) {
     return (
       <div
-        className="h-8 flex items-center justify-between border-t border-zinc-200 bg-zinc-100 px-3 text-xs text-zinc-500 cursor-pointer select-none dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400"
         onClick={() => setExpanded(true)}
+        className="flex h-7 cursor-pointer select-none items-center justify-between px-3 text-xs"
+        style={{
+          backgroundColor: "var(--color-card)",
+          color: "var(--color-ink-ghost)",
+          borderTop: "1px solid var(--color-border-strong)",
+        }}
       >
-        <span className="truncate">{lastLine}</span>
-        <span className="ml-2 shrink-0">▲</span>
+        <span className="font-mono">&gt;_ 日志</span>
       </div>
     );
   }
 
   return (
-    <div className="flex h-48 flex-col border-t border-zinc-200 bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900">
-      <div className="flex items-center justify-between border-b border-zinc-200 px-2 dark:border-zinc-800">
-        <div className="flex gap-1">
+    <div
+      className="flex h-56 flex-col"
+      style={{
+        backgroundColor: "var(--color-card)",
+        borderTop: "1px solid var(--color-border-strong)",
+      }}
+    >
+      <div
+        className="flex items-center justify-between px-2"
+        style={{ borderBottom: "1px solid var(--color-border-soft)" }}
+      >
+        <div className="flex">
           {TABS.map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
-              className={`px-3 py-1.5 text-xs font-medium transition-colors ${
-                activeTab === tab
-                  ? "border-b-2 border-blue-500 text-blue-600 dark:text-blue-400"
-                  : "text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200"
-              }`}
+              className="px-4 py-1.5 text-xs transition-colors"
+              style={{
+                color:
+                  activeTab === tab
+                    ? "var(--color-ink-label)"
+                    : "var(--color-ink-ghost)",
+                borderBottom:
+                  activeTab === tab
+                    ? "2px solid var(--color-brand-500)"
+                    : "2px solid transparent",
+                fontWeight: activeTab === tab ? 500 : 400,
+              }}
             >
               {tab}
             </button>
@@ -63,19 +81,26 @@ function LogDrawer() {
         </div>
         <button
           onClick={() => setExpanded(false)}
-          className="px-2 py-1 text-xs text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200"
+          className="px-2 py-1 text-base"
+          style={{ color: "var(--color-ink-ghost)" }}
+          title="收起"
         >
-          ▼ 收起
+          ▽
         </button>
       </div>
-      <div className="flex-1 overflow-auto p-2 font-mono text-xs text-zinc-600 dark:text-zinc-300">
+      <div
+        className="flex-1 overflow-auto px-3 py-2 font-mono text-xs"
+        style={{ color: "var(--color-ink-soft)" }}
+      >
         {logs.length === 0 ? (
-          <div className="flex h-full items-center justify-center text-zinc-400">暂无日志</div>
+          <div className="text-[var(--color-ink-ghost)]">&gt;_ 日志内容...</div>
         ) : (
           logs.map((entry, i) => (
             <div key={i} className="leading-5">
-              <span className="text-zinc-400">{entry.ts.substring(11, 19)}</span>{" "}
-              <span className="text-blue-500">[{entry.type}]</span>{" "}
+              <span style={{ color: "var(--color-ink-ghost)" }}>
+                {entry.ts.substring(11, 19)}
+              </span>{" "}
+              <span style={{ color: "var(--color-brand-500)" }}>[{entry.type}]</span>{" "}
               {entry.message}
             </div>
           ))

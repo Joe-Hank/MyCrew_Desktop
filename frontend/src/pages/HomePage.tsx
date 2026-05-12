@@ -1,71 +1,74 @@
-import McpStatusBar from "../components/home/McpStatusBar";
+import { useState } from "react";
 import ProjectGrid from "../components/home/ProjectGrid";
+import StatusBars from "../components/home/StatusBars";
 import InceptionDrawer from "../components/inception/InceptionDrawer";
 import { useInceptionStore } from "../stores/useInceptionStore";
+import { useProjects } from "../queries/useProjectQuery";
 
 function HomePage() {
   const { openDrawer } = useInceptionStore();
+  const [page, setPage] = useState(1);
+  const { data } = useProjects(page);
+  const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / 4));
 
   function handleStart(projectId: string) {
-    // Phase 5b+ will wire workflow start/pause toggle
     console.log("start/pause project:", projectId);
   }
 
   return (
-    <div className="flex h-full flex-col">
-      {/* Toolbar - top */}
-      <div className="flex items-center px-6 pt-4">
+    <div className="flex h-full flex-col px-6 pb-3 pt-4">
+      {/* Top toolbar */}
+      <div className="mb-4 flex items-center">
         <button
           onClick={() => openDrawer()}
-          className="rounded-2xl bg-blue-500 px-5 py-2.5 text-sm font-medium text-white shadow transition-colors hover:bg-blue-600"
+          className="flex items-center gap-1 rounded-2xl px-5 py-2 text-sm font-medium text-white shadow-sm transition-opacity hover:opacity-90"
+          style={{ backgroundColor: "var(--color-brand-500)" }}
         >
-          新建项目  +
+          <span>新建项目</span>
+          <span className="text-base">+</span>
         </button>
+
+        <div className="ml-auto flex items-center gap-1 text-sm" style={{ color: "var(--color-ink-faint)" }}>
+          <button
+            onClick={() => setPage((p) => Math.max(1, p - 1))}
+            disabled={page <= 1}
+            className="rounded p-1 transition-colors hover:bg-zinc-100 disabled:opacity-30"
+            aria-label="上一页"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+              strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="15 18 9 12 15 6" />
+            </svg>
+          </button>
+          <span className="tabular-nums">
+            {page}/{totalPages}
+          </span>
+          <button
+            onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+            disabled={page >= totalPages}
+            className="rounded p-1 transition-colors hover:bg-zinc-100 disabled:opacity-30"
+            aria-label="下一页"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+              strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="9 18 15 12 9 6" />
+            </svg>
+          </button>
+        </div>
       </div>
 
-      {/* Project grid - center */}
-      <div className="flex-1 overflow-auto px-6 pt-4">
-        <ProjectGrid onStart={handleStart} />
+      {/* Project grid */}
+      <div className="min-h-0 flex-1">
+        <ProjectGrid page={page} onStart={handleStart} />
       </div>
 
       {/* Bottom status bars */}
-      <div className="space-y-0 border-t border-zinc-200 dark:border-zinc-800">
-        {/* Tokens bar */}
-        <div className="flex items-center gap-2 px-4 py-2">
-          <span className="text-xs text-zinc-600 dark:text-zinc-400">Tokens：</span>
-          <TokenPill name="ClaudeCode" pct={0} />
-          <TokenPill name="GPT" pct={0} />
-          <TokenPill name="Qwen" pct={34} />
-          <TokenPill name="MIMO" pct={34} />
-          <TokenPill name="Deepseek" pct={34} />
-          <TokenPill name="GLM" pct={0} />
-        </div>
-        {/* MCP connection bar */}
-        <div className="flex items-center gap-2 border-t border-zinc-100 px-4 py-2 dark:border-zinc-800">
-          <span className="text-xs text-zinc-600 dark:text-zinc-400">MPC连接：</span>
-          <McpStatusBar />
-          <div className="ml-auto flex gap-2">
-            <button className="rounded-2xl border border-zinc-200 bg-white px-4 py-1.5 text-xs text-zinc-600 shadow-sm dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
-              连接
-            </button>
-            <button className="rounded-2xl border border-zinc-200 bg-white px-4 py-1.5 text-xs text-zinc-600 shadow-sm dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
-              刷新
-            </button>
-          </div>
-        </div>
+      <div className="mt-3">
+        <StatusBars />
       </div>
 
       {/* Inception drawer (overlay) */}
       <InceptionDrawer />
-    </div>
-  );
-}
-
-function TokenPill({ name, pct }: { name: string; pct: number }) {
-  return (
-    <div className="flex items-center gap-2 rounded-full border border-zinc-200 bg-white px-3 py-1 dark:border-zinc-700 dark:bg-zinc-800">
-      <span className="text-xs text-zinc-600 dark:text-zinc-300">{name}</span>
-      <span className="text-xs text-zinc-400">{pct}%</span>
     </div>
   );
 }

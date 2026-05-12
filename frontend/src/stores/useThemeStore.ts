@@ -1,18 +1,20 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
-type Theme = "light" | "dark" | "system";
+export type Theme = "light" | "dark";
 
 interface ThemeState {
   theme: Theme;
   setTheme: (theme: Theme) => void;
+  toggle: () => void;
 }
 
 export const useThemeStore = create<ThemeState>()(
   persist(
-    (set) => ({
-      theme: "system",
+    (set, get) => ({
+      theme: "light",
       setTheme: (theme) => set({ theme }),
+      toggle: () => set({ theme: get().theme === "light" ? "dark" : "light" }),
     }),
     { name: "mycrew-theme" },
   ),
@@ -20,11 +22,5 @@ export const useThemeStore = create<ThemeState>()(
 
 /** Apply theme class to document root. Call once at app init + on change. */
 export function applyTheme(theme: Theme) {
-  const root = document.documentElement;
-  if (theme === "system") {
-    const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-    root.classList.toggle("dark", prefersDark);
-  } else {
-    root.classList.toggle("dark", theme === "dark");
-  }
+  document.documentElement.classList.toggle("dark", theme === "dark");
 }

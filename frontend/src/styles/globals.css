@@ -1,23 +1,93 @@
 @import "tailwindcss";
 
-:root {
-  font-family:
-    Inter,
+@theme {
+  /* ── Brand & semantic tokens (Figma 对齐) ───────────────── */
+  --color-brand-50: #e6f3fc;
+  --color-brand-100: #c0e0f7;
+  --color-brand-200: #93caf2;
+  --color-brand-300: #5bafe9;
+  --color-brand-400: #2e9be3;
+  --color-brand-500: #0c8ce9;   /* ← 主品牌色（按钮、激活态） */
+  --color-brand-600: #0a7bcc;
+  --color-brand-700: #086bb0;
+  --color-brand-800: #075a93;
+  --color-brand-900: #054874;
+
+  /* 把 Tailwind 的 blue 色阶映射到 Figma 品牌蓝，
+     这样现有 `bg-blue-500 / text-blue-600` 自动跟随品牌 */
+  --color-blue-50: #e6f3fc;
+  --color-blue-100: #c0e0f7;
+  --color-blue-200: #93caf2;
+  --color-blue-300: #5bafe9;
+  --color-blue-400: #2e9be3;
+  --color-blue-500: #0c8ce9;
+  --color-blue-600: #0a7bcc;
+  --color-blue-700: #086bb0;
+  --color-blue-800: #075a93;
+  --color-blue-900: #054874;
+
+  /* 中性色 — 浅色模式（来自 Figma） */
+  --color-surface: #f5f7fa;       /* 页面背景 */
+  --color-surface-alt: #ededed;   /* 状态栏/弹窗底色 */
+  --color-card: #ffffff;
+  --color-card-alt: #fcfcfc;
+  --color-border-soft: #e6e6e6;
+  --color-border-strong: #d7d7d7;
+
+  /* 文字 */
+  --color-ink-strong: #2b2b2b;    /* logo */
+  --color-ink: #363636;
+  --color-ink-soft: #3e3e3e;
+  --color-ink-label: #4e4e4e;
+  --color-ink-muted: #697395;     /* nav inactive / 副标题 */
+  --color-ink-faint: #737373;
+  --color-ink-disabled: #8f8f8f;
+  --color-ink-ghost: #b3b3b3;
+
+  /* 字体 */
+  --font-sans:
+    "Inter",
+    "Noto Sans SC",
+    "Noto Sans JP",
     system-ui,
     -apple-system,
     "Segoe UI",
     Roboto,
-    "Noto Sans CJK SC",
     sans-serif;
+}
+
+/* ── 深色模式覆盖（保留功能，但优先保证浅色对齐 Figma）─── */
+:root.dark {
+  --color-surface: #0d0f12;
+  --color-surface-alt: #1a1d22;
+  --color-card: #16181d;
+  --color-card-alt: #1c1f25;
+  --color-border-soft: #2a2d33;
+  --color-border-strong: #3a3d44;
+  --color-ink-strong: #f3f4f6;
+  --color-ink: #e5e7eb;
+  --color-ink-soft: #d4d4d8;
+  --color-ink-label: #c0c0c5;
+  --color-ink-muted: #8b94a8;
+  --color-ink-faint: #7a7a7a;
+  --color-ink-disabled: #5a5a5a;
+  --color-ink-ghost: #4a4a4a;
+}
+
+:root {
+  font-family: var(--font-sans);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  color: var(--color-ink);
+  background-color: var(--color-surface);
 }
 
 body {
   margin: 0;
   min-height: 100vh;
+  background-color: var(--color-surface);
 }
 
 #root {

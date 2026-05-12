@@ -2,21 +2,25 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { useInceptionStore } from "../../stores/useInceptionStore";
 import {
   useInceptionSession,
+  useInceptionSessions,
   useCreateInceptionSession,
   useSendInceptionMessage,
   useFinalizeInception,
   type Blueprint,
+  type InceptionSession,
 } from "../../queries/useInceptionQuery";
 import { useLlmProviders } from "../../queries/useLlmQuery";
 import { useEvent } from "../../hooks/useEvent";
 import TaskBlueprintEditor from "./TaskBlueprintEditor";
-import FileIndexer, { type IndexedPath } from "./FileIndexer";
-import SessionList from "./SessionList";
 
 function InceptionDrawer() {
   const {
-    drawerOpen, closeDrawer, activeSessionId, setActiveSession,
-    draftBlueprint, setDraftBlueprint,
+    drawerOpen,
+    closeDrawer,
+    activeSessionId,
+    setActiveSession,
+    draftBlueprint,
+    setDraftBlueprint,
   } = useInceptionStore();
   const { data: session } = useInceptionSession(activeSessionId);
   const { data: providers } = useLlmProviders();
@@ -26,10 +30,10 @@ function InceptionDrawer() {
 
   const [input, setInput] = useState("");
   const [selectedLlm, setSelectedLlm] = useState("");
+  const [selectedModel, setSelectedModel] = useState("");
   const [thinking, setThinking] = useState(false);
   const [reEvaluating, setReEvaluating] = useState(false);
-  const [indexedPaths, setIndexedPaths] = useState<IndexedPath[]>([]);
-  const [showNewSession, setShowNewSession] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const handleBlueprintEvent = useCallback(
@@ -48,53 +52,35 @@ function InceptionDrawer() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [session?.messages]);
 
-  // Save unsent input to localStorage on close
-  useEffect(() => {
-    if (!drawerOpen && activeSessionId && input.trim()) {
-      localStorage.setItem(`inception_draft_${activeSessionId}`, input);
-    }
-  }, [drawerOpen, activeSessionId, input]);
-
-  // Restore draft input when session changes
-  useEffect(() => {
-    if (activeSessionId) {
-      const saved = localStorage.getItem(`inception_draft_${activeSessionId}`);
-      if (saved) {
-        setInput(saved);
-        localStorage.removeItem(`inception_draft_${activeSessionId}`);
-      } else {
-        setInput("");
-      }
-    }
-  }, [activeSessionId]);
-
   if (!drawerOpen) return null;
 
-  async function handleNewSession() {
-    if (!selectedLlm) return;
+  const providerList = (providers as unknown as Array<{ id: string; name: string; models?: Array<{ model_name: string }> }>) ?? [];
+  const currentProvider = providerList.find((p) => p.id === selectedLlm);
+  const modelOptions = currentProvider?.models ?? [];
+
+  async function ensureSession(): Promise<string | null> {
+    if (activeSessionId) return activeSessionId;
+    if (!selectedLlm) return null;
+    const fullLlmId = selectedModel ? `${selectedLlm}:${selectedModel}` : selectedLlm;
     const res = await createSession.mutateAsync({
-      llm_id: selectedLlm,
+      llm_id: fullLlmId,
       thinking_mode: thinking,
     });
     if (res.ok && res.data) {
-      setActiveSession((res.data as { id: string }).id);
-      setShowNewSession(false);
+      const id = (res.data as { id: string }).id;
+      setActiveSession(id);
+      return id;
     }
-  }
-
-  function handleSelectSession(id: string) {
-    setActiveSession(id);
-    setDraftBlueprint(null);
-    setIndexedPaths([]);
-    setShowNewSession(false);
+    return null;
   }
 
   async function handleSend() {
-    if (!input.trim() || !activeSessionId) return;
     const content = input.trim();
+    if (!content) return;
+    const sid = await ensureSession();
+    if (!sid) return;
     setInput("");
-    localStorage.removeItem(`inception_draft_${activeSessionId}`);
-    await sendMessage.mutateAsync({ sessionId: activeSessionId, content });
+    await sendMessage.mutateAsync({ sessionId: sid, content });
   }
 
   async function handleFinalize() {
@@ -126,155 +112,308 @@ function InceptionDrawer() {
     }
   }
 
+  function handleNewSession() {
+    setActiveSession(null);
+    setDraftBlueprint(null);
+    setHistoryOpen(false);
+  }
+
   const messages = session?.messages ?? [];
-  const providerList = (providers as unknown as Array<Record<string, unknown>>) ?? [];
-  const needsSetup = !activeSessionId || showNewSession;
 
   return (
-    <div className="fixed inset-y-0 left-[200px] z-40 flex" style={{ width: "calc(100% - 200px)" }}>
-      {/* Backdrop */}
-      <div className="fixed inset-0 bg-black/20" onClick={closeDrawer} />
+    <div
+      className="fixed inset-0 z-30 flex"
+      style={{ backgroundColor: "rgba(0, 0, 0, 0.25)" }}
+    >
+      {/* Spacer for sidebar */}
+      <div className="w-[110px] shrink-0" onClick={closeDrawer} role="presentation" />
 
-      {/* Session list sidebar */}
-      <div className="relative z-10 h-full w-48 shrink-0 border-r border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-900">
-        <SessionList
-          activeId={activeSessionId}
-          onSelect={handleSelectSession}
-          onNew={() => {
-            setActiveSession(null);
-            setShowNewSession(true);
-            setDraftBlueprint(null);
-          }}
-        />
-      </div>
-
-      {/* Main drawer */}
+      {/* Main overlay area */}
       <div
-        className="relative z-10 flex h-full flex-col border-r border-zinc-200 bg-white shadow-xl dark:border-zinc-700 dark:bg-zinc-900"
-        style={{ width: draftBlueprint ? "calc(100% - 48px - 280px)" : "calc(62% - 48px)" }}
+        className="flex flex-1 flex-col"
+        style={{ backgroundColor: "var(--color-surface)" }}
       >
-        {/* Header */}
-        <div className="flex items-center justify-between border-b border-zinc-200 px-4 py-3 dark:border-zinc-700">
-          <h2 className="text-sm font-semibold">
-            {activeSessionId ? "项目对话" : "新建项目"}
-          </h2>
-          <button onClick={closeDrawer} className="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200">
-            ✕
-          </button>
+        {/* Top toolbar */}
+        <div
+          className="flex items-center gap-3 px-5 py-3"
+          style={{ borderBottom: "1px solid var(--color-border-soft)", backgroundColor: "var(--color-card)" }}
+        >
+          {/* LLM picker */}
+          <select
+            value={selectedLlm}
+            onChange={(e) => {
+              setSelectedLlm(e.target.value);
+              setSelectedModel("");
+            }}
+            disabled={!!activeSessionId}
+            className="rounded-md bg-white px-3 py-1.5 text-sm outline-none disabled:opacity-60"
+            style={{ border: "1px solid var(--color-border-soft)" }}
+          >
+            <option value="">— LLM —</option>
+            {providerList.map((p) => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </select>
+
+          {/* Model picker */}
+          <select
+            value={selectedModel}
+            onChange={(e) => setSelectedModel(e.target.value)}
+            disabled={!selectedLlm || !!activeSessionId}
+            className="rounded-md bg-white px-3 py-1.5 text-sm outline-none disabled:opacity-60"
+            style={{ border: "1px solid var(--color-border-soft)" }}
+          >
+            <option value="">— 模型 —</option>
+            {modelOptions.map((m) => (
+              <option key={m.model_name} value={m.model_name}>{m.model_name}</option>
+            ))}
+          </select>
+
+          {/* Thinking toggle */}
+          <div className="flex items-center gap-2 text-sm" style={{ color: "var(--color-ink-label)" }}>
+            <span>思考</span>
+            <button
+              onClick={() => !activeSessionId && setThinking(!thinking)}
+              disabled={!!activeSessionId}
+              className="relative inline-flex h-5 w-9 items-center rounded-full transition-colors disabled:opacity-60"
+              style={{ backgroundColor: thinking ? "#10b981" : "var(--color-surface-alt)" }}
+            >
+              <span
+                className="absolute h-4 w-4 rounded-full bg-white shadow-sm transition-transform"
+                style={{ transform: thinking ? "translateX(18px)" : "translateX(2px)" }}
+              />
+            </button>
+          </div>
+
+          <div className="ml-auto flex items-center gap-2">
+            {/* History button */}
+            <div className="relative">
+              <button
+                onClick={() => setHistoryOpen((v) => !v)}
+                className="flex h-9 w-9 items-center justify-center rounded-md bg-white transition-colors hover:bg-zinc-50"
+                style={{ border: "1px solid var(--color-border-soft)", color: "var(--color-ink-muted)" }}
+                title="历史会话"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <circle cx="12" cy="12" r="10" />
+                  <polyline points="12 6 12 12 16 14" />
+                </svg>
+              </button>
+              {historyOpen && (
+                <HistoryDropdown
+                  activeId={activeSessionId}
+                  onSelect={(id) => {
+                    setActiveSession(id);
+                    setDraftBlueprint(null);
+                    setHistoryOpen(false);
+                  }}
+                  onClose={() => setHistoryOpen(false)}
+                />
+              )}
+            </div>
+
+            {/* New session button */}
+            <button
+              onClick={handleNewSession}
+              className="flex h-9 w-9 items-center justify-center rounded-md bg-white transition-colors hover:bg-zinc-50"
+              style={{ border: "1px solid var(--color-border-soft)", color: "var(--color-ink-muted)" }}
+              title="新对话"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+            </button>
+
+            {/* Close button */}
+            <button
+              onClick={closeDrawer}
+              className="flex h-9 w-9 items-center justify-center rounded-md transition-colors hover:bg-zinc-100"
+              style={{ color: "var(--color-ink-muted)" }}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <line x1="18" y1="6" x2="6" y2="18" />
+                <line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
+          </div>
         </div>
 
-        {/* LLM Selection */}
-        {needsSetup && (
-          <div className="flex flex-1 flex-col items-center justify-center p-8">
-            <div className="w-full max-w-sm space-y-4">
-              <h3 className="text-center text-sm font-medium text-zinc-600 dark:text-zinc-300">
-                选择 LLM 开始新对话
-              </h3>
-              <select
-                value={selectedLlm}
-                onChange={(e) => setSelectedLlm(e.target.value)}
-                className="w-full rounded border border-zinc-300 px-3 py-2 text-sm dark:border-zinc-600 dark:bg-zinc-800"
-              >
-                <option value="">选择 LLM...</option>
-                {providerList.map((p) => (
-                  <option key={p.id as string} value={p.id as string}>
-                    {p.name as string}
-                  </option>
-                ))}
-              </select>
-              <label className="flex items-center gap-2 text-xs text-zinc-500">
-                <input
-                  type="checkbox"
-                  checked={thinking}
-                  onChange={(e) => setThinking(e.target.checked)}
-                  className="h-3 w-3"
-                />
-                思考模式
-              </label>
-              <button
-                onClick={handleNewSession}
-                disabled={!selectedLlm || createSession.isPending}
-                className="w-full rounded bg-blue-500 py-2 text-sm font-medium text-white disabled:opacity-50"
-              >
-                开始对话
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Chat area */}
-        {activeSessionId && !showNewSession && (
-          <div className="flex flex-1 flex-col overflow-hidden">
-            <div className="flex-1 overflow-auto p-4">
-              {messages.length === 0 && (
-                <div className="flex h-full items-center justify-center text-sm text-zinc-400">
-                  描述你的项目想法...
-                </div>
-              )}
-              {messages.map((msg) => (
+        {/* Body: chat (left) + blueprint preview (right) */}
+        <div className="flex min-h-0 flex-1">
+          {/* Chat panel */}
+          <div
+            className="flex flex-1 flex-col"
+            style={{ borderRight: draftBlueprint ? "1px solid var(--color-border-soft)" : "none" }}
+          >
+            <div className="flex-1 overflow-auto p-6">
+              {messages.length === 0 ? (
                 <div
-                  key={msg.id}
-                  className={`mb-3 rounded-lg px-3 py-2 text-sm ${
-                    msg.role === "user"
-                      ? "ml-8 bg-blue-50 dark:bg-blue-950"
-                      : "mr-8 bg-zinc-100 dark:bg-zinc-800"
-                  }`}
+                  className="flex h-full items-center justify-center text-sm"
+                  style={{ color: "var(--color-ink-ghost)" }}
                 >
-                  <div className="mb-1 text-xs font-medium text-zinc-500">
-                    {msg.role === "user" ? "你" : "AI"}
-                  </div>
-                  <div className="whitespace-pre-wrap">{msg.content}</div>
+                  {selectedLlm ? "描述你的项目想法，AI 会帮你拆解任务..." : "请先在上方选择 LLM"}
                 </div>
-              ))}
-              <div ref={messagesEndRef} />
+              ) : (
+                <>
+                  {messages.map((msg) => (
+                    <div
+                      key={msg.id}
+                      className={`mb-4 max-w-[70%] rounded-xl px-4 py-2.5 text-sm leading-relaxed ${
+                        msg.role === "user" ? "ml-auto" : "mr-auto"
+                      }`}
+                      style={{
+                        backgroundColor: msg.role === "user" ? "white" : "var(--color-surface-alt)",
+                        color: "var(--color-ink-soft)",
+                      }}
+                    >
+                      <div className="whitespace-pre-wrap">{msg.content}</div>
+                    </div>
+                  ))}
+                  <div ref={messagesEndRef} />
+                </>
+              )}
             </div>
 
-            {/* File indexer */}
-            <div className="border-t border-zinc-200 px-3 py-2 dark:border-zinc-700">
-              <FileIndexer
-                sessionId={activeSessionId}
-                indexed={indexedPaths}
-                onAdd={(entry) => setIndexedPaths((prev) => [...prev, entry])}
-                onRemove={(path) => setIndexedPaths((prev) => prev.filter((p) => p.path !== path))}
-              />
-            </div>
-
-            {/* Input */}
-            <div className="border-t border-zinc-200 p-3 dark:border-zinc-700">
-              <div className="flex gap-2">
+            {/* Input area */}
+            <div className="p-4">
+              <div
+                className="flex items-end gap-2 rounded-2xl bg-white p-2"
+                style={{ border: "1px solid var(--color-border-soft)" }}
+              >
                 <textarea
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={handleKeyDown}
-                  placeholder="描述你的项目想法..."
+                  placeholder={activeSessionId ? "继续对话..." : "你好，请告诉我你当前有什么新的项目想法..."}
                   rows={2}
-                  className="flex-1 resize-none rounded border border-zinc-300 px-3 py-2 text-sm dark:border-zinc-600 dark:bg-zinc-800"
+                  className="flex-1 resize-none rounded-md bg-transparent px-2 py-1 text-sm outline-none"
                 />
                 <button
-                  onClick={handleSend}
-                  disabled={!input.trim() || sendMessage.isPending}
-                  className="shrink-0 rounded bg-blue-500 px-4 text-xs font-medium text-white disabled:opacity-50"
+                  className="flex h-9 w-9 items-center justify-center rounded-lg transition-colors hover:bg-zinc-100"
+                  style={{ color: "var(--color-ink-muted)" }}
+                  title="附件"
                 >
-                  {sendMessage.isPending ? "..." : "发送"}
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+                  </svg>
+                </button>
+                <button
+                  onClick={handleSend}
+                  disabled={!input.trim() || sendMessage.isPending || (!selectedLlm && !activeSessionId)}
+                  className="flex h-9 items-center gap-1 rounded-lg px-3 text-sm text-white transition-opacity disabled:opacity-40"
+                  style={{ backgroundColor: "var(--color-brand-500)" }}
+                >
+                  Send
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <line x1="12" y1="19" x2="12" y2="5" />
+                    <polyline points="5 12 12 5 19 12" />
+                  </svg>
                 </button>
               </div>
             </div>
           </div>
+
+          {/* Blueprint panel (only shown when blueprint exists) */}
+          {draftBlueprint && (
+            <div
+              className="flex w-[45%] flex-col p-4"
+              style={{ backgroundColor: "var(--color-surface)" }}
+            >
+              <TaskBlueprintEditor
+                blueprint={draftBlueprint}
+                onChange={setDraftBlueprint}
+                onReEvaluate={handleReEvaluate}
+                reEvaluating={reEvaluating}
+              />
+            </div>
+          )}
+        </div>
+
+        {/* Bottom confirm bar */}
+        {draftBlueprint && (
+          <div
+            className="px-6 py-4"
+            style={{
+              backgroundColor: "var(--color-card)",
+              borderTop: "1px solid var(--color-border-soft)",
+            }}
+          >
+            <button
+              onClick={handleFinalize}
+              disabled={finalize.isPending || draftBlueprint.tasks.length === 0}
+              className="w-full rounded-lg py-3 text-base font-medium text-white transition-opacity disabled:opacity-50"
+              style={{ backgroundColor: "var(--color-brand-500)" }}
+            >
+              {finalize.isPending ? "生成中..." : "确认"}
+            </button>
+          </div>
         )}
       </div>
+    </div>
+  );
+}
 
-      {/* Blueprint panel */}
-      {activeSessionId && !showNewSession && draftBlueprint && (
-        <div className="relative z-10 h-full w-[280px] shrink-0 overflow-auto border-r border-zinc-200 bg-zinc-50 p-3 dark:border-zinc-700 dark:bg-zinc-950">
-          <TaskBlueprintEditor
-            blueprint={draftBlueprint}
-            onChange={setDraftBlueprint}
-            onFinalize={handleFinalize}
-            onReEvaluate={handleReEvaluate}
-            finalizing={finalize.isPending}
-            reEvaluating={reEvaluating}
-          />
-        </div>
+function HistoryDropdown({
+  activeId,
+  onSelect,
+  onClose,
+}: {
+  activeId: string | null;
+  onSelect: (id: string) => void;
+  onClose: () => void;
+}) {
+  const { data: sessions } = useInceptionSessions();
+  const items = (sessions ?? []) as InceptionSession[];
+
+  // Close on outside click via simple click-away (parent handles it through state)
+  void onClose;
+
+  return (
+    <div
+      className="absolute right-0 top-11 z-40 max-h-80 w-72 overflow-auto rounded-lg bg-white shadow-xl"
+      style={{ border: "1px solid var(--color-border-soft)" }}
+    >
+      <div
+        className="px-3 py-2 text-xs font-medium"
+        style={{
+          color: "var(--color-ink-faint)",
+          borderBottom: "1px solid var(--color-border-soft)",
+        }}
+      >
+        历史会话
+      </div>
+      {items.length === 0 ? (
+        <div className="p-4 text-center text-xs" style={{ color: "var(--color-ink-ghost)" }}>暂无</div>
+      ) : (
+        items.map((s) => (
+          <button
+            key={s.id}
+            onClick={() => onSelect(s.id)}
+            className="flex w-full flex-col items-start gap-0.5 px-3 py-2 text-left transition-colors hover:bg-zinc-50"
+            style={{
+              backgroundColor: activeId === s.id ? "var(--color-surface-alt)" : "transparent",
+              borderBottom: "1px solid var(--color-border-soft)",
+            }}
+          >
+            <div className="flex w-full items-center justify-between">
+              <span className="truncate text-xs font-medium" style={{ color: "var(--color-ink-soft)" }}>
+                {s.project_name ?? `会话 ${s.id.slice(-6)}`}
+              </span>
+              {s.is_draft && (
+                <span
+                  className="shrink-0 rounded px-1 text-[9px]"
+                  style={{ backgroundColor: "rgba(245, 158, 11, 0.18)", color: "#92400e" }}
+                >
+                  草稿
+                </span>
+              )}
+            </div>
+            <span className="text-[10px]" style={{ color: "var(--color-ink-ghost)" }}>
+              {s.created_at?.substring(0, 16)}
+            </span>
+          </button>
+        ))
       )}
     </div>
   );
