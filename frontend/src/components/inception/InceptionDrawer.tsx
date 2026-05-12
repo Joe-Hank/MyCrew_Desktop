@@ -439,8 +439,8 @@ function InceptionDrawer() {
                         msg.role === "user" ? "ml-auto" : "mr-auto"
                       }`}
                       style={{
-                        backgroundColor: msg.role === "user" ? "white" : "var(--color-surface-alt)",
-                        color: "var(--color-ink-soft)",
+                        backgroundColor: msg.role === "user" ? "#95EC69" : "#FFFFFF",
+                        color: "#1F1F1F",
                       }}
                     >
                       <div className="whitespace-pre-wrap">{msg.content}</div>
@@ -450,8 +450,8 @@ function InceptionDrawer() {
                     <div
                       className="mb-4 mr-auto max-w-[70%] rounded-xl px-4 py-2.5 text-sm leading-relaxed"
                       style={{
-                        backgroundColor: "var(--color-surface-alt)",
-                        color: "var(--color-ink-soft)",
+                        backgroundColor: "#FFFFFF",
+                        color: "#1F1F1F",
                       }}
                     >
                       <div className="whitespace-pre-wrap">
@@ -468,8 +468,8 @@ function InceptionDrawer() {
                     <div
                       className="mb-4 mr-auto flex max-w-[70%] items-center gap-2 rounded-xl px-4 py-2.5 text-sm"
                       style={{
-                        backgroundColor: "var(--color-surface-alt)",
-                        color: "var(--color-ink-muted)",
+                        backgroundColor: "#FFFFFF",
+                        color: "#7A7A7A",
                       }}
                     >
                       <span className="flex gap-1">
