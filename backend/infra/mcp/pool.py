@@ -14,6 +14,10 @@ log = structlog.get_logger()
 HEARTBEAT_INTERVAL = 30
 MAX_RECONNECT_ATTEMPTS = 5
 RECONNECT_BACKOFF = [2, 4, 8, 16, 30]
+# Per-server cap for initial auto-connect. If an MCP command hangs (e.g.
+# `npx` waiting on a missing package or downloading), we must not block
+# the whole app startup.
+AUTO_CONNECT_TIMEOUT = 8
 
 
 class MCPConnection:
@@ -227,8 +231,19 @@ class MCPPool:
         conn = MCPConnection(server_id, server_config)
         self._connections[server_id] = conn
         try:
-            await conn.connect()
+            # Hard timeout so a hanging stdio command can't block app startup.
+            # On timeout the conn enters "error" — user can retry via UI later.
+            await asyncio.wait_for(conn.connect(), timeout=AUTO_CONNECT_TIMEOUT)
             await self._sync_discovered_tools(server_id, conn)
+        except asyncio.TimeoutError:
+            log.warning("mcp.pool.auto_connect_timeout",
+                        server_id=server_id, timeout=AUTO_CONNECT_TIMEOUT)
+            conn.status = "error"
+            conn.error_message = f"connect timeout after {AUTO_CONNECT_TIMEOUT}s"
+            try:
+                await conn.disconnect()
+            except Exception:
+                pass
         except Exception as exc:
             log.warning("mcp.pool.auto_connect_failed",
                         server_id=server_id, error=str(exc))

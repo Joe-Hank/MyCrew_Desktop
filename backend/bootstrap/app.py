@@ -25,6 +25,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await init_db()
     log.info("startup.db_ready")
 
+    # WS connection manager — imported up front because steps 3/4/5 all use it
+    from api.ws import manager
+
     # STEP 3: start MCP connection pool
     from services.mcp_svc import mcp_svc
     from infra.mcp.pool import mcp_pool
@@ -52,7 +55,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # STEP 5: check last_state.json for recovery
     from infra.config_loader import load_last_state, clear_last_state
-    from api.ws import manager
 
     last_state = load_last_state()
     if last_state and last_state.get("paused_projects"):
