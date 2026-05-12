@@ -103,10 +103,21 @@ export function useStreamInceptionMessage() {
         ts: new Date().toISOString(),
       };
 
+      // When prev is null/undefined the session detail hasn't been fetched
+      // yet (first message right after createSession). Create a stub so the
+      // bubble renders immediately; invalidate-on-success will reconcile.
       if (prev) {
         qc.setQueryData<SessionDetail>(key, {
           ...prev,
           messages: [...prev.messages, optimisticMsg],
+        });
+      } else {
+        qc.setQueryData<SessionDetail>(key, {
+          id: sessionId,
+          project_id: null,
+          llm_id: "",
+          thinking_mode: false,
+          messages: [optimisticMsg],
         });
       }
       return { prev };

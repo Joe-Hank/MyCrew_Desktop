@@ -284,9 +284,17 @@ class InceptionService:
         try:
             result = await asyncio.to_thread(crew.kickoff)
         except Exception as exc:
-            log.error("inception.crewai_kickoff_failed",
-                      session_id=session_id, error=str(exc))
-            raise ValueError(f"Plan Maker 调用失败: {exc}") from exc
+            log.warning("inception.crewai_failed_falling_back_to_legacy",
+                        session_id=session_id, error=str(exc))
+            # Push a visible note into the chat so the user sees what happened
+            await manager.broadcast("inception.delta", {
+                "session_id": session_id,
+                "text": (
+                    f"\n⚠️ Plan Maker (CrewAI) 调用失败：{exc}\n"
+                    "降级到直连 LLM 流式输出（无工具调用能力）...\n\n"
+                ),
+            })
+            return await self._legacy_stream(session_id, session)
 
         full_text = str(getattr(result, "raw", result) or "").strip()
 

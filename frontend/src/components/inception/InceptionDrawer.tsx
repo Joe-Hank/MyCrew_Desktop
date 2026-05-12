@@ -23,6 +23,8 @@ import TaskBlueprintEditor from "./TaskBlueprintEditor";
 
 function InceptionDrawer() {
   const navigate = useNavigate();
+  // Reactive to LogDrawer expanded state so we leave room for it at the bottom.
+  const logExpanded = usePrefsStore((s) => s.logDrawerExpanded);
   const {
     drawerOpen,
     closeDrawer,
@@ -278,18 +280,31 @@ function InceptionDrawer() {
 
   const messages = session?.messages ?? [];
 
+  // Width: blueprint not yet visible → narrower VSCode-LLM-sidebar look;
+  // blueprint shown → expand to fit two columns. Stops far short of the
+  // right edge so the home page underneath stays partially visible.
+  const drawerWidth = createdProjectId && draftBlueprint
+    ? "min(64vw, 1100px)"
+    : "min(38vw, 560px)";
+
   return (
     <div
-      className="fixed inset-0 z-30 flex"
-      style={{ backgroundColor: "rgba(0, 0, 0, 0.25)" }}
+      className="fixed z-30 flex flex-col shadow-2xl"
+      style={{
+        // Skip the sidebar on the left, leave room for the log drawer at
+        // the bottom, and stay short of the right edge so the home page
+        // underneath remains visible (per Figma home_new layout).
+        left: 110,
+        top: 0,
+        bottom: logExpanded ? 224 : 28,
+        width: drawerWidth,
+        backgroundColor: "var(--color-surface)",
+        borderRight: "1px solid var(--color-border-soft)",
+      }}
     >
-      {/* Spacer for sidebar */}
-      <div className="w-[110px] shrink-0" onClick={closeDrawer} role="presentation" />
-
-      {/* Main overlay area */}
+      {/* Inner container (was the main overlay area before) */}
       <div
-        className="flex flex-1 flex-col"
-        style={{ backgroundColor: "var(--color-surface)" }}
+        className="flex flex-1 flex-col overflow-hidden"
       >
         {/* Top toolbar */}
         <div
