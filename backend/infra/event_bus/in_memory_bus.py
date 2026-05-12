@@ -32,7 +32,7 @@ class InMemoryEventBus:
                 await handler(event)
             except Exception as exc:
                 log.error("event_bus.handler_error",
-                          event=type(event).__name__, error=str(exc))
+                          event_type=type(event).__name__, error=str(exc))
 
     async def publish_all(self, events: list[DomainEvent]) -> None:
         for event in events:
