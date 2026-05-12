@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useInceptionStore } from "../../stores/useInceptionStore";
+import { usePrefsStore } from "../../stores/usePrefsStore";
 import {
   useInceptionSession,
   useInceptionSessions,
@@ -13,6 +14,11 @@ import {
 import { useLlmProviders } from "../../queries/useLlmQuery";
 import { useEvent } from "../../hooks/useEvent";
 import TaskBlueprintEditor from "./TaskBlueprintEditor";
+
+// First-launch defaults — used only when the user has no persisted preference
+const DEFAULT_PROVIDER_NAME = "DeepSeek";
+const DEFAULT_MODEL_NAME = "deepseek-v4-pro";
+const DEFAULT_THINKING = true;
 
 function InceptionDrawer() {
   const {
@@ -30,15 +36,21 @@ function InceptionDrawer() {
   const sendMessage = useSendInceptionMessage();  // non-streaming fallback (used by Re-evaluate)
   const finalize = useFinalizeInception();
 
+  // Persisted prefs (LLM / model / thinking restored from localStorage)
+  const selectedLlm = usePrefsStore((s) => s.inceptionLlm) ?? "";
+  const selectedModel = usePrefsStore((s) => s.inceptionModel) ?? "";
+  const thinking = usePrefsStore((s) => s.inceptionThinking);
+  const setSelectedLlm = usePrefsStore((s) => s.setInceptionLlm);
+  const setSelectedModel = usePrefsStore((s) => s.setInceptionModel);
+  const setThinking = usePrefsStore((s) => s.setInceptionThinking);
+
   const [input, setInput] = useState("");
-  const [selectedLlm, setSelectedLlm] = useState("");
-  const [selectedModel, setSelectedModel] = useState("");
-  const [thinking, setThinking] = useState(false);
   const [reEvaluating, setReEvaluating] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   // Streaming assistant text accumulated from inception.delta WS events.
   // Reset on each new send; cleared when the final inception.message arrives.
   const [streamingText, setStreamingText] = useState("");
+  const abortRef = useRef<AbortController | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const handleBlueprintEvent = useCallback(
@@ -81,6 +93,25 @@ function InceptionDrawer() {
     setStreamingText("");
   }, [activeSessionId]);
 
+  // First-launch defaults: pick DeepSeek + v4-pro + thinking if the user
+  // has no persisted preference and the providers list contains them.
+  useEffect(() => {
+    if (selectedLlm || !providers) return;
+    const list = (providers as unknown as Array<{
+      id: string;
+      name: string;
+      models?: Array<{ model_name: string }>;
+    }>) ?? [];
+    const ds = list.find((p) => p.name === DEFAULT_PROVIDER_NAME);
+    if (!ds) return;
+    setSelectedLlm(ds.id);
+    const hasModel = ds.models?.some((m) => m.model_name === DEFAULT_MODEL_NAME);
+    if (hasModel) {
+      setSelectedModel(DEFAULT_MODEL_NAME);
+      setThinking(DEFAULT_THINKING);
+    }
+  }, [providers, selectedLlm, setSelectedLlm, setSelectedModel, setThinking]);
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [session?.messages, streamingText]);
@@ -114,7 +145,33 @@ function InceptionDrawer() {
     if (!sid) return;
     setInput("");
     setStreamingText("");  // reset before new stream
-    await streamMessage.mutateAsync({ sessionId: sid, content });
+    const controller = new AbortController();
+    abortRef.current = controller;
+    try {
+      await streamMessage.mutateAsync({
+        sessionId: sid,
+        content,
+        signal: controller.signal,
+      });
+    } catch (err) {
+      // AbortError on user stop: not a real failure, swallow it.
+      // Other errors propagate via mutation.onError and are logged.
+      const name = (err as { name?: string })?.name;
+      if (name !== "AbortError") {
+        // eslint-disable-next-line no-console
+        console.warn("inception.stream_failed", err);
+      }
+    } finally {
+      abortRef.current = null;
+      // If the user aborted mid-stream, keep the partial text visible by
+      // committing it to the session cache as an optimistic assistant msg.
+      // Otherwise the streamingText was already cleared on inception.message.
+      setStreamingText("");
+    }
+  }
+
+  function handleStop() {
+    abortRef.current?.abort();
   }
 
   async function handleFinalize() {
@@ -347,18 +404,32 @@ function InceptionDrawer() {
                     <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
                   </svg>
                 </button>
-                <button
-                  onClick={handleSend}
-                  disabled={!input.trim() || sendMessage.isPending || (!selectedLlm && !activeSessionId)}
-                  className="flex h-9 items-center gap-1 rounded-lg px-3 text-sm text-white transition-opacity disabled:opacity-40"
-                  style={{ backgroundColor: "var(--color-brand-500)" }}
-                >
-                  Send
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <line x1="12" y1="19" x2="12" y2="5" />
-                    <polyline points="5 12 12 5 19 12" />
-                  </svg>
-                </button>
+                {streamMessage.isPending ? (
+                  <button
+                    onClick={handleStop}
+                    className="flex h-9 items-center gap-1 rounded-lg px-3 text-sm text-white transition-opacity"
+                    style={{ backgroundColor: "#dc2626" }}
+                    title="终止 AI 响应"
+                  >
+                    Stop
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+                      <rect x="6" y="6" width="12" height="12" rx="1" />
+                    </svg>
+                  </button>
+                ) : (
+                  <button
+                    onClick={handleSend}
+                    disabled={!input.trim() || (!selectedLlm && !activeSessionId)}
+                    className="flex h-9 items-center gap-1 rounded-lg px-3 text-sm text-white transition-opacity disabled:opacity-40"
+                    style={{ backgroundColor: "var(--color-brand-500)" }}
+                  >
+                    Send
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <line x1="12" y1="19" x2="12" y2="5" />
+                      <polyline points="5 12 12 5 19 12" />
+                    </svg>
+                  </button>
+                )}
               </div>
             </div>
           </div>

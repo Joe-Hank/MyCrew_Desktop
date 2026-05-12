@@ -1,16 +1,18 @@
 import { useState } from "react";
 import { useLlmProviders, type LlmProvider } from "../queries/useLlmQuery";
 import { useMcpServers } from "../queries/useMcpQuery";
+import { usePrefsStore, type SettingsTab } from "../stores/usePrefsStore";
 import PillTabs from "../components/common/PillTabs";
 import LlmTable from "../components/settings/LlmTable";
 import McpTable from "../components/settings/McpTable";
 import PermissionTable from "../components/settings/PermissionTable";
 import SettingsEditorDrawer, { type SettingsEditorTarget } from "../components/settings/SettingsEditorDrawer";
 
-type Tab = "llm" | "mcp" | "permission";
+type Tab = SettingsTab;
 
 function SettingsPage() {
-  const [activeTab, setActiveTab] = useState<Tab>("llm");
+  const activeTab = usePrefsStore((s) => s.settingsActiveTab);
+  const setActiveTab = usePrefsStore((s) => s.setSettingsActiveTab);
   const [editor, setEditor] = useState<SettingsEditorTarget | null>(null);
 
   const { data: providers = [] } = useLlmProviders();

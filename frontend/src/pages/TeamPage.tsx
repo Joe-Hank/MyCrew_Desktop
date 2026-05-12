@@ -7,16 +7,18 @@ import {
   type Crew,
   type Tool,
 } from "../queries/useTeamQuery";
+import { usePrefsStore, type TeamTab } from "../stores/usePrefsStore";
 import PillTabs from "../components/common/PillTabs";
 import AgentsTable from "../components/team/AgentsTable";
 import CrewsTable from "../components/team/CrewsTable";
 import ToolsTable from "../components/team/ToolsTable";
 import TeamEditorDrawer, { type EditorTarget } from "../components/team/TeamEditorDrawer";
 
-type Tab = "agents" | "crews" | "tools";
+type Tab = TeamTab;
 
 function TeamPage() {
-  const [activeTab, setActiveTab] = useState<Tab>("agents");
+  const activeTab = usePrefsStore((s) => s.teamActiveTab);
+  const setActiveTab = usePrefsStore((s) => s.setTeamActiveTab);
   const [editor, setEditor] = useState<EditorTarget | null>(null);
 
   const { data: agents } = useAgents();

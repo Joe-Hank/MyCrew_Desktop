@@ -72,14 +72,23 @@ export function useCreateInceptionSession() {
 
 /** Streaming variant — backend emits `inception.delta` per LLM token via WS,
  *  then `inception.message` with the full assistant text at the end.
- *  Subscribe to those events in the component to render token-by-token. */
+ *  Subscribe to those events in the component to render token-by-token.
+ *
+ *  Pass an AbortSignal in the mutation variables to support a user "Stop"
+ *  button — aborting the fetch disconnects the client, FastAPI cancels the
+ *  task, and the in-flight LLM call is cancelled too. */
 export function useStreamInceptionMessage() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ sessionId, content }: { sessionId: string; content: string }) =>
+    mutationFn: ({
+      sessionId,
+      content,
+      signal,
+    }: { sessionId: string; content: string; signal?: AbortSignal }) =>
       apiFetch(`/inceptions/sessions/${sessionId}/messages/stream`, {
         method: "POST",
         body: JSON.stringify({ content }),
+        signal,
       }),
     onMutate: async ({ sessionId, content }) => {
       const key = ["inception", "session", sessionId];

@@ -1,8 +1,9 @@
 import { useState, useCallback } from "react";
 import { useAnyEvent } from "../../hooks/useEvent";
+import { usePrefsStore, type LogTab } from "../../stores/usePrefsStore";
 import type { WsMessage } from "../../net/ws";
 
-const TABS = ["应用日志", "Agent 输出"] as const;
+const TABS: LogTab[] = ["应用日志", "Agent 输出"];
 
 interface LogEntry {
   ts: string;
@@ -11,8 +12,10 @@ interface LogEntry {
 }
 
 function LogDrawer() {
-  const [expanded, setExpanded] = useState(false);
-  const [activeTab, setActiveTab] = useState<string>(TABS[0]);
+  const expanded = usePrefsStore((s) => s.logDrawerExpanded);
+  const setExpanded = usePrefsStore((s) => s.setLogDrawerExpanded);
+  const activeTab = usePrefsStore((s) => s.logDrawerActiveTab);
+  const setActiveTab = usePrefsStore((s) => s.setLogDrawerActiveTab);
   const [logs, setLogs] = useState<LogEntry[]>([]);
 
   const handleEvent = useCallback((msg: WsMessage) => {
