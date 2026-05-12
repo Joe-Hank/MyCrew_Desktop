@@ -101,3 +101,43 @@ export function useDeleteLlmModel() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["llm", "providers"] }),
   });
 }
+
+// ── Quota / Token monitoring (plan §11.2) ─────────────────────────
+
+export type QuotaDisplay = "percent" | "tokens_m" | "available" | "unavailable";
+
+export interface ProviderQuota {
+  provider_id: string;
+  name: string;
+  type: string;
+  display: QuotaDisplay;
+  value: number | null;     // for percent / tokens_m
+  raw: string | null;       // human-readable extra (e.g. "¥10.00 CNY")
+}
+
+/** Polls /llm/quota every 30s (plan §11.2: "30s auto refresh"). */
+export function useLlmQuota() {
+  return useQuery({
+    queryKey: ["llm", "quota"],
+    queryFn: async () => {
+      const res = await apiFetch<ProviderQuota[]>("/llm/quota");
+      return res.data ?? [];
+    },
+    refetchInterval: 30_000,
+    staleTime: 25_000,
+  });
+}
+
+/** Force-refresh (manual refresh button). */
+export function useRefreshLlmQuota() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async () => {
+      const res = await apiFetch<ProviderQuota[]>("/llm/quota/refresh", { method: "POST" });
+      return res.data ?? [];
+    },
+    onSuccess: (data) => {
+      qc.setQueryData(["llm", "quota"], data);
+    },
+  });
+}

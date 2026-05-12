@@ -62,5 +62,13 @@ async def delete_model(model_id: str):
 
 @router.get("/quota")
 async def get_quota():
+    """Returns cached per-provider quota status (30s TTL)."""
     data = await llm_svc.get_quota()
+    return {"ok": True, "data": data}
+
+
+@router.post("/quota/refresh")
+async def refresh_quota():
+    """Force a fresh quota probe across all providers (manual refresh button)."""
+    data = await llm_svc.get_quota(force=True)
     return {"ok": True, "data": data}

@@ -6,6 +6,11 @@ import {
   useDisconnectMcpServer,
   type McpServerStatus,
 } from "../../queries/useMcpQuery";
+import {
+  useLlmQuota,
+  useRefreshLlmQuota,
+  type ProviderQuota,
+} from "../../queries/useLlmQuery";
 import { useEvent } from "../../hooks/useEvent";
 
 const statusDotColor: Record<string, string> = {
@@ -105,28 +110,59 @@ function McpRow() {
   );
 }
 
-function TokenChip({ name, pct }: { name: string; pct: number }) {
+/** Three-mode chip per plan §11.2:
+ *  - display="percent"      → integer percentage "{value}%"
+ *  - display="tokens_m"     → integer M "{value}M"
+ *  - display="available"    → green dot
+ *  - display="unavailable"  → red dot
+ */
+function QuotaChip({ q }: { q: ProviderQuota }) {
+  const tail = (() => {
+    if (q.display === "percent" && q.value !== null) {
+      return <span style={{ color: "var(--color-ink-faint)" }}>{q.value}%</span>;
+    }
+    if (q.display === "tokens_m" && q.value !== null) {
+      return <span style={{ color: "var(--color-ink-faint)" }}>{q.value}M</span>;
+    }
+    return (
+      <span
+        className="inline-block h-2 w-2 rounded-full"
+        style={{
+          backgroundColor: q.display === "available" ? "#10b981" : "#ef4444",
+        }}
+      />
+    );
+  })();
+
   return (
     <div
       className="flex shrink-0 items-center gap-2 rounded-full bg-white px-3 py-1 text-xs"
       style={{ color: "var(--color-ink-label)" }}
+      title={q.raw || `${q.name} (${q.display})`}
     >
-      <span>{name}</span>
-      <span style={{ color: "var(--color-ink-faint)" }}>{pct}%</span>
+      <span>{q.name}</span>
+      {tail}
     </div>
   );
 }
 
 function TokenRow() {
-  // Phase B: hardcoded mock pending real quota API
-  const models = [
-    { name: "ClaudeCode", pct: 0 },
-    { name: "GPT", pct: 0 },
-    { name: "Qwen", pct: 34 },
-    { name: "MIMO", pct: 34 },
-    { name: "Deepseek", pct: 34 },
-    { name: "GLM", pct: 0 },
-  ];
+  const { data: quotas = [], isLoading } = useLlmQuota();
+  const refresh = useRefreshLlmQuota();
+  const qc = useQueryClient();
+
+  // WS push: backend broadcasts llm.quota_changed after every probe;
+  // patch the cache so the row updates without waiting for the next 30s tick.
+  const handleQuotaChange = useCallback(
+    (msg: { payload: Record<string, unknown> }) => {
+      const providers = msg.payload.providers as ProviderQuota[] | undefined;
+      if (Array.isArray(providers)) {
+        qc.setQueryData(["llm", "quota"], providers);
+      }
+    },
+    [qc],
+  );
+  useEvent("llm.quota_changed", handleQuotaChange);
 
   return (
     <div
@@ -140,15 +176,25 @@ function TokenRow() {
         Tokens：
       </span>
       <div className="flex flex-1 items-center gap-2 overflow-x-auto">
-        {models.map((m) => (
-          <TokenChip key={m.name} name={m.name} pct={m.pct} />
-        ))}
+        {isLoading ? (
+          <span className="text-xs" style={{ color: "var(--color-ink-ghost)" }}>
+            加载中...
+          </span>
+        ) : quotas.length === 0 ? (
+          <span className="text-xs" style={{ color: "var(--color-ink-ghost)" }}>
+            未配置 LLM
+          </span>
+        ) : (
+          quotas.map((q) => <QuotaChip key={q.provider_id} q={q} />)
+        )}
       </div>
       <button
-        className="shrink-0 rounded-full bg-white px-4 py-1 text-xs transition-opacity hover:opacity-80"
+        onClick={() => refresh.mutate()}
+        disabled={refresh.isPending}
+        className="shrink-0 rounded-full bg-white px-4 py-1 text-xs transition-opacity hover:opacity-80 disabled:opacity-50"
         style={{ color: "var(--color-ink-label)" }}
       >
-        刷新
+        {refresh.isPending ? "..." : "刷新"}
       </button>
     </div>
   );

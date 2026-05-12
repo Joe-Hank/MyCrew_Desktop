@@ -77,38 +77,134 @@ class LlmService:
         await crud.delete_by_id("llm_models", model_id)
         log.info("llm.model_deleted", id=model_id)
 
-    async def get_quota(self) -> list[dict]:
-        """Check availability/quota for all configured providers.
+    # 30s TTL cache (per plan §11.2 — quota probes are expensive)
+    _quota_cache: dict | None = None
+    _quota_cache_at: float = 0.0
+    _QUOTA_TTL = 30.0
 
-        Returns a list of provider status objects with availability info.
-        Rules from plan §11.2:
-        - Returns percentage → integer percentage
-        - Returns token count → unit M integer
-        - Otherwise → green dot (available) / red dot (unavailable)
+    async def get_quota(self, *, force: bool = False) -> list[dict]:
+        """Per-provider quota status with three display modes (plan §11.2).
+
+        Output items shape:
+          {
+            "provider_id": str, "name": str, "type": str,
+            "display": "percent" | "tokens_m" | "available" | "unavailable",
+            "value": int | None,   # for percent / tokens_m modes
+            "raw": str | None,     # human-readable extra (e.g. "¥10.0")
+          }
+
+        Cached for 30s to avoid hammering provider endpoints. Pass
+        force=True to bypass the cache (the /llm/quota POST refresh
+        endpoint passes this).
         """
+        import time
+        now = time.time()
+        if (
+            not force
+            and self._quota_cache is not None
+            and now - self._quota_cache_at < self._QUOTA_TTL
+        ):
+            return self._quota_cache
+
         providers = await crud.get_all("llm_providers")
         results = []
-
-        for provider in providers:
-            status = {
-                "provider_id": provider["id"],
-                "name": provider["name"],
-                "type": provider["type"],
-                "available": False,
-                "display": "red",  # red = unavailable, green = available
-            }
-
-            try:
-                available = await llm_gateway.check_availability(provider["id"])
-                status["available"] = available
-                status["display"] = "green" if available else "red"
-            except Exception as exc:
-                log.warning("llm.quota_check_failed",
-                            provider_id=provider["id"], error=str(exc))
-
+        for p in providers:
+            status = await self._probe_provider_quota(p)
             results.append(status)
 
+        self._quota_cache = results
+        self._quota_cache_at = now
+
+        # Broadcast so the frontend can patch its cache without waiting for
+        # the next 30s tick (best-effort; manager may not be imported yet).
+        try:
+            from api.ws import manager
+            await manager.broadcast("llm.quota_changed", {"providers": results})
+        except Exception as exc:
+            log.debug("llm.quota_broadcast_failed", error=str(exc))
+
         return results
+
+    async def _probe_provider_quota(self, provider: dict) -> dict:
+        """Probe a single provider, falling back to liveness check.
+
+        Per-type dispatch:
+          - deepseek → GET /user/balance, surfaces CNY balance as "tokens_m"
+          - others   → liveness ping via llm_gateway.check_availability
+        """
+        base_status = {
+            "provider_id": provider["id"],
+            "name": provider["name"],
+            "type": provider["type"],
+            "display": "unavailable",
+            "value": None,
+            "raw": None,
+        }
+
+        ptype = (provider.get("type") or "").lower()
+        try:
+            if ptype == "deepseek":
+                return await self._probe_deepseek(provider, base_status)
+            # Future: add per-provider probes here.
+            #   openai → /v1/dashboard/billing/credit_grants
+            #   anthropic → /v1/organizations/usage  (if available)
+            #   qwen/glm/mimo → liveness only for now
+
+            # Generic fallback: just check the provider is reachable
+            return await self._fallback_liveness(provider, base_status)
+        except Exception as exc:
+            log.warning("llm.quota_probe_failed",
+                        provider_id=provider["id"],
+                        error=str(exc))
+            return base_status
+
+    async def _probe_deepseek(self, provider: dict, status: dict) -> dict:
+        """DeepSeek exposes /user/balance returning CNY balance.
+
+        We map balance → 'tokens_m' (rough estimate, ~1 CNY ≈ 1M tokens
+        on the cheap tier; this is just an indicator, not billing-accurate)."""
+        import httpx
+
+        base_url = (provider.get("base_url") or "").rstrip("/")
+        if not base_url:
+            base_url = "https://api.deepseek.com/v1"
+        # /user/balance lives at the host root (no /v1 prefix on DeepSeek)
+        host = base_url.split("/v1")[0].rstrip("/")
+        url = f"{host}/user/balance"
+        api_key = provider.get("api_key_ref") or ""
+
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            r = await client.get(url, headers={"Authorization": f"Bearer {api_key}"})
+            r.raise_for_status()
+            data = r.json()
+
+        is_available = bool(data.get("is_available", False))
+        infos = data.get("balance_infos") or []
+        if infos:
+            info = infos[0]
+            balance_str = info.get("total_balance") or "0"
+            try:
+                balance = float(balance_str)
+            except (ValueError, TypeError):
+                balance = 0.0
+            currency = info.get("currency", "CNY")
+            # Plan §11.2: token count → integer M
+            # Estimate: 1 CNY ≈ 1M tokens on DeepSeek discount tiers
+            tokens_m_est = int(balance)
+            status.update(
+                display="tokens_m" if is_available else "unavailable",
+                value=tokens_m_est,
+                raw=f"{balance:.2f} {currency}",
+            )
+        else:
+            status["display"] = "available" if is_available else "unavailable"
+        return status
+
+    async def _fallback_liveness(self, provider: dict, status: dict) -> dict:
+        """Default for providers without a known quota endpoint."""
+        available = await llm_gateway.check_availability(provider["id"])
+        status["display"] = "available" if available else "unavailable"
+        return status
 
 
 llm_svc = LlmService()
