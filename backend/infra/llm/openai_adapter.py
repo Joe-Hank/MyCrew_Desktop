@@ -89,8 +89,19 @@ class OpenAICompatibleAdapter(BaseLLMAdapter):
         choice = data["choices"][0]
         usage_data = data.get("usage", {})
 
+        message = choice.get("message", {})
+        content = message.get("content") or ""
+        # DeepSeek V4 (and other reasoning models) put their chain-of-thought
+        # in `reasoning_content` and leave `content` empty when no final answer
+        # is produced. We surface reasoning above the answer separated by ---.
+        reasoning = message.get("reasoning_content") or ""
+        if reasoning and content:
+            text = f"{reasoning}\n\n---\n\n{content}"
+        else:
+            text = reasoning or content
+
         return LlmResponse(
-            text=choice["message"]["content"] or "",
+            text=text,
             usage=LlmUsage(
                 prompt_tokens=usage_data.get("prompt_tokens", 0),
                 completion_tokens=usage_data.get("completion_tokens", 0),
@@ -138,7 +149,11 @@ class OpenAICompatibleAdapter(BaseLLMAdapter):
 
                 delta = choices[0].get("delta", {})
                 finish = choices[0].get("finish_reason")
-                text = delta.get("content", "") or ""
+                # DeepSeek V4 streams reasoning_content first (thinking), then
+                # content (final answer). Either field can be present per chunk.
+                content_chunk = delta.get("content") or ""
+                reasoning_chunk = delta.get("reasoning_content") or ""
+                text = reasoning_chunk + content_chunk
 
                 yield LlmDelta(text=text, finish_reason=finish)
 
