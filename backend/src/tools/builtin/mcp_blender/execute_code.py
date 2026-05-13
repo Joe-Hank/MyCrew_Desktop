@@ -18,6 +18,11 @@ class ExecuteBlenderCode(GuardedMCPTool):
     mcp_tool_name: ClassVar[str] = "execute_blender_code"
     # Arbitrary code execution → most invasive permission
     permission_kind: ClassVar[str | None] = "cmd_exec"
+    # Even when cmd_exec is enabled in the matrix, prompt the user before
+    # each call — running arbitrary Python in Blender can mutate the
+    # scene, write files, or hang the host. The user should explicitly
+    # acknowledge each invocation.
+    requires_confirmation: ClassVar[bool] = True
 
     def _run(self, code: str) -> str:
         return self._guarded_call({"code": code})

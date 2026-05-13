@@ -121,7 +121,7 @@ function TaskEditModal({
               }}
             >
               <option value="">
-                {task.kind === "final_qa" ? "（默认 QA-Agent）" : "（自动分配）"}
+                {task.kind === "final_qa" ? "（默认 QA-Agent）" : "（待指定）"}
               </option>
               {(agents ?? []).map((a) => (
                 <option key={a.id} value={a.id}>{a.role}</option>

@@ -251,11 +251,6 @@ class InceptionService:
 
         return {"ai_text": full_text, "blueprint": blueprint}
 
-    # Hard ceiling on a single Plan Maker round. CrewAI / litellm has no
-    # default timeout, so a stalled LLM provider can hang the round
-    # indefinitely — exactly the symptom that produced the "stuck" report.
-    PLAN_MAKER_TIMEOUT_S = 120
-
     async def _persist_salvaged_blueprint(
         self, session_id: str, blueprint: dict,
     ) -> bool:
@@ -387,6 +382,7 @@ class InceptionService:
         from crewai import Agent, Crew, Process, Task
         from services.crewai_runner import _build_crewai_llm
         from src.tools.builtin.local.create_workflow import make_create_workflow_tool
+        from src.tools.builtin.local.assign_agents import make_assign_agents_tool
         from bootstrap.seed_plan_maker import render_plan_maker_backstory
 
         await self._probe(session_id, "enter")
@@ -431,19 +427,34 @@ class InceptionService:
                           history_chars=len(history),
                           description_chars=len(description))
 
+        # Plan Maker needs to call TWO tools in sequence (create_workflow,
+        # then assign_agents) and finish with a short confirmation. CrewAI's
+        # `max_iter` caps the total LLM rounds, and each tool call consumes
+        # one round — so anything below 3 essentially guarantees only the
+        # first tool gets called before the agent is forced to stop. Floor
+        # at 5 so we have headroom for retries even if the DB row is misset.
+        configured_max = int(plan_maker.get("max_retry") or 0)
+        max_iter = max(5, configured_max)
+
         agent = Agent(
             role=plan_maker.get("role", "Plan Maker"),
             goal=plan_maker.get("goal", ""),
             backstory=rendered_backstory,
             llm=llm,
-            tools=[make_create_workflow_tool(session_id)],
-            max_iter=int(plan_maker.get("max_retry") or 5),
+            tools=[
+                make_create_workflow_tool(session_id),
+                make_assign_agents_tool(session_id),
+            ],
+            max_iter=max_iter,
             verbose=False,
             allow_delegation=False,
         )
         task = Task(
             description=description,
-            expected_output="自然语言回复 + (当方案成熟时) 一次 create_workflow 工具调用。",
+            expected_output=(
+                "依次调用 create_workflow + assign_agents 两个工具，然后用一句"
+                "中文确认作为最终回复。"
+            ),
             agent=agent,
         )
         await self._probe(session_id, "agent_and_task_built")
@@ -489,37 +500,16 @@ class InceptionService:
             memory=False,
             step_callback=_step_cb,
         )
-        await self._probe(session_id, "crew_built", timeout_s=self.PLAN_MAKER_TIMEOUT_S)
+        await self._probe(session_id, "crew_built")
 
+        # No hard timeout — slow LLMs (DeepSeek pro, long-history rounds)
+        # can take several minutes; aborting them surprises users more
+        # than letting the request breathe. Frontend / user can Stop via
+        # the chat queue's abort path if needed.
         try:
-            result = await asyncio.wait_for(
-                asyncio.to_thread(crew.kickoff),
-                timeout=self.PLAN_MAKER_TIMEOUT_S,
-            )
+            result = await asyncio.to_thread(crew.kickoff)
             await self._probe(session_id, "kickoff_returned",
                               steps=step_count["n"])
-        except asyncio.TimeoutError:
-            await self._probe(
-                session_id, "kickoff_timeout",
-                timeout_s=self.PLAN_MAKER_TIMEOUT_S,
-                steps=step_count["n"],
-            )
-            log.warning("inception.crewai_timeout",
-                        session_id=session_id, steps=step_count["n"])
-            early = await self._finish_if_workflow_created_this_round(
-                session_id, had_project_before,
-                reason=f"Plan Maker 超时（{self.PLAN_MAKER_TIMEOUT_S}s）",
-            )
-            if early is not None:
-                return early
-            await manager.broadcast("inception.delta", {
-                "session_id": session_id,
-                "text": (
-                    f"\n⚠️ Plan Maker 超时（{self.PLAN_MAKER_TIMEOUT_S}s 内 LLM 未返回）。"
-                    "降级到直连 LLM…\n\n"
-                ),
-            })
-            return await self._legacy_stream(session_id, session)
         except Exception as exc:
             await self._probe(session_id, "kickoff_failed", error=str(exc)[:200])
             log.warning("inception.crewai_failed_falling_back_to_legacy",
@@ -595,8 +585,9 @@ class InceptionService:
         if not rows:
             return "（无历史）"
         lines = []
-        # Keep only the last ~20 messages to stay within reasonable token budget
-        for m in rows[-20:]:
+        # Keep only the last ~8 messages — Plan Maker doesn't need deep history
+        # and shorter context = faster LLM rounds (the user's complaint).
+        for m in rows[-8:]:
             role = "用户" if m.get("role") == "user" else "Plan Maker"
             content = (m.get("content") or "").strip()
             if content:

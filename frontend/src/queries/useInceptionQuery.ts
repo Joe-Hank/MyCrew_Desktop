@@ -90,10 +90,12 @@ export function useCreateInceptionSession() {
  *  cache holds the freshly-fetched server messages — eliminating the
  *  gap where the pending bubble has been cleared but the persisted
  *  message hasn't arrived yet. */
-// Plan Maker rounds can take up to ~120s server-side (the backend enforces
-// its own kickoff timeout). Give the frontend a slightly larger ceiling so
-// the network call only fails when something is genuinely wedged below.
-const PLAN_MAKER_TIMEOUT_MS = 180_000;
+// No request-side timeout — Plan Maker rounds with a slow LLM (DeepSeek pro,
+// long context) can take several minutes; cutting them off mid-flight loses
+// work that's already been done server-side. Use 0 to opt out of the
+// apiFetch internal timer; the user retains control via the chat queue's
+// Stop button (which aborts the fetch via AbortController).
+const PLAN_MAKER_TIMEOUT_MS = 0;
 
 export function useStreamInceptionMessage() {
   const qc = useQueryClient();

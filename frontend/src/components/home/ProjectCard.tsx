@@ -10,6 +10,7 @@ import {
   type Task,
 } from "../../queries/useProjectQuery";
 import { useCreateTask } from "../../queries/useWorkflowQuery";
+import { useAgents } from "../../queries/useTeamQuery";
 
 // ── Card state machine ─────────────────────────────────────────────
 //
@@ -414,7 +415,13 @@ function TaskStatusIndicator({ status }: { status: string }) {
  *  feedback: 仅展开详情 / 不重复标题 / 不再可编辑. */
 function TaskPill({ task, index }: { task: Task; index: number }) {
   const [expanded, setExpanded] = useState(false);
-  const agentLabel = task.agent_id ? task.agent_id.replace(/^agent_/, "") : "未分配";
+  // Resolve agent_id → role for display. Full agents list (no
+  // assignable-filter) so even Plan-Maker-spawned agents surface
+  // their real role, not a truncated id.
+  const { data: agents } = useAgents();
+  const agentLabel = task.agent_id
+    ? (agents ?? []).find((a) => a.id === task.agent_id)?.role ?? task.agent_id.slice(-8)
+    : "待指定";
 
   return (
     <div

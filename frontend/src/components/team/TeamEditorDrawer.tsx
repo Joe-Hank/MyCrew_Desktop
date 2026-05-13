@@ -8,7 +8,8 @@ import {
   type Agent, type Crew, type Tool,
 } from "../../queries/useTeamQuery";
 import { useLlmProviders } from "../../queries/useLlmQuery";
-import SideDrawer, { DrawerFooter, FormField, inputCls } from "../common/SideDrawer";
+import SideDrawer, { DrawerFooter, FormField, inputCls, inputStyle } from "../common/SideDrawer";
+import AutoTextarea from "../common/AutoTextarea";
 
 export type EditorTarget =
   | { kind: "agent"; data: Partial<Agent> | null }
@@ -52,6 +53,98 @@ function TeamEditorDrawer({
         <ToolForm key={target.data?.id ?? "new"} data={target.data} onDone={onClose} />
       )}
     </SideDrawer>
+  );
+}
+
+// ── Process control (Crew 过程控制) ─────────────────────────────────
+//
+// Segmented control with icons + labels for `Crew.process`. The current
+// product only supports sequential (链式) — hierarchical (层式) is
+// reserved for a future iteration. We render both options so the UI
+// communicates intent, but the 层式 segment is disabled with a "即将
+// 开放" tooltip so users don't think it's broken.
+
+function ChainIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.72" />
+      <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+    </svg>
+  );
+}
+
+function HierarchyIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="9" y="2" width="6" height="5" rx="1" />
+      <rect x="2" y="17" width="6" height="5" rx="1" />
+      <rect x="16" y="17" width="6" height="5" rx="1" />
+      <path d="M12 7v5" />
+      <path d="M5 17v-2a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v2" />
+    </svg>
+  );
+}
+
+function ProcessToggle({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  const options: Array<{
+    v: string;
+    label: string;
+    icon: React.ReactNode;
+    disabled?: boolean;
+    hint?: string;
+  }> = [
+    { v: "sequential", label: "链式", icon: <ChainIcon /> },
+    { v: "hierarchical", label: "层式", icon: <HierarchyIcon />, disabled: true, hint: "即将开放" },
+  ];
+
+  return (
+    <div
+      role="radiogroup"
+      aria-label="过程控制"
+      className="inline-flex items-stretch rounded-lg p-0.5"
+      style={{
+        backgroundColor: "var(--color-surface-alt)",
+        border: "1px solid var(--color-border-soft)",
+      }}
+    >
+      {options.map((opt) => {
+        const selected = value === opt.v;
+        return (
+          <button
+            key={opt.v}
+            type="button"
+            role="radio"
+            aria-checked={selected}
+            aria-disabled={opt.disabled}
+            tabIndex={selected ? 0 : -1}
+            disabled={opt.disabled}
+            onClick={() => !opt.disabled && onChange(opt.v)}
+            title={opt.disabled ? opt.hint : `切换到${opt.label}`}
+            className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors disabled:cursor-not-allowed"
+            style={{
+              backgroundColor: selected ? "var(--color-brand-500)" : "transparent",
+              color: selected
+                ? "white"
+                : opt.disabled
+                  ? "var(--color-ink-disabled)"
+                  : "var(--color-ink-label)",
+              opacity: opt.disabled ? 0.55 : 1,
+            }}
+          >
+            {opt.icon}
+            <span>{opt.label}</span>
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
@@ -104,22 +197,27 @@ function AgentForm({ data, onDone }: { data: Partial<Agent> | null; onDone: () =
   return (
     <>
       <FormField label="角色">
-        <input value={role} onChange={(e) => setRole(e.target.value)} className={inputCls} />
+        <input
+          value={role}
+          onChange={(e) => setRole(e.target.value)}
+          className={inputCls}
+          style={inputStyle}
+        />
       </FormField>
       <FormField label="目标">
-        <textarea
+        <AutoTextarea
           value={goal ?? ""}
-          onChange={(e) => setGoal(e.target.value)}
-          rows={3}
-          className={inputCls + " resize-none"}
+          onChange={(v) => setGoal(v)}
+          className={inputCls}
+          style={inputStyle}
         />
       </FormField>
       <FormField label="背景">
-        <textarea
+        <AutoTextarea
           value={backstory ?? ""}
-          onChange={(e) => setBackstory(e.target.value)}
-          rows={4}
-          className={inputCls + " resize-none"}
+          onChange={(v) => setBackstory(v)}
+          className={inputCls}
+          style={inputStyle}
         />
       </FormField>
 
@@ -152,7 +250,7 @@ function AgentForm({ data, onDone }: { data: Partial<Agent> | null; onDone: () =
       </div>
 
       <FormField label="LLM">
-        <select value={llmId ?? ""} onChange={(e) => setLlmId(e.target.value)} className={inputCls}>
+        <select value={llmId ?? ""} onChange={(e) => setLlmId(e.target.value)} className={inputCls} style={inputStyle}>
           <option value="">— 选择 LLM —</option>
           {providerList.map((p) => (
             <option key={p.id} value={p.id}>
@@ -301,31 +399,11 @@ function CrewForm({ data, onDone }: { data: Partial<Crew> | null; onDone: () => 
   return (
     <>
       <FormField label="队名">
-        <input value={name} onChange={(e) => setName(e.target.value)} className={inputCls} />
+        <input value={name} onChange={(e) => setName(e.target.value)} className={inputCls} style={inputStyle} />
       </FormField>
 
-      <FormField label="过程">
-        <div
-          className="inline-flex items-center rounded-full p-1"
-          style={{ backgroundColor: "white" }}
-        >
-          {[
-            { v: "sequential", l: "链式" },
-            { v: "hierarchical", l: "层式" },
-          ].map((opt) => (
-            <button
-              key={opt.v}
-              onClick={() => setProcess(opt.v)}
-              className="rounded-full px-4 py-1 text-sm transition-colors"
-              style={{
-                backgroundColor: process === opt.v ? "var(--color-surface-alt)" : "transparent",
-                color: process === opt.v ? "var(--color-ink-label)" : "var(--color-ink-faint)",
-              }}
-            >
-              {opt.l}
-            </button>
-          ))}
-        </div>
+      <FormField label="过程控制">
+        <ProcessToggle value={process} onChange={setProcess} />
       </FormField>
 
       <FormField label="角色">
@@ -411,7 +489,7 @@ function ToolForm({ data, onDone }: { data: Partial<Tool> | null; onDone: () => 
       </div>
 
       <FormField label="名称">
-        <input value={name} onChange={(e) => setName(e.target.value)} className={inputCls} />
+        <input value={name} onChange={(e) => setName(e.target.value)} className={inputCls} style={inputStyle} />
       </FormField>
 
       <FormField label="路径">
@@ -419,6 +497,7 @@ function ToolForm({ data, onDone }: { data: Partial<Tool> | null; onDone: () => 
           <input
             value={scriptPath ?? ""}
             onChange={(e) => setScriptPath(e.target.value)}
+            style={inputStyle}
             className={inputCls}
             placeholder="src/tools/my_tool.py"
           />

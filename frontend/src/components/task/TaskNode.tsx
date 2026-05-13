@@ -1,4 +1,5 @@
 import type { Task } from "../../queries/useProjectQuery";
+import { useAgents } from "../../queries/useTeamQuery";
 
 export type TaskAction =
   | { kind: "edit"; task: Task }
@@ -34,6 +35,13 @@ function TaskNode({
   onAction: (action: TaskAction) => void;
 }) {
   const dotColor = STATUS_DOT[task.status] ?? STATUS_DOT.pending;
+  // Resolve agent_id → role for display. Uses the full agents list
+  // (not the assignable-filtered one) so even auto-generated agents
+  // surface their real role instead of a truncated id slice.
+  const { data: agents } = useAgents();
+  const agentLabel = task.agent_id
+    ? (agents ?? []).find((a) => a.id === task.agent_id)?.role ?? task.agent_id.slice(-8)
+    : "待指定";
 
   const canEdit = !projectRunning && task.status !== "running";
   const canPause = task.status === "running";
@@ -94,7 +102,7 @@ function TaskNode({
           <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
           <circle cx="12" cy="7" r="4" />
         </svg>
-        <span className="truncate">{task.agent_id ? task.agent_id.slice(-12) : "未指定 Agent"}</span>
+        <span className="truncate">{agentLabel}</span>
       </div>
 
       {/* Detail */}

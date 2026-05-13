@@ -1,3 +1,7 @@
+import os
+import platform
+import subprocess
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
@@ -83,3 +87,39 @@ async def unfavorite_project(project_id: str):
     if not data:
         raise HTTPException(404, detail="project not found")
     return {"ok": True, "data": data}
+
+
+@router.post("/{project_id}/open-root")
+async def open_project_root(project_id: str):
+    """Open the project's root_path in the OS file explorer. Returns
+    ok:false with a clear code if the path isn't configured or has gone
+    missing on disk (e.g. the user moved/deleted the folder) so the
+    frontend can pop a focused alert rather than silently failing."""
+    project = await project_svc.get_project(project_id)
+    if not project:
+        raise HTTPException(404, detail="project not found")
+    root = project.get("root_path")
+    if not root:
+        return {"ok": False, "error": {
+            "code": "path_not_configured",
+            "message": "项目尚未配置根路径，请先在首页配置。",
+        }}
+    if not os.path.isdir(root):
+        return {"ok": False, "error": {
+            "code": "path_missing",
+            "message": f"路径已不存在或不可访问：{root}",
+        }}
+    try:
+        system = platform.system()
+        if system == "Windows":
+            os.startfile(root)  # noqa: S606 — intentional shell launch
+        elif system == "Darwin":
+            subprocess.Popen(["open", root])  # noqa: S603,S607
+        else:
+            subprocess.Popen(["xdg-open", root])  # noqa: S603,S607
+    except Exception as exc:
+        return {"ok": False, "error": {
+            "code": "open_failed",
+            "message": f"打开资源管理器失败：{exc}",
+        }}
+    return {"ok": True, "data": {"path": root}}

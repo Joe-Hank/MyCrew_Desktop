@@ -39,6 +39,18 @@ function McpTable({ onEdit }: { onEdit: (s: Record<string, unknown>) => void }) 
 
   const rows = (servers ?? []) as unknown as McpRow[];
 
+  // Show "连接中" immediately when the user clicks 启用 — the backend
+  // POST blocks until the underlying MCP handshake settles, and during
+  // that window the row's runtime_status doesn't update yet. Tracking
+  // the pending-mutation's id lets us paint the in-flight state right
+  // away. Same trick for 停止 → "断开中".
+  const pendingConnectId = connectMut.isPending
+    ? (connectMut.variables as string | undefined)
+    : undefined;
+  const pendingDisconnectId = disconnectMut.isPending
+    ? (disconnectMut.variables as string | undefined)
+    : undefined;
+
   if (isLoading) {
     return <div className="p-8 text-center text-sm" style={{ color: "var(--color-ink-ghost)" }}>加载中...</div>;
   }
@@ -74,7 +86,15 @@ function McpTable({ onEdit }: { onEdit: (s: Record<string, unknown>) => void }) 
         </div>
       ) : (
         rows.map((s) => {
-          const info = statusInfo(s.runtime_status, s.enabled);
+          // Override the persisted runtime_status with an in-flight
+          // mutation state so the row reflects user intent immediately.
+          const inFlight: { dot: string; label: string } | null =
+            pendingConnectId === s.id
+              ? { dot: "#facc15", label: "连接中" }
+              : pendingDisconnectId === s.id
+                ? { dot: "#facc15", label: "断开中" }
+                : null;
+          const info = inFlight ?? statusInfo(s.runtime_status, s.enabled);
           const isRunning = s.runtime_status === "connected";
           const connectionParam = s.transport === "stdio" ? (s.command ?? "—") : "—";
           return (

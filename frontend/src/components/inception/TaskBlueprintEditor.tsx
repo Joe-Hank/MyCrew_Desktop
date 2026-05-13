@@ -44,7 +44,7 @@ function TaskBlueprintEditor({
   }
 
   function agentLabel(agentId: string | null | undefined, kind: string): string {
-    if (!agentId) return kind === "final_qa" ? "QA-Agent" : "自动分配";
+    if (!agentId) return kind === "final_qa" ? "QA-Agent" : "待指定";
     const a = agentList.find((x) => x.id === agentId);
     return a?.role ?? "未知 Agent";
   }
@@ -122,7 +122,7 @@ function TaskBlueprintEditor({
                     className="flex-1 rounded-md bg-zinc-50 px-2 py-1 text-xs outline-none"
                   >
                     <option value="">
-                      {task.kind === "final_qa" ? "（默认 QA-Agent）" : "（自动分配）"}
+                      {task.kind === "final_qa" ? "（默认 QA-Agent）" : "（待指定）"}
                     </option>
                     {agentList.map((a) => (
                       <option key={a.id} value={a.id}>{a.role}</option>

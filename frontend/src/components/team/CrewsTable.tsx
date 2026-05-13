@@ -1,7 +1,9 @@
 import { useCrews, useDeleteCrew, useAgents, type Crew } from "../../queries/useTeamQuery";
 import RowActionsMenu from "../common/RowActionsMenu";
 
-const GRID = "grid-cols-[1.4fr_2fr_1.2fr_60px]";
+// 1.2fr → narrower 70px fixed: the process-control toggle is a tight
+// 60-ish-px chip and previously the column inflated whitespace around it.
+const GRID = "grid-cols-[1.4fr_2fr_70px_60px]";
 
 function CrewsTable({ onEdit }: { onEdit: (c: Crew) => void }) {
   const { data: crews, isLoading } = useCrews();
@@ -86,31 +88,24 @@ function CrewsTable({ onEdit }: { onEdit: (c: Crew) => void }) {
   );
 }
 
+/** Compact 2-segment toggle: 链式 / 层式, brand-blue highlight on the
+ *  active one. Read-only here (clicking does nothing); the editor drawer
+ *  is where the user actually picks. Total width ≈ 60px so the grid
+ *  column hugs the chip. */
 function ProcessToggle({ process }: { process: string }) {
-  const isSequential = process === "sequential";
+  const isHier = process === "hierarchical";
+  const segStyle = (active: boolean): React.CSSProperties => ({
+    padding: "1px 6px",
+    backgroundColor: active ? "var(--color-brand-500)" : "transparent",
+    color: active ? "white" : "var(--color-ink-faint)",
+  });
   return (
     <span
-      className="inline-flex items-center rounded-full p-0.5 text-xs"
-      style={{ backgroundColor: "var(--color-surface-alt)" }}
+      className="inline-flex overflow-hidden rounded text-[11px] font-medium"
+      style={{ border: "1px solid var(--color-border-soft)" }}
     >
-      <span
-        className="rounded-full px-3 py-1"
-        style={{
-          backgroundColor: isSequential ? "white" : "transparent",
-          color: isSequential ? "var(--color-ink-label)" : "var(--color-ink-faint)",
-        }}
-      >
-        链式
-      </span>
-      <span
-        className="rounded-full px-3 py-1"
-        style={{
-          backgroundColor: !isSequential ? "white" : "transparent",
-          color: !isSequential ? "var(--color-ink-label)" : "var(--color-ink-faint)",
-        }}
-      >
-        层式
-      </span>
+      <span style={segStyle(!isHier)}>链式</span>
+      <span style={segStyle(isHier)}>层式</span>
     </span>
   );
 }

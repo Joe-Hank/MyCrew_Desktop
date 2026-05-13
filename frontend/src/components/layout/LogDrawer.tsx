@@ -28,6 +28,31 @@ function summarisePayload(type: string, payload: Record<string, unknown> | undef
     const sid = typeof payload.session_id === "string" ? ` · sid=${payload.session_id.slice(-6)}` : "";
     return `▶ ${payload.label}${extra.length ? " (" + extra.join(", ") + ")" : ""}${sid}`;
   }
+  // agent.output — per-step output from a running task. Prefix with the
+  // agent role + truncated task id so the user can tell which task is talking.
+  if (type === "agent.output") {
+    const role = typeof payload.agent_role === "string" ? payload.agent_role : "Agent";
+    const step = payload.step != null ? `#${payload.step} ` : "";
+    const tid = typeof payload.task_id === "string" ? ` · tid=${payload.task_id.slice(-6)}` : "";
+    const text = typeof payload.text === "string" ? truncate(payload.text, 140) : "";
+    return `[${role}] ${step}${text}${tid}`;
+  }
+  // tool.invoked — audit row emitted by GuardedMCPTool / GuardedLocalTool.
+  // status ∈ started | completed | denied | failed. Surface tool name +
+  // status + duration/error so the user can scan a tool-call trace.
+  if (type === "tool.invoked") {
+    const tool = typeof payload.tool === "string" ? payload.tool : "?";
+    const status = typeof payload.status === "string" ? payload.status : "?";
+    const kind = typeof payload.kind === "string" ? `${payload.kind}/` : "";
+    const perm = typeof payload.permission_kind === "string"
+      ? ` perm=${payload.permission_kind}`
+      : "";
+    const dur = payload.duration_ms != null ? ` (${payload.duration_ms}ms)` : "";
+    const err = typeof payload.error === "string" ? ` err=${truncate(payload.error, 80)}` : "";
+    const reason = typeof payload.reason === "string" ? ` reason=${payload.reason}` : "";
+    const glyph = status === "completed" ? "✓" : status === "denied" ? "⛔" : status === "failed" ? "✗" : "▶";
+    return `${glyph} ${kind}${tool} ${status}${perm}${dur}${reason}${err}`;
+  }
   const parts: string[] = [];
   if (typeof payload.role === "string" && typeof payload.content === "string") {
     parts.push(`${payload.role}: ${truncate(payload.content, 80)}`);
@@ -53,6 +78,19 @@ function truncate(s: string, n: number): string {
   return s.slice(0, n - 1) + "…";
 }
 
+// Event-type sets that route to each tab. "Agent 输出" focuses on task
+// execution — agent output chunks + per-task lifecycle. "应用日志" gets
+// everything else (project lifecycle, MCP, quota, errors, etc.).
+const AGENT_TAB_EVENTS = new Set([
+  "agent.output",
+  "task.started",
+  "task.completed",
+  "task.failed",
+  "task.paused",
+  "task.blocked",
+  "task.validation_failed",
+]);
+
 function LogDrawer() {
   const expanded = usePrefsStore((s) => s.logDrawerExpanded);
   const setExpanded = usePrefsStore((s) => s.setLogDrawerExpanded);
@@ -73,6 +111,12 @@ function LogDrawer() {
   }, []);
 
   useAnyEvent(handleEvent);
+
+  const visibleLogs = logs.filter((e) =>
+    activeTab === "Agent 输出"
+      ? AGENT_TAB_EVENTS.has(e.type)
+      : !AGENT_TAB_EVENTS.has(e.type),
+  );
 
   if (!expanded) {
     return (
@@ -137,10 +181,10 @@ function LogDrawer() {
         className="flex-1 overflow-auto px-3 py-2 font-mono text-xs"
         style={{ color: "var(--color-ink-soft)" }}
       >
-        {logs.length === 0 ? (
+        {visibleLogs.length === 0 ? (
           <div className="text-[var(--color-ink-ghost)]">&gt;_ 日志内容...</div>
         ) : (
-          logs.map((entry, i) => (
+          visibleLogs.map((entry, i) => (
             <div key={i} className="leading-5">
               <span style={{ color: "var(--color-ink-ghost)" }}>
                 {entry.ts.substring(11, 19)}

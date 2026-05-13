@@ -4,6 +4,7 @@ import {
   usePauseProject,
   useResumeProject,
 } from "../../queries/useWorkflowQuery";
+import { apiFetch, ApiError } from "../../net/api";
 
 // Header redesign per Figma: NO background frame, NO border, info hugged
 // to the top-left of the page. Drop the breadcrumb/chip clutter; surface
@@ -45,10 +46,48 @@ function TaskHeader({ project, selectedTask }: Props) {
   const isTerminal = ["completed", "completed_with_warnings", "completed_with_issues", "aborted"]
     .includes(project.state);
 
-  function handlePrimary() {
-    if (isReady) start.mutate(project.id);
-    else if (isRunning) pause.mutate(project.id);
+  async function handlePrimary() {
+    if (isReady) {
+      // Pre-flight: refuse to start when any task has no agent. The
+      // backend will also block this (workflow_svc.start) but a friendly
+      // client-side popup beats a generic error envelope.
+      const tasks = project.tasks ?? [];
+      const missing = tasks.filter((t) => !t.agent_id);
+      if (missing.length > 0) {
+        const lines = missing.map((t) => `· ${t.title || "未命名"}`).join("\n");
+        alert(
+          `以下任务尚未指定执行 Agent，无法启动项目：\n\n${lines}\n\n请在画布上点击任务卡片 → 编辑 → 选择执行 Agent。`,
+        );
+        return;
+      }
+      try {
+        await start.mutateAsync(project.id);
+      } catch (exc) {
+        // Backend rejected (e.g. DAG cycle / orphan dep / racing
+        // agent-missing). Surface the message directly.
+        alert((exc as Error).message ?? "启动失败");
+      }
+    } else if (isRunning) pause.mutate(project.id);
     else if (isPaused) resume.mutate(project.id);
+  }
+
+  /** Open the project's root_path in the OS file explorer.
+   *  Surfaces a clean alert when the path is missing or not configured
+   *  instead of a generic failure toast. */
+  async function handleOpenPath() {
+    try {
+      const res = await apiFetch<{ path: string }>(
+        `/projects/${project.id}/open-root`,
+        { method: "POST" },
+      );
+      void res;
+    } catch (exc) {
+      if (exc instanceof ApiError && exc.kind === "envelope") {
+        alert(exc.message);
+      } else {
+        alert(`无法打开路径：${(exc as Error).message ?? exc}`);
+      }
+    }
   }
 
   // Task-level progress placeholder — once the backend exposes a real
@@ -147,13 +186,14 @@ function TaskHeader({ project, selectedTask }: Props) {
         )}
 
         <button
-          className="rounded-lg px-3 py-1 text-xs transition-colors"
+          onClick={handleOpenPath}
+          className="rounded-lg px-3 py-1 text-xs transition-colors hover:opacity-80"
           style={{
             backgroundColor: "var(--color-card)",
             border: "1px solid var(--color-border-soft)",
             color: "var(--color-ink-label)",
           }}
-          title="项目根路径（开发中）"
+          title="在资源管理器中打开项目根路径"
         >
           路径
         </button>

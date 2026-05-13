@@ -39,6 +39,20 @@ class WorkflowService:
         if not tasks:
             raise ValueError(f"Project {project_id} has no tasks")
 
+        # Reject projects where any task is missing its agent_id. The
+        # frontend pre-checks too (see TaskHeader.handlePrimary) but this
+        # is the wire-level guarantee: every code path that calls start()
+        # — including future schedulers, retry-from-failure flows, etc.
+        # — gets the same rule.
+        missing_agent = [
+            t for t in tasks if not t.get("agent_id")
+        ]
+        if missing_agent:
+            titles = ", ".join(t.get("title", "未命名") for t in missing_agent)
+            raise ValueError(
+                f"以下任务未指定执行 Agent，无法启动：{titles}",
+            )
+
         dag_errors = validate_dag(tasks)
         if dag_errors:
             error_msgs = [e.message for e in dag_errors]
@@ -161,7 +175,16 @@ class WorkflowService:
 
             raw_text = await self._run_agent(project_id, task_id, task_input)
 
-            if task_input.output_schema and task_input.output_schema != {}:
+            # Prefer emit_output's captured payload if the agent called it.
+            # When present, it has already been validated against the
+            # task's output_schema inside the tool, so we skip the
+            # text-extraction fallback entirely.
+            from src.tools.builtin.local._output_capture import pop_output
+            captured = pop_output(task_id)
+            if captured is not None:
+                extracted = captured if isinstance(captured, dict) else {"value": captured}
+                errors = []
+            elif task_input.output_schema and task_input.output_schema != {}:
                 extracted = await self._extract_structured_output(
                     project_id, task_id, raw_text, task_input.output_schema
                 )
@@ -222,6 +245,7 @@ class WorkflowService:
                 task_input=task_input,
                 provider_id=provider_id,
                 model_name=model_name,
+                project_id=project_id,
             )
             log.info("workflow.agent_executed_via_crewai",
                      project_id=project_id, task_id=task_id,

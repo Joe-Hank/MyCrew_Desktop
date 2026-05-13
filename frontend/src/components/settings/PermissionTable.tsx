@@ -39,13 +39,22 @@ function PermissionTable() {
   return (
     <div className="space-y-3">
       <div
-        className="rounded-lg px-4 py-2 text-xs"
+        className="space-y-1.5 rounded-lg px-4 py-2.5 text-xs leading-relaxed"
         style={{
           backgroundColor: "rgba(245, 158, 11, 0.12)",
           color: "#92400e",
         }}
       >
-        ⚠️ 这些权限控制 Agent 在执行任务时可以进行的系统操作。关闭某项权限后，相关 Tool/MCP 调用会被立即拦截。
+        <div>
+          ⚠️ 这些权限控制 Agent 在执行任务时可以进行的系统操作。**关闭某项权限后，
+          所有 MCP / 内置工具中需要该权限的调用会被立即拦截**（任务日志里会看到
+          <code className="font-mono">[PermissionDenied]</code> 字样）。
+        </div>
+        <div style={{ color: "#7c4400" }}>
+          高危操作（如 Blender 任意代码执行）即使在权限开启时，也会在每次调用前
+          弹窗询问；可在底部 <code className="font-mono">{'>_ 日志'}</code> 抽屉中
+          查看每次工具调用的完整审计记录（<code className="font-mono">tool.invoked</code>）。
+        </div>
       </div>
 
       <div className="overflow-hidden rounded-xl bg-white" style={{ border: "1px solid var(--color-border-soft)" }}>

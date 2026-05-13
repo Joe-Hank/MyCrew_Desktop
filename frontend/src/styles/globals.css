@@ -112,3 +112,74 @@ body {
   display: flex;
   flex-direction: column;
 }
+
+/* ── Apple-style overlay scrollbars ────────────────────────────────
+   The default WebKit scrollbar (~17px wide, white track, blocky arrows)
+   looks jarring against a dark UI. Replace with a macOS-style overlay:
+   transparent track, thin rounded thumb that darkens on hover, theme-
+   aware colours. Applied globally — every scrollable container in the
+   app inherits these styles. */
+
+/* Firefox: short-hand applies to all elements */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(60, 60, 67, 0.28) transparent;
+}
+
+:root.dark * {
+  scrollbar-color: rgba(235, 235, 245, 0.28) transparent;
+}
+
+/* WebKit (Chromium, Safari, Tauri's Edge WebView2 on Windows) */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+  background: transparent;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+  border: none;
+}
+
+::-webkit-scrollbar-thumb {
+  /* 2px transparent border + content-box clip → visible thumb width
+     becomes ~6px with a soft inset gap, mimicking macOS's overlay
+     scrollbar visual padding. */
+  background-color: rgba(60, 60, 67, 0.32);
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+  min-height: 32px;
+  min-width: 32px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(60, 60, 67, 0.55);
+}
+
+::-webkit-scrollbar-thumb:active {
+  background-color: rgba(60, 60, 67, 0.7);
+}
+
+:root.dark ::-webkit-scrollbar-thumb {
+  background-color: rgba(235, 235, 245, 0.24);
+}
+
+:root.dark ::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(235, 235, 245, 0.42);
+}
+
+:root.dark ::-webkit-scrollbar-thumb:active {
+  background-color: rgba(235, 235, 245, 0.55);
+}
+
+/* Hide the corner square where horizontal + vertical bars meet */
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Hide the up/down/left/right arrows (macOS doesn't have them) */
+::-webkit-scrollbar-button {
+  display: none;
+}

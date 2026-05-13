@@ -6,7 +6,7 @@ import {
   type LlmProvider,
 } from "../../queries/useLlmQuery";
 import { useCreateMcpServer, useUpdateMcpServer } from "../../queries/useMcpQuery";
-import SideDrawer, { DrawerFooter, FormField, inputCls } from "../common/SideDrawer";
+import SideDrawer, { DrawerFooter, FormField, inputCls, inputStyle } from "../common/SideDrawer";
 
 export type SettingsEditorTarget =
   | { kind: "llm"; data: LlmProvider | null }
@@ -73,10 +73,10 @@ function LlmForm({ data, onDone }: { data: LlmProvider | null; onDone: () => voi
   return (
     <>
       <FormField label="名称">
-        <input value={name} onChange={(e) => setName(e.target.value)} className={inputCls} placeholder="例如：My OpenAI" />
+        <input value={name} onChange={(e) => setName(e.target.value)} className={inputCls} style={inputStyle} placeholder="例如：My OpenAI" />
       </FormField>
       <FormField label="类型">
-        <select value={type} onChange={(e) => setType(e.target.value)} className={inputCls}>
+        <select value={type} onChange={(e) => setType(e.target.value)} className={inputCls} style={inputStyle}>
           {LLM_TYPES.map((t) => (
             <option key={t.value} value={t.value}>
               {t.label}
@@ -88,7 +88,7 @@ function LlmForm({ data, onDone }: { data: LlmProvider | null; onDone: () => voi
         <input
           value={apiKey ?? ""}
           onChange={(e) => setApiKey(e.target.value)}
-          className={inputCls}
+          className={inputCls} style={inputStyle}
           placeholder="sk-..."
           type="password"
         />
@@ -97,12 +97,12 @@ function LlmForm({ data, onDone }: { data: LlmProvider | null; onDone: () => voi
         <input
           value={baseUrl ?? ""}
           onChange={(e) => setBaseUrl(e.target.value)}
-          className={inputCls}
+          className={inputCls} style={inputStyle}
           placeholder="https://api.openai.com/v1"
         />
       </FormField>
       <FormField label="模型">
-        <input value={model} onChange={(e) => setModel(e.target.value)} className={inputCls} placeholder="gpt-4 / claude-opus..." />
+        <input value={model} onChange={(e) => setModel(e.target.value)} className={inputCls} style={inputStyle} placeholder="gpt-4 / claude-opus..." />
       </FormField>
 
       <div className="mb-4 ml-12">
@@ -172,16 +172,16 @@ function McpForm({ data, onDone }: { data: Record<string, unknown> | null; onDon
   return (
     <>
       <FormField label="名称">
-        <input value={name} onChange={(e) => setName(e.target.value)} className={inputCls} placeholder="例如：Unity-MCP" />
+        <input value={name} onChange={(e) => setName(e.target.value)} className={inputCls} style={inputStyle} placeholder="例如：Unity-MCP" />
       </FormField>
       <FormField label="协议">
-        <select value={transport} onChange={(e) => setTransport(e.target.value)} className={inputCls}>
+        <select value={transport} onChange={(e) => setTransport(e.target.value)} className={inputCls} style={inputStyle}>
           <option value="stdio">stdio</option>
           <option value="http">HTTP/SSE</option>
         </select>
       </FormField>
       <FormField label="参数">
-        <input value={args} onChange={(e) => setArgs(e.target.value)} className={inputCls} placeholder="--port 8090" />
+        <input value={args} onChange={(e) => setArgs(e.target.value)} className={inputCls} style={inputStyle} placeholder="--port 8090" />
       </FormField>
       {transport === "stdio" ? (
         <FormField label="路径">
@@ -189,7 +189,7 @@ function McpForm({ data, onDone }: { data: Record<string, unknown> | null; onDon
             <input
               value={command}
               onChange={(e) => setCommand(e.target.value)}
-              className={inputCls}
+              className={inputCls} style={inputStyle}
               placeholder="E:\CrewAI\..."
             />
             <button
@@ -205,7 +205,7 @@ function McpForm({ data, onDone }: { data: Record<string, unknown> | null; onDon
         </FormField>
       ) : (
         <FormField label="URL">
-          <input value={url} onChange={(e) => setUrl(e.target.value)} className={inputCls} placeholder="http://localhost:8090" />
+          <input value={url} onChange={(e) => setUrl(e.target.value)} className={inputCls} style={inputStyle} placeholder="http://localhost:8090" />
         </FormField>
       )}
 
