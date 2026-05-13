@@ -60,6 +60,7 @@ BUILTIN_TOOLS: list[tuple[str, str]] = [
     # Plan-Maker-only (special instantiation, not loaded by generic agents)
     ("create_workflow", "src/tools/builtin/local/create_workflow.py"),
     ("assign_agents", "src/tools/builtin/local/assign_agents.py"),
+    ("write_blueprint", "src/tools/builtin/local/write_blueprint.py"),
     # Universal local tools — every execution agent should bind these
     ("emit_output", "src/tools/builtin/local/emit_output.py"),
     ("write_file", "src/tools/builtin/local/workspace.py"),

@@ -11,6 +11,9 @@ import {
 } from "../../queries/useProjectQuery";
 import { useCreateTask } from "../../queries/useWorkflowQuery";
 import { useAgents } from "../../queries/useTeamQuery";
+import { useCreateInceptionSession } from "../../queries/useInceptionQuery";
+import { useInceptionStore } from "../../stores/useInceptionStore";
+import { usePrefsStore } from "../../stores/usePrefsStore";
 
 // ── Card state machine ─────────────────────────────────────────────
 //
@@ -61,6 +64,9 @@ function ProjectCard({ project }: { project: Project }) {
   const cloneMut = useCloneProject();
   const rootPathMut = useUpdateRootPath();
   const favMut = useToggleFavorite();
+  const createSession = useCreateInceptionSession();
+  const openDrawer = useInceptionStore((s) => s.openDrawer);
+  const setActiveSession = useInceptionStore((s) => s.setActiveSession);
   const isFavorited = !!project.favorited_at;
 
   function handlePathSave() {
@@ -74,15 +80,60 @@ function ProjectCard({ project }: { project: Project }) {
     cloneMut.mutate(project.id);
   }
 
-  // 迭代 — per PRD §2.3.8 仅留窗口，不做实际功能. Keep as a visual placeholder.
-  function handleIteratePlaceholder() {
-    alert("迭代功能开发中。当前可使用「复制」生成项目副本。");
+  // Iteration — opens Plan Maker drawer in iterate mode. Only enabled
+  // for completed* projects (per spec: "未完成的项目不可以迭代").
+  // Creates a NEW project entry with parent_project_id pointing back to
+  // this project; root_path + template + name(+iter suffix) are inherited
+  // server-side by inception_svc.create_session(mode='iterate').
+  const canIterate =
+    TERMINAL_STATES.has(project.state) && !!project.root_path;
+  async function handleIterate() {
+    if (!canIterate) return;
+    const llmId = usePrefsStore.getState().inceptionLlm ?? "";
+    const modelId = usePrefsStore.getState().inceptionModel ?? "";
+    if (!llmId) {
+      alert("请先在设置 / Plan Maker 工具栏中选择 LLM。");
+      return;
+    }
+    const fullLlmId = modelId ? `${llmId}:${modelId}` : llmId;
+    const res = await createSession.mutateAsync({
+      llm_id: fullLlmId,
+      thinking_mode: usePrefsStore.getState().inceptionThinking,
+      mode: "iterate",
+      parent_project_id: project.id,
+    });
+    if (res.ok && res.data) {
+      const id = (res.data as { id: string }).id;
+      setActiveSession(id);
+      openDrawer();
+    }
   }
 
   const cardState = computeCardState(project);
   const progress = project.progress_pct ?? 0;
   const isRunning = project.state === "running";
+  const isStalled = project.state === "stalled";
+  // "Loaded" = user has opened this project's task page during the
+  // current session. Persisted via usePrefsStore.lastProjectId.
+  const lastProjectId = usePrefsStore((s) => s.lastProjectId);
+  const isLoadedCompleted =
+    TERMINAL_STATES.has(project.state) && lastProjectId === project.id;
   const tasks = detail?.tasks ?? [];
+
+  // Halo rule table (matches plan §F):
+  //   running  → blue pulsing wave   (still working)
+  //   stalled  → red static glow     (watchdog detected hang)
+  //   completed* + currently-loaded → blue static glow (cosmetic "open" marker)
+  //   everything else → no halo (fixes the "ready_to_continue 也发光" bug)
+  const haloShadow =
+    isRunning
+      ? undefined  // pulse via className keyframe, see below
+      : isStalled
+        ? "0 0 16px 3px rgba(239, 68, 68, 0.35)"
+        : isLoadedCompleted
+          ? "0 0 12px 2px rgba(12, 140, 233, 0.30)"
+          : "0 1px 2px rgba(0,0,0,0.04)";
+  const haloClassName = isRunning ? "card-halo-running" : "";
 
   const dateStr = project.created_at?.substring(0, 10) ?? "";
 
@@ -125,11 +176,9 @@ function ProjectCard({ project }: { project: Project }) {
 
   return (
     <div
-      className="group relative flex h-full flex-col rounded-[10px] bg-white p-4"
+      className={`group relative flex h-full flex-col rounded-[10px] bg-white p-4 ${haloClassName}`}
       style={{
-        boxShadow: isRunning
-          ? "0 0 16px 3px rgba(12, 140, 233, 0.28)"
-          : "0 1px 2px rgba(0,0,0,0.04)",
+        boxShadow: haloShadow,
         border: "1px solid var(--color-border-soft)",
       }}
     >
@@ -231,13 +280,18 @@ function ProjectCard({ project }: { project: Project }) {
         />
 
         <button
-          onClick={handleIteratePlaceholder}
-          className="rounded-lg border bg-white px-3 py-2 text-sm transition-colors hover:bg-zinc-50"
+          onClick={handleIterate}
+          disabled={!canIterate}
+          className="rounded-lg border bg-white px-3 py-2 text-sm transition-colors hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50"
           style={{
             borderColor: "var(--color-border-soft)",
-            color: "var(--color-ink-disabled)",
+            color: canIterate ? "var(--color-ink-soft)" : "var(--color-ink-disabled)",
           }}
-          title="迭代功能开发中（仅占位）"
+          title={
+            canIterate
+              ? "基于本项目开启新一轮迭代（继承根目录与模板）"
+              : "仅已完成项目可迭代"
+          }
         >
           迭代
         </button>

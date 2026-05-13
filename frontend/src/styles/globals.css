@@ -183,3 +183,27 @@ body {
 ::-webkit-scrollbar-button {
   display: none;
 }
+
+/* ── Project / task halo animations (running pulse, stalled static) ──
+   Project card uses .card-halo-running on RUNNING state; the class
+   keyframes a soft blue ripple. Stalled / loaded-completed states use
+   plain box-shadow (no animation) — see ProjectCard.tsx halo logic. */
+@keyframes mc-running-pulse {
+  0%, 100% { box-shadow: 0 0 14px 2px rgba(12, 140, 233, 0.22); }
+  50%      { box-shadow: 0 0 22px 4px rgba(12, 140, 233, 0.42); }
+}
+.card-halo-running {
+  animation: mc-running-pulse 1.8s ease-in-out infinite;
+}
+
+/* Task node variant — slightly tighter ripple for the smaller node card. */
+@keyframes mc-task-running-pulse {
+  0%, 100% { box-shadow: 0 0 8px 1px rgba(12, 140, 233, 0.25); }
+  50%      { box-shadow: 0 0 14px 3px rgba(12, 140, 233, 0.45); }
+}
+.task-halo-running {
+  animation: mc-task-running-pulse 1.6s ease-in-out infinite;
+}
+.task-halo-stalled {
+  box-shadow: 0 0 12px 2px rgba(239, 68, 68, 0.45) !important;
+}

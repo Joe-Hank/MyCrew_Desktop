@@ -89,11 +89,27 @@ _ROLE_TOOL_RULES: list[tuple[tuple[str, ...], list[str]]] = [
     (("system designer",),
      ["figma_generate_diagram", "tavily_research", "tavily_search",
       "tavily_extract"]),
-    # Narrative / Audio / Project Manager / others — research + universal
-    (("narrative", "level designer", "project manager",
+    # Narrative / Audio / others — research + universal
+    # NOTE: "project manager" removed from this list — Plan Maker owns
+    # architectural planning itself; creating a PM execution agent is
+    # explicitly forbidden (see _FORBIDDEN_ROLE_KEYWORDS below).
+    (("narrative", "level designer",
       "audio designer", "sound designer"),
      ["tavily_search", "tavily_extract", "tavily_research"]),
 ]
+
+# Roles Plan Maker is NOT allowed to create as a new execution agent.
+# Plan Maker handles project-level planning directly (analysis, milestones,
+# architecture). Pushing it into a post-execution agent was the root cause
+# of the "described but never built" pattern surfaced in the 心之回廊 audit.
+_FORBIDDEN_ROLE_KEYWORDS = (
+    "project manager", "项目经理", "pm agent", "pm-agent",
+)
+
+
+def _role_is_forbidden(role: str) -> bool:
+    r = (role or "").lower()
+    return any(kw in r for kw in _FORBIDDEN_ROLE_KEYWORDS)
 
 
 def _pick_default_tools(role: str) -> list[str]:
@@ -237,8 +253,21 @@ class AssignAgentsTool(GuardedLocalTool):
                     continue
 
                 if new_spec:
-                    # Pick default tools by role keyword + resolve ids
                     role_name = new_spec.get("role", "Assistant")
+
+                    # Refuse to create a Project-Manager-style execution
+                    # agent. Plan Maker should be doing this planning work
+                    # itself, in architecture.md / blueprint.json.
+                    if _role_is_forbidden(role_name):
+                        results.append(
+                            f"  · refuse task #{idx}: role '{role_name}' is "
+                            "forbidden as an execution agent (Plan Maker "
+                            "must own architectural planning directly; "
+                            "write it into write_blueprint instead)"
+                        )
+                        continue
+
+                    # Pick default tools by role keyword + resolve ids
                     default_tool_names = _pick_default_tools(role_name)
                     default_tool_ids = await _resolve_tool_ids_by_name(default_tool_names)
 

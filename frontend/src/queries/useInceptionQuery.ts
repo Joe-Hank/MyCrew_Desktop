@@ -68,7 +68,12 @@ export function useInceptionSession(sessionId: string | null) {
 export function useCreateInceptionSession() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (data: { llm_id: string; thinking_mode?: boolean }) =>
+    mutationFn: (data: {
+      llm_id: string;
+      thinking_mode?: boolean;
+      mode?: "create" | "iterate";
+      parent_project_id?: string;
+    }) =>
       apiFetch("/inceptions/sessions", { method: "POST", body: JSON.stringify(data) }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["inception"] }),
   });

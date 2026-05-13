@@ -9,10 +9,27 @@ router = APIRouter(prefix="/inceptions", tags=["inception"])
 class SessionCreate(BaseModel):
     llm_id: str
     thinking_mode: bool = False
+    # Entry-button intent. "create" = 新建项目按钮入口；"iterate" = 已完成
+    # 项目卡片上的迭代按钮入口（前端会同时传 parent_project_id 把 root
+    # 自动继承到新项目行）
+    mode: str = "create"
+    parent_project_id: str | None = None
 
 
 class SendMessage(BaseModel):
     content: str
+
+
+class SessionChoice(BaseModel):
+    """Structured response to an inception.choices / inception.input_path
+    event. Frontend sends one of:
+      - {template_id: "unity_2d_urp"} — picked a template
+      - {root_path: "F:/UnityProjects/X"} — supplied an iteration root
+      - {mode: "create" | "iterate_external"} — picked mode on first turn
+    """
+    template_id: str | None = None
+    root_path: str | None = None
+    mode: str | None = None
 
 
 class IndexPath(BaseModel):
@@ -31,8 +48,33 @@ async def list_sessions():
 
 @router.post("/sessions")
 async def create_session(body: SessionCreate):
-    data = await inception_svc.create_session(body.llm_id, body.thinking_mode)
+    data = await inception_svc.create_session(
+        body.llm_id, body.thinking_mode,
+        mode=body.mode, parent_project_id=body.parent_project_id,
+    )
     return {"ok": True, "data": data}
+
+
+@router.post("/sessions/{session_id}/choices")
+async def submit_choice(session_id: str, body: SessionChoice):
+    """Apply a structured choice (template / root_path / mode) to a session.
+
+    The Inception drawer uses this whenever the user clicks a card or
+    confirms a path. After the update we re-broadcast session state so the
+    drawer knows it can proceed to the next phase.
+    """
+    try:
+        data = await inception_svc.apply_choice(
+            session_id,
+            template_id=body.template_id,
+            root_path=body.root_path,
+            mode=body.mode,
+        )
+        return {"ok": True, "data": data}
+    except KeyError:
+        raise HTTPException(404, detail="session not found")
+    except ValueError as exc:
+        return {"ok": False, "error": {"code": "invalid_choice", "message": str(exc)}}
 
 
 @router.get("/sessions/{session_id}")

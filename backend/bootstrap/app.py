@@ -77,13 +77,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         })
     clear_last_state()
 
-    # STEP 6: (reserved)
+    # STEP 6: start stall-detection watchdog
+    from services.watchdog_svc import run_watchdog
+    watchdog_task = asyncio.create_task(run_watchdog())
+    log.info("startup.watchdog_started")
 
     log.info("startup.complete")
     yield
 
     # Shutdown sequence
     log.info("shutdown.begin")
+
+    # Stop watchdog first so it doesn't fire during MCP teardown
+    watchdog_task.cancel()
+    try:
+        await watchdog_task
+    except asyncio.CancelledError:
+        pass
 
     # Gracefully stop MCP pool (signals → wait → force kill)
     await mcp_svc.shutdown_all()
@@ -124,6 +134,7 @@ def create_app() -> FastAPI:
     from api.routes_crew import router as crew_router
     from api.routes_tool import router as tool_router
     from api.routes_lifecycle import router as lifecycle_router
+    from api.routes_template import router as template_router
 
     app.include_router(health_router, prefix="/api/v1")
     app.include_router(ws_router, prefix="/api/v1")
@@ -138,5 +149,6 @@ def create_app() -> FastAPI:
     app.include_router(crew_router, prefix="/api/v1")
     app.include_router(tool_router, prefix="/api/v1")
     app.include_router(lifecycle_router, prefix="/api/v1")
+    app.include_router(template_router, prefix="/api/v1")
 
     return app

@@ -58,14 +58,24 @@ function TaskNode({
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") onSelect(task);
       }}
-      className="relative w-[200px] cursor-pointer rounded-lg p-3 transition-shadow hover:shadow-md"
+      className={
+        "relative w-[200px] cursor-pointer rounded-lg p-3 transition-shadow hover:shadow-md " +
+        (task.status === "running" ? "task-halo-running " : "") +
+        (task.status === "stalled" ? "task-halo-stalled " : "")
+      }
       style={{
         // Explicit theme-aware bg via CSS variable — `bg-white` was being
         // resolved unpredictably under Tailwind v4 + ReactFlow's stacking
         // context, producing light cards in dark mode and vice versa.
         backgroundColor: "var(--color-card)",
         border: `1px solid ${selected ? "var(--color-brand-500)" : "var(--color-border-soft)"}`,
-        boxShadow: selected ? "0 0 0 3px rgba(12, 140, 233, 0.12)" : "0 1px 2px rgba(0, 0, 0, 0.04)",
+        // selected ring takes precedence; otherwise the running/stalled
+        // halo class above adds an animated/static shadow via globals.css
+        boxShadow: selected
+          ? "0 0 0 3px rgba(12, 140, 233, 0.12)"
+          : task.status === "running" || task.status === "stalled"
+            ? undefined
+            : "0 1px 2px rgba(0, 0, 0, 0.04)",
       }}
     >
       {/* Status indicator dot - top-right corner if needs input */}

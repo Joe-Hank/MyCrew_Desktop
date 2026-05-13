@@ -75,16 +75,115 @@ class InceptionService:
     def _lock_for(self, session_id: str) -> asyncio.Lock:
         return self._session_locks[session_id]
 
-    async def create_session(self, llm_id: str,
-                              thinking_mode: bool = False) -> dict:
-        session = await crud.insert("inception_sessions", {
+    async def create_session(
+        self,
+        llm_id: str,
+        thinking_mode: bool = False,
+        *,
+        mode: str = "create",
+        parent_project_id: str | None = None,
+    ) -> dict:
+        """Create an inception session.
+
+        `mode` defaults to "create" (新建项目按钮入口). When mode="iterate"
+        the caller must also supply `parent_project_id` — we pre-create
+        the iteration project row right here so the user lands in PM
+        with root_path + iteration_index already inherited.
+        """
+        session_data: dict = {
             "llm_id": llm_id,
             "thinking_mode": 1 if thinking_mode else 0,
             "system_prompt": SYSTEM_PROMPT,
             "indexed_paths": "[]",
-        }, id_prefix="incep_")
-        log.info("inception.session_created", id=session["id"])
+            "mode": mode,
+        }
+
+        # Iteration entry — create the new project row up front, inheriting
+        # root_path / template_id / name (with iteration suffix) from parent.
+        if mode == "iterate":
+            if not parent_project_id:
+                raise ValueError(
+                    "mode='iterate' requires parent_project_id (which "
+                    "completed project to iterate)"
+                )
+            parent = await crud.get_by_id("projects", parent_project_id)
+            if not parent:
+                raise ValueError(f"parent project {parent_project_id} not found")
+            parent_iter = int(parent.get("iteration_index") or 1)
+            new_index = parent_iter + 1
+            new_name = f"{parent.get('name','项目')} · 迭代 v{new_index}"
+
+            from services.project_svc import project_svc
+            iter_project = await project_svc.create_project({
+                "name": new_name,
+                "root_path": parent.get("root_path"),
+                "execution_kind": parent.get("execution_kind") or "sequential",
+            })
+            # Patch iteration metadata that create_project doesn't know about
+            await crud.update_by_id("projects", iter_project["id"], {
+                "parent_project_id": parent_project_id,
+                "iteration_index": new_index,
+                "template_id": parent.get("template_id"),
+            })
+            session_data["project_id"] = iter_project["id"]
+            session_data["template_id"] = parent.get("template_id")
+            log.info("inception.iteration_session",
+                     parent=parent_project_id, child=iter_project["id"],
+                     iter=new_index)
+
+        session = await crud.insert("inception_sessions", session_data,
+                                     id_prefix="incep_")
+        log.info("inception.session_created", id=session["id"], mode=mode)
         return session
+
+    async def apply_choice(
+        self,
+        session_id: str,
+        *,
+        template_id: str | None = None,
+        root_path: str | None = None,
+        mode: str | None = None,
+    ) -> dict:
+        """Apply a structured choice from the drawer (card click / path picker).
+
+        Updates the session row and broadcasts inception.choice_accepted so
+        the drawer can move to the next phase. The actual Plan Maker run
+        is deferred until the user sends a free-text message — that way
+        Plan Maker always sees the latest pick as session context.
+        """
+        session = await crud.get_by_id("inception_sessions", session_id)
+        if not session:
+            raise KeyError(session_id)
+
+        updates: dict = {}
+        if template_id:
+            # Lazy validation against the static catalog
+            from data.unity_templates import get_template
+            if not get_template(template_id):
+                raise ValueError(f"unknown template_id: {template_id}")
+            updates["template_id"] = template_id
+        if mode:
+            if mode not in ("create", "iterate", "iterate_external"):
+                raise ValueError(f"invalid mode: {mode}")
+            updates["mode"] = mode
+        if root_path is not None:
+            # Path goes onto the bound project (if any), not the session
+            if session.get("project_id"):
+                await crud.update_by_id("projects", session["project_id"],
+                                         {"root_path": root_path})
+
+        if updates:
+            await crud.update_by_id("inception_sessions", session_id, updates)
+
+        await manager.broadcast("inception.choice_accepted", {
+            "session_id": session_id,
+            "template_id": template_id,
+            "root_path": root_path,
+            "mode": mode,
+        })
+
+        updated = await crud.get_by_id("inception_sessions", session_id)
+        return dict(updated or {})
 
     async def list_sessions(self) -> list[dict]:
         rows = await crud.get_all("inception_sessions")
@@ -193,6 +292,14 @@ class InceptionService:
             "role": "user",
             "content": content,
         })
+
+        # 1.5 Guard rails — refuse to run Plan Maker until the drawer-side
+        # template / root_path choice has been resolved. Re-emits the
+        # corresponding choices event so the drawer can recover gracefully
+        # if the user free-texted without picking.
+        guard = await self._enforce_choice_flow(session_id, session)
+        if guard is not None:
+            return guard
 
         # 2. Plan Maker path (preferred)
         plan_maker = await self._get_plan_maker_agent()
@@ -355,6 +462,66 @@ class InceptionService:
                           reason=reason)
         return {"ai_text": confirmation, "project_id": bound["project_id"]}
 
+    async def _enforce_choice_flow(
+        self, session_id: str, session: dict,
+    ) -> dict | None:
+        """If the session is missing the structured choices Plan Maker
+        needs, re-emit the appropriate event and return an early-exit
+        dict so the caller skips Plan Maker. Returns None when everything
+        is ready and Plan Maker can run.
+        """
+        mode = (session.get("mode") or "create").lower()
+
+        if mode == "create" and not session.get("template_id"):
+            from data.unity_templates import list_templates
+            await manager.broadcast("inception.choices", {
+                "session_id": session_id,
+                "context": "template_selection",
+                "prompt": "你想做什么类型的 Unity 游戏？我会基于模板设计任务和架构。",
+                "options": [
+                    {
+                        "value": t["id"],
+                        "label": t["label"],
+                        "description": t["description"],
+                    }
+                    for t in list_templates()
+                ],
+            })
+            msg = "请先在上方卡片中选择一个 Unity 模板，我才能设计具体任务。"
+            await crud.insert("inception_messages", {
+                "session_id": session_id, "role": "assistant", "content": msg,
+            }, id_prefix="msg_")
+            await manager.broadcast("inception.message", {
+                "session_id": session_id, "role": "assistant", "content": msg,
+            })
+            return {"ai_text": msg, "blueprint": None, "awaiting": "template"}
+
+        if mode == "iterate":
+            # Iterate mode needs a known root_path on the bound project
+            project_id = session.get("project_id")
+            project = (
+                await crud.get_by_id("projects", project_id) if project_id else None
+            )
+            if not project or not (project.get("root_path") or "").strip():
+                await manager.broadcast("inception.input_path", {
+                    "session_id": session_id,
+                    "context": "iteration_root_path",
+                    "prompt": "请选择该 Unity 项目的根目录（迭代将基于该路径下的现有资产）。",
+                })
+                msg = "迭代模式需要项目根目录。请在上方选择路径。"
+                await crud.insert("inception_messages", {
+                    "session_id": session_id, "role": "assistant",
+                    "content": msg,
+                }, id_prefix="msg_")
+                await manager.broadcast("inception.message", {
+                    "session_id": session_id, "role": "assistant",
+                    "content": msg,
+                })
+                return {"ai_text": msg, "blueprint": None,
+                        "awaiting": "root_path"}
+
+        return None
+
     async def _probe(self, session_id: str, label: str, **extra: object) -> None:
         """Emit a checkpoint event. Goes both to structlog and to the WS log
         drawer (event type `inception.probe`) so the user can see exactly
@@ -383,6 +550,7 @@ class InceptionService:
         from services.crewai_runner import _build_crewai_llm
         from src.tools.builtin.local.create_workflow import make_create_workflow_tool
         from src.tools.builtin.local.assign_agents import make_assign_agents_tool
+        from src.tools.builtin.local.write_blueprint import make_write_blueprint_tool
         from bootstrap.seed_plan_maker import render_plan_maker_backstory
 
         await self._probe(session_id, "enter")
@@ -409,8 +577,9 @@ class InceptionService:
         await self._probe(session_id, "llm_built")
 
         # Render placeholders in backstory with current MCP + agent inventory
+        # + per-session mode context (template skeleton or iteration root)
         rendered_backstory = await render_plan_maker_backstory(
-            plan_maker.get("backstory", "")
+            plan_maker.get("backstory", ""), session=session,
         )
         await self._probe(session_id, "backstory_rendered",
                           chars=len(rendered_backstory))
@@ -444,6 +613,7 @@ class InceptionService:
             tools=[
                 make_create_workflow_tool(session_id),
                 make_assign_agents_tool(session_id),
+                make_write_blueprint_tool(session_id),
             ],
             max_iter=max_iter,
             verbose=False,

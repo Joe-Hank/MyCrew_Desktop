@@ -434,8 +434,18 @@ class WorkflowService:
         updates: dict[str, Any] = {"status": task["status"]}
         if task["status"] == TaskState.RUNNING and not task.get("started_at"):
             from datetime import datetime, timezone
-            updates["started_at"] = datetime.now(timezone.utc).isoformat()
-        if task["status"] in (TaskState.DONE, TaskState.FAILED, TaskState.ABORTED):
+            now_iso = datetime.now(timezone.utc).isoformat()
+            updates["started_at"] = now_iso
+            # Seed last_activity_at so the watchdog has a baseline before
+            # the first step callback fires.
+            updates["last_activity_at"] = now_iso
+        # All terminal states must stamp finished_at — previously
+        # VALIDATION_FAILED was missing, so QA-failed projects looked
+        # like they never wrapped up.
+        if task["status"] in (
+            TaskState.DONE, TaskState.FAILED, TaskState.ABORTED,
+            TaskState.VALIDATION_FAILED,
+        ):
             from datetime import datetime, timezone
             updates["finished_at"] = datetime.now(timezone.utc).isoformat()
         await crud.update_by_id("tasks", task_id, updates)

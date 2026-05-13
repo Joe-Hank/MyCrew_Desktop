@@ -18,6 +18,8 @@ import { useEvent } from "../../hooks/useEvent";
 import { apiFetch } from "../../net/api";
 import { useQueryClient } from "@tanstack/react-query";
 import TaskBlueprintEditor from "./TaskBlueprintEditor";
+import ChoicePanel, { type ChoiceOption } from "./ChoicePanel";
+import PathInputPanel from "./PathInputPanel";
 
 function InceptionDrawer() {
   const navigate = useNavigate();
@@ -53,6 +55,19 @@ function InceptionDrawer() {
   // Active-round streaming state — accumulates `inception.delta` deltas.
   const [streamingText, setStreamingText] = useState("");
   const [roundStartTs, setRoundStartTs] = useState<number | null>(null);
+
+  // Pending structured-choice / path-input prompt from Plan Maker (e.g.
+  // "pick a Unity template" or "supply iteration root path"). Cleared once
+  // the user confirms; the confirmation goes through POST /choices.
+  const [pendingChoice, setPendingChoice] = useState<{
+    prompt: string;
+    options: ChoiceOption[];
+    context: string;
+  } | null>(null);
+  const [pendingPath, setPendingPath] = useState<{
+    prompt: string;
+    context: string;
+  } | null>(null);
   // When a round finishes we snapshot it so the chat can render a collapsed
   // "已思考 Ns" badge + a short summary bubble in place of the verbose
   // assistant message that's about to land via session refetch.
@@ -158,6 +173,52 @@ function InceptionDrawer() {
     [activeSessionId],
   );
   useEvent("inception.probe", handleProbe);
+
+  // Plan Maker can't continue until the user provides a structured pick
+  // (Unity template) or supplies the iteration root path. Backend emits
+  // these events instead of running the LLM when the inception session
+  // is missing the data.
+  const handleChoices = useCallback(
+    (msg: { payload: Record<string, unknown> }) => {
+      if (msg.payload.session_id !== activeSessionId) return;
+      setPendingChoice({
+        prompt: (msg.payload.prompt as string) ?? "",
+        options: ((msg.payload.options as unknown[]) ?? []) as ChoiceOption[],
+        context: (msg.payload.context as string) ?? "",
+      });
+    },
+    [activeSessionId],
+  );
+  useEvent("inception.choices", handleChoices);
+
+  const handleInputPath = useCallback(
+    (msg: { payload: Record<string, unknown> }) => {
+      if (msg.payload.session_id !== activeSessionId) return;
+      setPendingPath({
+        prompt: (msg.payload.prompt as string) ?? "",
+        context: (msg.payload.context as string) ?? "",
+      });
+    },
+    [activeSessionId],
+  );
+  useEvent("inception.input_path", handleInputPath);
+
+  // Confirm choice → POST /sessions/{id}/choices → clear pending panel
+  async function submitChoice(payload: {
+    template_id?: string; root_path?: string; mode?: string;
+  }) {
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    try {
+      await apiFetch(`/inceptions/sessions/${sid}/choices`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    } finally {
+      if (payload.template_id || payload.mode) setPendingChoice(null);
+      if (payload.root_path) setPendingPath(null);
+    }
+  }
 
   // Round finished — snapshot streamed text + blueprint into completedRound.
   // The persisted assistant message lands via session refetch shortly after;
@@ -641,6 +702,32 @@ function InceptionDrawer() {
                 </>
               )}
             </div>
+
+            {/* Pending structured pick (template) or path-input prompt.
+                Renders above the textarea; user confirms to unlock chat. */}
+            {pendingChoice && (
+              <div className="px-4 pt-2">
+                <ChoicePanel
+                  prompt={pendingChoice.prompt}
+                  options={pendingChoice.options}
+                  onConfirm={(value) => {
+                    if (pendingChoice.context === "template_selection") {
+                      submitChoice({ template_id: value });
+                    } else {
+                      submitChoice({ mode: value });
+                    }
+                  }}
+                />
+              </div>
+            )}
+            {pendingPath && (
+              <div className="px-4 pt-2">
+                <PathInputPanel
+                  prompt={pendingPath.prompt}
+                  onConfirm={(p) => submitChoice({ root_path: p })}
+                />
+              </div>
+            )}
 
             {/* Input area — textarea stays unlocked while thinking; new input
                 joins the queue. Send flips to Stop only while a round is

@@ -82,6 +82,32 @@ class HarnessStateMachine:
         ]
         events.extend(self._block_downstream(task_id))
         events.append(self._calc_progress())
+        # If this is the last task to leave a non-terminal state, the project
+        # should finalize. Previously only complete_task did this, so a final
+        # task that hard-failed or validation-failed would leave the project
+        # stuck in RUNNING forever.
+        if self._all_tasks_terminal():
+            events.extend(self._finalize_project())
+        return events
+
+    def stall_task(self, task_id: str) -> list[DomainEvent]:
+        """Mark a running task as STALLED (called by watchdog).
+
+        Does NOT block downstream because stall is recoverable — user can
+        retry. Project moves to STALLED when all running tasks have stalled.
+        """
+        self._transition_task(task_id, TaskState.STALLED)
+        events: list[DomainEvent] = [
+            TaskFailed(project_id=self.project_id, task_id=task_id,
+                       error="stalled: no activity past timeout"),
+        ]
+        # If every non-terminal task is now PENDING/STALLED with no RUNNING
+        # left, the project is stuck — move to STALLED state.
+        running = any(t["status"] == TaskState.RUNNING
+                      for t in self._tasks.values())
+        if not running and self.state == ProjectState.RUNNING:
+            self._transition_project(ProjectState.STALLED)
+        events.append(self._calc_progress())
         return events
 
     def validation_fail_task(self, task_id: str, errors: list[str]) -> list[DomainEvent]:
@@ -91,6 +117,9 @@ class HarnessStateMachine:
                 project_id=self.project_id, task_id=task_id, errors=errors),
         ]
         events.extend(self._block_downstream(task_id))
+        events.append(self._calc_progress())
+        if self._all_tasks_terminal():
+            events.extend(self._finalize_project())
         return events
 
     def retry_task(self, task_id: str) -> list[DomainEvent]:

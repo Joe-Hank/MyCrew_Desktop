@@ -360,6 +360,19 @@ async def run_task_with_crewai(
 
     def _step_cb(step: object) -> None:
         step_n["n"] += 1
+        # Every step proves the task is still alive — keep watchdog happy
+        # even on steps that yield no broadcastable text.
+        try:
+            from datetime import datetime, timezone
+            now_iso = datetime.now(timezone.utc).isoformat()
+            asyncio.run_coroutine_threadsafe(
+                crud.update_by_id("tasks", task_input.task_id,
+                                  {"last_activity_at": now_iso}),
+                main_loop,
+            )
+        except Exception as exc:
+            log.warning("crewai_runner.heartbeat_failed", error=str(exc))
+
         text = _extract_step_text(step)
         if not text:
             return
