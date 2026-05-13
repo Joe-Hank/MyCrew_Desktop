@@ -1,4 +1,5 @@
 import { usePermissions, useUpdatePermissions } from "../../queries/useConfigQuery";
+import QueryErrorState from "../common/QueryErrorState";
 
 const PERMISSION_INFO: Record<string, { label: string; desc: string }> = {
   file_read: { label: "文件读取", desc: "允许 Agent 读取文件内容" },
@@ -13,11 +14,22 @@ const PERMISSION_INFO: Record<string, { label: string; desc: string }> = {
 };
 
 function PermissionTable() {
-  const { data: permissions = [], isLoading } = usePermissions();
+  const { data: permissions = [], isLoading, isError, error, refetch, isFetching } = usePermissions();
   const updateMutation = useUpdatePermissions();
 
   if (isLoading) {
     return <div className="p-8 text-center text-sm" style={{ color: "var(--color-ink-ghost)" }}>加载中...</div>;
+  }
+
+  if (isError) {
+    return (
+      <QueryErrorState
+        title="读取权限配置失败"
+        error={error}
+        onRetry={() => refetch()}
+        isFetching={isFetching}
+      />
+    );
   }
 
   function handleToggle(id: string, currentAllowed: boolean) {

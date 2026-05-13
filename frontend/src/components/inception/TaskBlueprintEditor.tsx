@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { Blueprint } from "../../queries/useInceptionQuery";
+import { useAssignableAgents } from "../../queries/useAgentQuery";
 
 interface Props {
   blueprint: Blueprint;
@@ -15,6 +16,8 @@ function TaskBlueprintEditor({
   reEvaluating,
 }: Props) {
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const { data: agents } = useAssignableAgents();
+  const agentList = agents ?? [];
 
   function updateTask(index: number, patch: Partial<Blueprint["tasks"][0]>) {
     const tasks = blueprint.tasks.map((t, i) => (i === index ? { ...t, ...patch } : t));
@@ -38,6 +41,12 @@ function TaskBlueprintEditor({
     ];
     onChange({ ...blueprint, tasks });
     setEditingIndex(tasks.length - 1);
+  }
+
+  function agentLabel(agentId: string | null | undefined, kind: string): string {
+    if (!agentId) return kind === "final_qa" ? "QA-Agent" : "自动分配";
+    const a = agentList.find((x) => x.id === agentId);
+    return a?.role ?? "未知 Agent";
   }
 
   return (
@@ -105,6 +114,21 @@ function TaskBlueprintEditor({
                     placeholder="如: 1,2"
                   />
                 </div>
+                <div className="flex items-center gap-2 text-xs">
+                  <label style={{ color: "var(--color-ink-faint)" }}>执行 Agent:</label>
+                  <select
+                    value={task.agent_id ?? ""}
+                    onChange={(e) => updateTask(i, { agent_id: e.target.value || null })}
+                    className="flex-1 rounded-md bg-zinc-50 px-2 py-1 text-xs outline-none"
+                  >
+                    <option value="">
+                      {task.kind === "final_qa" ? "（默认 QA-Agent）" : "（自动分配）"}
+                    </option>
+                    {agentList.map((a) => (
+                      <option key={a.id} value={a.id}>{a.role}</option>
+                    ))}
+                  </select>
+                </div>
                 <div className="flex gap-2">
                   <button
                     onClick={() => setEditingIndex(null)}
@@ -164,7 +188,7 @@ function TaskBlueprintEditor({
                       <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
                       <circle cx="12" cy="7" r="4" />
                     </svg>
-                    {task.kind === "final_qa" ? "QA-Agent" : "自动分配"}
+                    {agentLabel(task.agent_id, task.kind)}
                   </span>
                   {task.deps.length > 0 && (
                     <span>依赖: {task.deps.map((d) => `#${d + 1}`).join(", ")}</span>

@@ -1,5 +1,6 @@
 import { useLlmProviders, useDeleteLlmProvider, type LlmProvider, LLM_TYPES } from "../../queries/useLlmQuery";
 import RowActionsMenu from "../common/RowActionsMenu";
+import QueryErrorState from "../common/QueryErrorState";
 
 const GRID = "grid-cols-[20px_1.2fr_1fr_1.6fr_1.4fr_1fr_60px]";
 
@@ -14,13 +15,24 @@ function typeLabel(t: string): string {
 }
 
 function LlmTable({ onEdit }: { onEdit: (p: LlmProvider) => void }) {
-  const { data: providers, isLoading } = useLlmProviders();
+  const { data: providers, isLoading, isError, error, refetch, isFetching } = useLlmProviders();
   const deleteMut = useDeleteLlmProvider();
 
   const items = providers ?? [];
 
   if (isLoading) {
     return <div className="p-8 text-center text-sm" style={{ color: "var(--color-ink-ghost)" }}>加载中...</div>;
+  }
+
+  if (isError) {
+    return (
+      <QueryErrorState
+        title="读取 LLM 配置失败"
+        error={error}
+        onRetry={() => refetch()}
+        isFetching={isFetching}
+      />
+    );
   }
 
   return (

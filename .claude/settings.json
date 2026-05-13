@@ -56,7 +56,79 @@
       "PowerShell(Set-Location \"f:\\\\ClaudeData\\\\MyCrew_v3\\\\backend\"; $env:PYTHONPATH = \".\"; & python -c \"from bootstrap.app import create_app; app = create_app\\(\\); print\\(f'routes: {len\\(app.routes\\)}'\\); print\\('OK'\\)\")",
       "Bash(Test-Path \"f:\\\\ClaudeData\\\\MyCrew_v3\\\\frontend\\\\src\\\\components\\\\task\")",
       "Bash(awk '/### Phase 7/,/### Phase 8/ {print NR\": \"$0}' /f/ClaudeData/MyCrew_v3/plan.md)",
-      "Bash(awk '/### 11.6 MCP/,/### 12/ {print NR\": \"$0}' /f/ClaudeData/MyCrew_v3/plan.md)"
+      "Bash(awk '/### 11.6 MCP/,/### 12/ {print NR\": \"$0}' /f/ClaudeData/MyCrew_v3/plan.md)",
+      "Bash(Get-ChildItem -Path \"f:\\\\ClaudeData\\\\MyCrew_v3\" -Force)",
+      "Bash(Select-Object Name, FullName)",
+      "Bash(Select-Object Name, PSIsContainer)",
+      "Bash(Format-Table)",
+      "PowerShell(Get-ChildItem -Path \"F:\\\\ClaudeData\\\\MyCrew_v3\" -Force | Select-Object Name, @{Name=\"IsDir\";Expression={$_.PSIsContainer}} | Format-Table)",
+      "Bash(xargs wc -l)",
+      "Bash(python -m py_compile bootstrap/*.py api/*.py services/*.py domain/**/*.py infra/**/*.py ports/*.py)",
+      "Bash(Get-ChildItem -Path \"f:\\\\ClaudeData\\\\MyCrew_v3\\\\backend\" -Recurse -Directory)",
+      "Bash(Select-Object FullName)",
+      "Bash(python -m pytest tests/ -v --tb=short)",
+      "mcp__figma__get_design_context",
+      "Bash(python -c ' *)",
+      "Bash(python)",
+      "Bash(file \"f:/ClaudeData/MyCrew_v3/s -ExecutionPolicy RemoteSigned\\) ; \\(& f\"*Activate.ps1*\" 2>&1 | head -5)",
+      "Bash(cd \"/f/ClaudeData/MyCrew_v3\" && ls -la | grep -i Execution)",
+      "Read(//f/f/ClaudeData/**)",
+      "Read(//f/ClaudeData/MyCrew_v2/**)",
+      "Bash(Get-ChildItem -Recurse -Force)",
+      "Bash(Select-Object -First 100)",
+      "Bash(Format-Table -AutoSize)",
+      "Bash(xargs grep -l \"crew\\\\|Crew\")",
+      "Bash(python -m pytest tests/ --tb=line -q)",
+      "Bash(python -m pytest tests/ --tb=short -q)",
+      "Bash(python -c \"import crewai; print\\(crewai.__version__\\); from crewai import Agent, Crew, Task, Process; print\\('OK'\\)\")",
+      "Bash(python -m scripts.inspect_db)",
+      "Bash(python -m scripts.debug_api)",
+      "PowerShell(Set-Location \"f:\\\\ClaudeData\\\\MyCrew_v3\\\\backend\"; Start-Process -FilePath python -ArgumentList \"-m\",\"uvicorn\",\"bootstrap.app:create_app\",\"--factory\",\"--host\",\"127.0.0.1\",\"--port\",\"18321\" -RedirectStandardOutput \"$env:TEMP\\\\mycrew_out.log\" -RedirectStandardError \"$env:TEMP\\\\mycrew_err.log\" -PassThru -WindowStyle Hidden | Select-Object -ExpandProperty Id)",
+      "Bash(curl -s http://127.0.0.1:18321/api/v1/llm/providers)",
+      "PowerShell(Start-Sleep -Seconds 3; Invoke-WebRequest -Uri \"http://127.0.0.1:18321/api/v1/llm/providers\" -UseBasicParsing -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Content 2>&1 | Select-Object -First 1; Get-Content $env:TEMP\\\\mycrew_err.log -Tail 15 2>&1)",
+      "PowerShell(Start-Sleep -Seconds 8; Get-Content $env:TEMP\\\\mycrew_err.log -Tail 25 2>&1)",
+      "PowerShell(Start-Sleep -Seconds 20; Get-Content $env:TEMP\\\\mycrew_err.log -Tail 40 2>&1)",
+      "PowerShell(Stop-Process -Id 42512 -Force -ErrorAction SilentlyContinue; Get-Process -Name uvicorn -ErrorAction SilentlyContinue | Stop-Process -Force; Get-Process -Name python -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -match \"uvicorn\" -or $_.CommandLine -match \"uvicorn\" } | Stop-Process -Force; \"killed\" 2>&1)",
+      "PowerShell(taskkill /F /PID 24380 2>&1)",
+      "PowerShell(taskkill /F /PID 42512 2>&1)",
+      "Bash(python -m scripts.disable_mcp_autostart)",
+      "PowerShell(Set-Location \"f:\\\\ClaudeData\\\\MyCrew_v3\\\\backend\"; Start-Process -FilePath python -ArgumentList \"-m\",\"uvicorn\",\"bootstrap.app:create_app\",\"--factory\",\"--host\",\"127.0.0.1\",\"--port\",\"18321\" -RedirectStandardOutput \"$env:TEMP\\\\mycrew_out2.log\" -RedirectStandardError \"$env:TEMP\\\\mycrew_err2.log\" -PassThru -WindowStyle Hidden | Select-Object -ExpandProperty Id)",
+      "PowerShell(Start-Sleep -Seconds 6; Get-Content $env:TEMP\\\\mycrew_err2.log -Tail 25 2>&1; Write-Host \"---API TEST---\"; try { \\(Invoke-WebRequest -Uri \"http://127.0.0.1:18321/api/v1/llm/providers\" -UseBasicParsing\\).Content.Substring\\(0, 200\\) } catch { \"Failed: $_\" })",
+      "PowerShell(Start-Sleep -Seconds 12; Get-Content $env:TEMP\\\\mycrew_err2.log -Tail 25 2>&1; Write-Host \"---API TEST---\"; try { \\(Invoke-WebRequest -Uri \"http://127.0.0.1:18321/api/v1/llm/providers\" -UseBasicParsing\\).Content.Substring\\(0, 200\\) } catch { \"Failed: $_\" })",
+      "PowerShell(Stop-Process -Id 44092 -Force -ErrorAction SilentlyContinue)",
+      "PowerShell(\"killed\")",
+      "PowerShell(Set-Location \"f:\\\\ClaudeData\\\\MyCrew_v3\\\\backend\"; Start-Process -FilePath python -ArgumentList \"-m\",\"uvicorn\",\"bootstrap.app:create_app\",\"--factory\",\"--host\",\"127.0.0.1\",\"--port\",\"18321\" -RedirectStandardOutput \"$env:TEMP\\\\mycrew_out3.log\" -RedirectStandardError \"$env:TEMP\\\\mycrew_err3.log\" -PassThru -WindowStyle Hidden | Select-Object -ExpandProperty Id)",
+      "PowerShell(Start-Sleep -Seconds 8; Write-Host \"---STDERR---\"; Get-Content $env:TEMP\\\\mycrew_err3.log -Tail 30 2>&1; Write-Host \"---API TEST---\"; try { \\(Invoke-WebRequest -Uri \"http://127.0.0.1:18321/api/v1/llm/providers\" -UseBasicParsing -TimeoutSec 5\\).Content.Substring\\(0, 300\\) } catch { \"Failed: $\\($_.Exception.Message\\)\" })",
+      "PowerShell(Stop-Process -Id 44952 -Force -ErrorAction SilentlyContinue)",
+      "PowerShell(\"stopped\")",
+      "Bash(Get-ChildItem -Path \"f:\\\\ClaudeData\\\\MyCrew_v3\\\\backend\" -Directory)",
+      "Bash(Select-Object Name)",
+      "Bash(xargs grep -l \"tools\")",
+      "Bash(xargs grep -l \"tool\")",
+      "Bash(python -c \"from src.tools.builtin.local.create_workflow import make_create_workflow_tool; t = make_create_workflow_tool\\('test_sid'\\); print\\('Tool name:', t.name\\); print\\('Bound session:', t._bound_session_id\\); print\\('Args schema fields:', list\\(t.args_schema.model_fields.keys\\(\\)\\)\\)\")",
+      "Bash(python -m pytest tests/test_create_workflow_tool.py --tb=short -q)",
+      "WebFetch(domain:api-docs.deepseek.com)",
+      "Bash(python -m scripts.test_deepseek_api)",
+      "Bash(python -m pytest tests/ -q)",
+      "PowerShell(if \\(Test-Path f:/ClaudeData/MyCrew_v3/data\\) { ls f:/ClaudeData/MyCrew_v3/data }; if \\(Test-Path \"$env:APPDATA/MyCrew\"\\) { ls \"$env:APPDATA/MyCrew\" }; if \\(Test-Path \"$env:LOCALAPPDATA/MyCrew\"\\) { ls \"$env:LOCALAPPDATA/MyCrew\" })",
+      "PowerShell(try { $r = Invoke-WebRequest -Uri \"http://127.0.0.1:18321/api/v1/llm/providers\" -TimeoutSec 3 -UseBasicParsing; Write-Output \"STATUS $\\($r.StatusCode\\)\"; Write-Output $r.Content.Substring\\(0,[Math]::Min\\(500,$r.Content.Length\\)\\) } catch { Write-Output \"ERROR: $\\($_.Exception.Message\\)\" })",
+      "PowerShell(Get-NetTCPConnection -State Listen | Where-Object { $_.LocalPort -ge 18321 -and $_.LocalPort -le 18400 -or $_.LocalPort -eq 1420 } | Select-Object LocalAddress, LocalPort, OwningProcess)",
+      "Bash(npx tsc *)",
+      "Bash(backend/.venv/Scripts/python.exe -c \"import ast; ast.parse\\(open\\('backend/api/routes_workflow.py', encoding='utf-8'\\).read\\(\\)\\); ast.parse\\(open\\('backend/migrations/versions/0005_task_positions.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")"
+    ]
+  },
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "http",
+            "url": "http://127.0.0.1:3100/hooks/permission",
+            "timeout": 3
+          }
+        ]
+      }
     ]
   }
 }

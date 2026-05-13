@@ -50,8 +50,12 @@ function TaskNode({
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") onSelect(task);
       }}
-      className="relative w-[200px] cursor-pointer rounded-lg bg-white p-3 transition-shadow hover:shadow-md"
+      className="relative w-[200px] cursor-pointer rounded-lg p-3 transition-shadow hover:shadow-md"
       style={{
+        // Explicit theme-aware bg via CSS variable — `bg-white` was being
+        // resolved unpredictably under Tailwind v4 + ReactFlow's stacking
+        // context, producing light cards in dark mode and vice versa.
+        backgroundColor: "var(--color-card)",
         border: `1px solid ${selected ? "var(--color-brand-500)" : "var(--color-border-soft)"}`,
         boxShadow: selected ? "0 0 0 3px rgba(12, 140, 233, 0.12)" : "0 1px 2px rgba(0, 0, 0, 0.04)",
       }}

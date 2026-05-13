@@ -11,10 +11,6 @@ function HomePage() {
   const { data } = useProjects(page);
   const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / 4));
 
-  function handleStart(projectId: string) {
-    console.log("start/pause project:", projectId);
-  }
-
   return (
     <div className="flex h-full flex-col px-6 pb-3 pt-4">
       {/* Top toolbar */}
@@ -59,7 +55,7 @@ function HomePage() {
 
       {/* Project grid */}
       <div className="min-h-0 flex-1">
-        <ProjectGrid page={page} onStart={handleStart} />
+        <ProjectGrid page={page} />
       </div>
 
       {/* Bottom status bars */}

@@ -27,6 +27,11 @@ interface PrefsState {
   teamActiveTab: TeamTab;
   settingsActiveTab: SettingsTab;
 
+  // Most-recently-opened project (used by TaskPage to auto-restore when
+  // the user re-enters /tasks without an id — both via the sidebar nav
+  // mid-session and across an app restart).
+  lastProjectId: string | null;
+
   // Setters
   setInceptionLlm: (v: string | null) => void;
   setInceptionModel: (v: string | null) => void;
@@ -35,6 +40,7 @@ interface PrefsState {
   setLogDrawerActiveTab: (v: LogTab) => void;
   setTeamActiveTab: (v: TeamTab) => void;
   setSettingsActiveTab: (v: SettingsTab) => void;
+  setLastProjectId: (v: string | null) => void;
 }
 
 export const usePrefsStore = create<PrefsState>()(
@@ -47,6 +53,7 @@ export const usePrefsStore = create<PrefsState>()(
       logDrawerActiveTab: "应用日志",
       teamActiveTab: "agents",
       settingsActiveTab: "llm",
+      lastProjectId: null,
 
       setInceptionLlm: (v) => set({ inceptionLlm: v }),
       setInceptionModel: (v) => set({ inceptionModel: v }),
@@ -55,6 +62,7 @@ export const usePrefsStore = create<PrefsState>()(
       setLogDrawerActiveTab: (v) => set({ logDrawerActiveTab: v }),
       setTeamActiveTab: (v) => set({ teamActiveTab: v }),
       setSettingsActiveTab: (v) => set({ settingsActiveTab: v }),
+      setLastProjectId: (v) => set({ lastProjectId: v }),
     }),
     { name: "mycrew-prefs", version: 1 },
   ),

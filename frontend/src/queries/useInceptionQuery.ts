@@ -36,6 +36,10 @@ export interface Blueprint {
     deps: number[];
     output_schema: Record<string, unknown>;
     kind: string;
+    /** Frontend-only: which agent should run this task. Persisted via
+     *  per-task PUT /workflow/tasks/{id} on save (server doesn't include
+     *  agent_id in the create_workflow tool payload). */
+    agent_id?: string | null;
   }[];
 }
 
@@ -76,7 +80,21 @@ export function useCreateInceptionSession() {
  *
  *  Pass an AbortSignal in the mutation variables to support a user "Stop"
  *  button — aborting the fetch disconnects the client, FastAPI cancels the
- *  task, and the in-flight LLM call is cancelled too. */
+ *  task, and the in-flight LLM call is cancelled too.
+ *
+ *  NOTE: no `onMutate` optimistic update. The chat-queue hook owns the
+ *  pending-bubble lifecycle (the round is single-flight, the user-side
+ *  echo is rendered from `useChatQueue.pending`). Adding an optimistic
+ *  insert here too caused the "message appears twice" bug. We `await`
+ *  the invalidation in onSuccess so mutateAsync only resolves once the
+ *  cache holds the freshly-fetched server messages — eliminating the
+ *  gap where the pending bubble has been cleared but the persisted
+ *  message hasn't arrived yet. */
+// Plan Maker rounds can take up to ~120s server-side (the backend enforces
+// its own kickoff timeout). Give the frontend a slightly larger ceiling so
+// the network call only fails when something is genuinely wedged below.
+const PLAN_MAKER_TIMEOUT_MS = 180_000;
+
 export function useStreamInceptionMessage() {
   const qc = useQueryClient();
   return useMutation({
@@ -89,46 +107,10 @@ export function useStreamInceptionMessage() {
         method: "POST",
         body: JSON.stringify({ content }),
         signal,
+        timeoutMs: PLAN_MAKER_TIMEOUT_MS,
       }),
-    onMutate: async ({ sessionId, content }) => {
-      const key = ["inception", "session", sessionId];
-      await qc.cancelQueries({ queryKey: key });
-      const prev = qc.getQueryData<SessionDetail | null>(key);
-
-      const optimisticMsg: InceptionMessage = {
-        id: `__pending_${Date.now()}`,
-        session_id: sessionId,
-        role: "user",
-        content,
-        ts: new Date().toISOString(),
-      };
-
-      // When prev is null/undefined the session detail hasn't been fetched
-      // yet (first message right after createSession). Create a stub so the
-      // bubble renders immediately; invalidate-on-success will reconcile.
-      if (prev) {
-        qc.setQueryData<SessionDetail>(key, {
-          ...prev,
-          messages: [...prev.messages, optimisticMsg],
-        });
-      } else {
-        qc.setQueryData<SessionDetail>(key, {
-          id: sessionId,
-          project_id: null,
-          llm_id: "",
-          thinking_mode: false,
-          messages: [optimisticMsg],
-        });
-      }
-      return { prev };
-    },
-    onError: (_err, vars, ctx) => {
-      if (ctx?.prev !== undefined) {
-        qc.setQueryData(["inception", "session", vars.sessionId], ctx.prev);
-      }
-    },
-    onSuccess: (_data, vars) => {
-      qc.invalidateQueries({ queryKey: ["inception", "session", vars.sessionId] });
+    onSuccess: async (_data, vars) => {
+      await qc.invalidateQueries({ queryKey: ["inception", "session", vars.sessionId] });
     },
   });
 }
@@ -140,6 +122,7 @@ export function useSendInceptionMessage() {
       apiFetch(`/inceptions/sessions/${sessionId}/messages`, {
         method: "POST",
         body: JSON.stringify({ content }),
+        timeoutMs: PLAN_MAKER_TIMEOUT_MS,
       }),
     // Optimistic update: the LLM round-trip can take many seconds, so
     // immediately reflect the user's message in the cache. Otherwise the

@@ -23,18 +23,23 @@ log = structlog.get_logger()
 # ── LLM construction ──────────────────────────────────────────────
 
 def _build_litellm_model_string(provider_type: str, model_name: str) -> str:
-    """Return the model string expected by CrewAI / litellm.
+    """Return the model string expected by CrewAI.
 
-    litellm naming conventions:
-      - OpenAI direct           → "openai/gpt-4o"
-      - Anthropic               → "anthropic/claude-3-5-sonnet-20241022"
-      - Gemini                  → "gemini/gemini-1.5-pro"
-      - Ollama                  → "ollama/llama3"
-      - OpenAI-compatible custom (Qwen/Deepseek/GLM/MiMo via dashscope etc.):
-            use "openai/MODEL" and pass api_base
+    CrewAI ≥1.14 ships a *native* provider set and treats `openai/<model>` as
+    a real OpenAI request — feeding it an arbitrary non-OpenAI model name
+    fails initialisation. We therefore pick a CrewAI-native prefix matching
+    the provider type, so litellm is not required:
+
+      - deepseek  → "deepseek/<model>"     (native; uses api.deepseek.com)
+      - qwen      → "dashscope/<model>"    (native; uses DashScope endpoint)
+      - custom    → "hosted_vllm/<model>"  (native OpenAI-compat; needs base_url)
+      - openai    → "openai/<model>"
+      - anthropic → "anthropic/<model>"
+      - gemini    → "gemini/<model>"
+      - ollama    → "ollama/<model>"
     """
     t = (provider_type or "openai").lower()
-    if t in ("openai", "qwen", "deepseek", "custom"):
+    if t == "openai":
         return f"openai/{model_name}"
     if t == "anthropic":
         return f"anthropic/{model_name}"
@@ -42,7 +47,13 @@ def _build_litellm_model_string(provider_type: str, model_name: str) -> str:
         return f"gemini/{model_name}"
     if t == "ollama":
         return f"ollama/{model_name}"
-    return model_name  # let litellm guess
+    if t == "deepseek":
+        return f"deepseek/{model_name}"
+    if t == "qwen":
+        return f"dashscope/{model_name}"
+    if t == "custom":
+        return f"hosted_vllm/{model_name}"
+    return model_name
 
 
 def _build_crewai_llm(provider: dict, model_name: str):

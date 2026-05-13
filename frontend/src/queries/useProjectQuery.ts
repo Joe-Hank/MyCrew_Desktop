@@ -11,6 +11,13 @@ export interface Project {
   execution_kind: string;
   created_at: string;
   copied_from: string | null;
+  /** Non-null = starred. Server sorts starred rows to the head of page 1
+   *  (newest favorite first). */
+  favorited_at: string | null;
+  /** Timestamp of the last unstar event. Used by the server to push a
+   *  just-unstarred project to the head of the non-favorites tier — same
+   *  position a freshly created project would land in. */
+  unfavorited_at: string | null;
   task_count?: number;
   done_count?: number;
   tasks?: Task[];
@@ -26,6 +33,10 @@ export interface Task {
   output_schema: Record<string, unknown>;
   status: string;
   deps: string[];
+  /** Canvas position. NULL = never been dragged; client falls back to the
+   *  wave-layout coordinates for the initial render. */
+  position_x?: number | null;
+  position_y?: number | null;
 }
 
 export interface ProjectPage {
@@ -98,3 +109,21 @@ export function useUpdateRootPath() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["projects"] }),
   });
 }
+
+/** Toggle the star on a project. The server handles ordering so the next
+ *  refetch already places the row in the right spot — no client-side
+ *  reordering needed. */
+export function useToggleFavorite() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, favorited }: { id: string; favorited: boolean }) =>
+      apiFetch(`/projects/${id}/${favorited ? "favorite" : "unfavorite"}`, {
+        method: "POST",
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["projects"] }),
+  });
+}
+
+// useUpdateTask was moved to useWorkflowQuery.ts so the canvas and the
+// home grid share a single canonical task-mutation hook. Import from
+// "../queries/useWorkflowQuery" for any task PATCH need.

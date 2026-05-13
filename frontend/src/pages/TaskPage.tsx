@@ -4,8 +4,9 @@ import { useProject, type Task } from "../queries/useProjectQuery";
 import { useRetryTask } from "../queries/useWorkflowQuery";
 import { useEvent } from "../hooks/useEvent";
 import { useQueryClient } from "@tanstack/react-query";
+import { usePrefsStore } from "../stores/usePrefsStore";
 import TaskHeader from "../components/task/TaskHeader";
-import Blueprint from "../components/task/Blueprint";
+import CanvasBlueprint from "../components/task/CanvasBlueprint";
 import TaskEditModal from "../components/task/TaskEditModal";
 import AgentChatDrawer from "../components/task/AgentChatDrawer";
 import IoViewerDrawer from "../components/task/IoViewerDrawer";
@@ -20,6 +21,8 @@ type DrawerState =
 function TaskPage() {
   const { projectId } = useParams<{ projectId: string }>();
   const navigate = useNavigate();
+  const lastProjectId = usePrefsStore((s) => s.lastProjectId);
+  const setLastProjectId = usePrefsStore((s) => s.setLastProjectId);
   const { data: project, isLoading } = useProject(projectId);
   const retryTask = useRetryTask();
   const qc = useQueryClient();
@@ -27,7 +30,41 @@ function TaskPage() {
   const [retryConfirm, setRetryConfirm] = useState<Task | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
 
-  // Auto-select first task on project load
+  // ── Last-opened project persistence ────────────────────────────
+  //
+  // Hitting `/tasks` (no id) — happens when the user clicks "任务" in
+  // the sidebar or restarts the app — restores whichever project was
+  // last viewed. This keeps the canvas state across navigation and
+  // across app restarts (the id is persisted to localStorage via the
+  // prefs store).
+  useEffect(() => {
+    if (!projectId && lastProjectId) {
+      navigate(`/tasks/${lastProjectId}`, { replace: true });
+    }
+  }, [projectId, lastProjectId, navigate]);
+
+  // Whenever the URL settles on a real project id, remember it.
+  useEffect(() => {
+    if (projectId && projectId !== lastProjectId) {
+      setLastProjectId(projectId);
+    }
+  }, [projectId, lastProjectId, setLastProjectId]);
+
+  // If the persisted lastProjectId points to a project that no longer
+  // exists (deleted from home grid while away), clear it so the next
+  // visit to /tasks shows the empty-state instead of looping on 404.
+  useEffect(() => {
+    if (projectId && !isLoading && project === null && projectId === lastProjectId) {
+      setLastProjectId(null);
+    }
+  }, [projectId, isLoading, project, lastProjectId, setLastProjectId]);
+
+  // Auto-select first task on project load. Reset when the project id
+  // changes (otherwise the selection from a previous project would
+  // dangle and the canvas would highlight a node that doesn't exist).
+  useEffect(() => {
+    setSelectedTaskId(null);
+  }, [projectId]);
   useEffect(() => {
     if (project?.tasks && project.tasks.length > 0 && !selectedTaskId) {
       const first = project.tasks[0];
@@ -52,7 +89,11 @@ function TaskPage() {
   useEvent("project.aborted", handleWsTaskEvent);
   useEvent("project.progress", handleWsTaskEvent);
 
-  function handleAction(action: TaskAction) {
+  // Stable identity so the canvas doesn't recompute its node-data memo
+  // on every parent re-render (a WS event firing in the background was
+  // re-creating onSelect/onAction → cascading through ReactFlow and
+  // briefly disconnecting edges during a drag).
+  const handleAction = useCallback((action: TaskAction) => {
     switch (action.kind) {
       case "edit":
         setDrawer({ kind: "edit", task: action.task });
@@ -69,11 +110,11 @@ function TaskPage() {
       case "pause":
         break;
     }
-  }
+  }, []);
 
-  function handleSelect(task: Task) {
+  const handleSelect = useCallback((task: Task) => {
     setSelectedTaskId(task.id);
-  }
+  }, []);
 
   function handleRetryConfirmed() {
     if (!retryConfirm || !projectId) return;
@@ -137,7 +178,8 @@ function TaskPage() {
           className={`flex-1 overflow-hidden ${hasDrawer ? "" : ""}`}
           style={hasDrawer ? { borderRight: "1px solid var(--color-border-soft)" } : {}}
         >
-          <Blueprint
+          <CanvasBlueprint
+            projectId={project.id}
             tasks={tasks}
             selectedTaskId={selectedTaskId}
             projectRunning={projectRunning}

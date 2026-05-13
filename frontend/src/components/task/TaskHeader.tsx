@@ -1,51 +1,49 @@
-import { useNavigate } from "react-router-dom";
 import type { Project, Task } from "../../queries/useProjectQuery";
 import {
   useStartProject,
   usePauseProject,
   useResumeProject,
-  useAbortProject,
 } from "../../queries/useWorkflowQuery";
-import { useState } from "react";
 
-const PROJECT_STATE_LABEL: Record<string, string> = {
-  ready: "就绪",
-  running: "运行中",
-  paused: "已暂停",
-  completed: "已完成",
-  completed_with_warnings: "完成(警告)",
-  completed_with_issues: "完成(问题)",
-  aborted: "已中止",
-};
-
-const TASK_STATE_LABEL: Record<string, string> = {
-  pending: "待执行",
-  running: "运行中",
-  paused: "已暂停",
-  done: "已完成",
-  failed: "失败",
-  validation_failed: "验证失败",
-  aborted: "已中止",
-  blocked: "阻塞",
-};
+// Header redesign per Figma: NO background frame, NO border, info hugged
+// to the top-left of the page. Drop the breadcrumb/chip clutter; surface
+// just the selected task title + its progress, with the three project-
+// level controls (pause-or-resume, 路径, 迭代) on the far right. Sidebar
+// already shows where the user is, so the project name doesn't need its
+// own breadcrumb row.
 
 interface Props {
   project: Project;
   selectedTask: Task | null;
 }
 
+function PlayIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+      <polygon points="6,4 20,12 6,20" />
+    </svg>
+  );
+}
+
+function PauseIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+      <rect x="6" y="4" width="4" height="16" rx="1" />
+      <rect x="14" y="4" width="4" height="16" rx="1" />
+    </svg>
+  );
+}
+
 function TaskHeader({ project, selectedTask }: Props) {
-  const navigate = useNavigate();
   const start = useStartProject();
   const pause = usePauseProject();
   const resume = useResumeProject();
-  const abort = useAbortProject();
-  const [showAbortConfirm, setShowAbortConfirm] = useState(false);
 
   const isRunning = project.state === "running";
   const isPaused = project.state === "paused";
   const isReady = project.state === "ready";
-  const isTerminal = ["completed", "completed_with_warnings", "completed_with_issues", "aborted"].includes(project.state);
+  const isTerminal = ["completed", "completed_with_warnings", "completed_with_issues", "aborted"]
+    .includes(project.state);
 
   function handlePrimary() {
     if (isReady) start.mutate(project.id);
@@ -53,12 +51,8 @@ function TaskHeader({ project, selectedTask }: Props) {
     else if (isPaused) resume.mutate(project.id);
   }
 
-  function handleAbort() {
-    abort.mutate({ projectId: project.id, reason: "user abort" });
-    setShowAbortConfirm(false);
-  }
-
-  // Task-level computed: progress, action label
+  // Task-level progress placeholder — once the backend exposes a real
+  // per-task progress field, plug it in here.
   const taskProgress = (() => {
     if (!selectedTask) return 0;
     if (selectedTask.status === "done") return 100;
@@ -66,146 +60,115 @@ function TaskHeader({ project, selectedTask }: Props) {
     return 0;
   })();
 
+  const primaryDisabled = start.isPending || pause.isPending || resume.isPending;
+  const primaryTitle = isReady
+    ? "启动项目"
+    : isRunning
+      ? "暂停项目"
+      : isPaused
+        ? "继续项目"
+        : "已结束";
+
   return (
-    <div
-      className="flex flex-col"
-      style={{
-        backgroundColor: "var(--color-card)",
-        borderBottom: "1px solid var(--color-border-soft)",
-      }}
-    >
-      {/* Top thin breadcrumb */}
-      <div className="flex items-center gap-2 px-5 pt-2 text-[11px]" style={{ color: "var(--color-ink-ghost)" }}>
-        <button
-          onClick={() => navigate("/")}
-          className="hover:underline"
+    // No background, no border — sits directly on the page. Everything
+    // hugs the top-LEFT in a single cluster per docs/figma/task.png:
+    //   [Task title] [▬▬▬▬▬▬▬▬▬ N%] [⏸] [路径] [迭代]
+    // No ml-auto / no flex-1 spacer — buttons stay tight against the
+    // title block instead of getting pushed to the far right.
+    <div className="flex items-center gap-3 px-5 pt-3 pb-2">
+      {selectedTask ? (
+        <h1
+          className="truncate text-base font-semibold"
+          style={{ color: "var(--color-ink-strong)" }}
+          title={`${project.name} / ${selectedTask.title}`}
         >
-          首页
-        </button>
-        <span>/</span>
-        <span>{project.name}</span>
-        <span
-          className="rounded px-1.5 py-0.5 text-[10px]"
-          style={{
-            backgroundColor: "var(--color-surface-alt)",
-            color: "var(--color-ink-faint)",
-          }}
+          {selectedTask.title}
+        </h1>
+      ) : (
+        <h1
+          className="truncate text-base font-semibold"
+          style={{ color: "var(--color-ink-muted)" }}
         >
-          {PROJECT_STATE_LABEL[project.state] ?? project.state}
-        </span>
-        <div className="ml-auto flex items-center gap-2">
-          {/* Project-level progress mini */}
+          {project.name}
+        </h1>
+      )}
+
+      {/* Inline progress bar + percentage — short, just enough to read
+          quickly. Width 96px keeps the cluster compact. */}
+      {selectedTask && (
+        <div className="flex items-center gap-1.5">
           <div
-            className="h-1 w-20 overflow-hidden rounded-full"
+            className="h-1 w-24 overflow-hidden rounded-full"
             style={{ backgroundColor: "var(--color-surface-alt)" }}
-            title={`项目进度 ${project.progress_pct}%`}
+            title={`任务进度 ${Math.round(taskProgress)}%`}
           >
             <div
               className="h-full rounded-full transition-all"
               style={{
-                width: `${project.progress_pct}%`,
+                width: `${taskProgress}%`,
                 backgroundColor: "var(--color-brand-500)",
               }}
             />
           </div>
-          <span className="tabular-nums">
-            {project.done_count ?? 0}/{project.task_count ?? 0}
-          </span>
-
-          {!isTerminal && (
-            <button
-              onClick={handlePrimary}
-              disabled={start.isPending || pause.isPending || resume.isPending}
-              className="rounded-md px-2 py-0.5 text-[10px] font-medium text-white disabled:opacity-50"
-              style={{ backgroundColor: "var(--color-brand-500)" }}
-            >
-              {isReady ? "启动项目" : isRunning ? "暂停项目" : "继续项目"}
-            </button>
-          )}
-          {(isRunning || isPaused) &&
-            (showAbortConfirm ? (
-              <span className="flex items-center gap-1">
-                <span className="text-red-500">中止?</span>
-                <button onClick={handleAbort} className="rounded bg-red-500 px-1.5 py-0.5 text-white">
-                  确认
-                </button>
-                <button
-                  onClick={() => setShowAbortConfirm(false)}
-                  className="rounded border px-1.5 py-0.5"
-                  style={{ borderColor: "var(--color-border-soft)" }}
-                >
-                  取消
-                </button>
-              </span>
-            ) : (
-              <button
-                onClick={() => setShowAbortConfirm(true)}
-                className="rounded border px-1.5 py-0.5 text-red-500"
-                style={{ borderColor: "var(--color-border-soft)" }}
-              >
-                中止
-              </button>
-            ))}
-        </div>
-      </div>
-
-      {/* Main row: selected task + actions */}
-      <div className="flex items-center gap-3 px-5 py-3">
-        {selectedTask ? (
-          <>
-            <h1
-              className="truncate text-lg font-semibold"
-              style={{ color: "var(--color-ink-strong)" }}
-              title={selectedTask.title}
-            >
-              {selectedTask.title}
-            </h1>
-            <span className="text-sm tabular-nums" style={{ color: "var(--color-ink-muted)" }}>
-              {Math.round(taskProgress)}%
-            </span>
-            <span
-              className="rounded px-1.5 py-0.5 text-[10px]"
-              style={{
-                backgroundColor: "var(--color-surface-alt)",
-                color: "var(--color-ink-faint)",
-              }}
-            >
-              {TASK_STATE_LABEL[selectedTask.status] ?? selectedTask.status}
-            </span>
-
-            <div className="ml-auto flex items-center gap-2">
-              <button
-                className="flex items-center gap-1 rounded-lg border bg-white px-3 py-1.5 text-sm transition-colors hover:bg-zinc-50"
-                style={{ borderColor: "var(--color-border-soft)", color: "var(--color-ink-label)" }}
-                title="暂停任务"
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <rect x="6" y="4" width="4" height="16" rx="1" />
-                  <rect x="14" y="4" width="4" height="16" rx="1" />
-                </svg>
-              </button>
-              <button
-                className="rounded-lg border bg-white px-3 py-1.5 text-sm transition-colors hover:bg-zinc-50"
-                style={{ borderColor: "var(--color-border-soft)", color: "var(--color-ink-label)" }}
-              >
-                路径
-              </button>
-              <button
-                className="rounded-lg border bg-white px-3 py-1.5 text-sm transition-colors hover:bg-zinc-50"
-                style={{ borderColor: "var(--color-border-soft)", color: "var(--color-ink-label)" }}
-              >
-                迭代
-              </button>
-            </div>
-          </>
-        ) : (
-          <h1
-            className="text-lg font-semibold"
+          <span
+            className="text-[11px] tabular-nums"
             style={{ color: "var(--color-ink-muted)" }}
           >
-            {project.name}
-          </h1>
+            {Math.round(taskProgress)}%
+          </span>
+        </div>
+      )}
+
+      {/* Action buttons — sit right after the progress cluster, NOT
+          pushed to the right edge. Small gap between the progress
+          block and the first button so it reads as a separate group. */}
+      <div className="ml-1 flex items-center gap-2">
+        {!isTerminal ? (
+          <button
+            onClick={handlePrimary}
+            disabled={primaryDisabled}
+            title={primaryTitle}
+            className="flex h-7 w-7 items-center justify-center rounded-lg transition-colors disabled:opacity-50"
+            style={{
+              backgroundColor: "var(--color-card)",
+              border: "1px solid var(--color-border-soft)",
+              color: isRunning ? "var(--color-brand-500)" : "var(--color-ink-muted)",
+            }}
+          >
+            {isRunning ? <PauseIcon /> : <PlayIcon />}
+          </button>
+        ) : (
+          <span
+            className="text-[10px] uppercase tracking-wide"
+            style={{ color: "var(--color-ink-ghost)" }}
+          >
+            已结束
+          </span>
         )}
+
+        <button
+          className="rounded-lg px-3 py-1 text-xs transition-colors"
+          style={{
+            backgroundColor: "var(--color-card)",
+            border: "1px solid var(--color-border-soft)",
+            color: "var(--color-ink-label)",
+          }}
+          title="项目根路径（开发中）"
+        >
+          路径
+        </button>
+
+        <button
+          className="rounded-lg px-3 py-1 text-xs transition-colors"
+          style={{
+            backgroundColor: "var(--color-card)",
+            border: "1px solid var(--color-border-soft)",
+            color: "var(--color-ink-label)",
+          }}
+          title="迭代（占位）"
+        >
+          迭代
+        </button>
       </div>
     </div>
   );

@@ -1,7 +1,9 @@
 """Inception service — manages project inception sessions, LLM calls, blueprint parsing."""
 from __future__ import annotations
 
+import asyncio
 import json
+from collections import defaultdict
 
 import structlog
 
@@ -12,16 +14,38 @@ from api.ws import manager
 
 log = structlog.get_logger()
 
-SYSTEM_PROMPT = """你是 MyCrew 项目立项助手。用户会描述他们的想法，你需要帮他们拆解成可执行的任务。
+SYSTEM_PROMPT = """你是 MyCrew 项目立项助手。唯一职责：把用户的**项目设计需求**拆解为可执行任务。
 
-你的输出必须在最终回复中包含一个 ```json 代码块，格式如下：
+## 范围限制（硬约束）
+- 只回复与具体项目立项 / 工作流设计相关的内容。
+- 任何与「设计一个具体项目」无关的提问（闲聊、写诗、百科、教学、代码片段问答、
+  心理咨询、政治/敏感话题等）一律礼貌拒绝并提示用户回到项目立项主题，**不要**
+  输出 JSON 代码块。
+
+## 何时直接产出方案 vs 何时澄清
+- **默认尽量直接产出**。若用户给出**著名项目原型**（俄罗斯方块 / 吃豆人 / 贪吃蛇 /
+  打砖块 / Flappy Bird / Tetris / Pac-Man / Snake / Mario / 待办应用 / 计算器 等），
+  **直接按合理默认假设产出 JSON**（游戏类默认 Unity + PC + 像素/简约 + 经典玩法）。
+- 只有输入**真的极度抽象**（"做个项目"、"帮我做个东西"）才提一个澄清问题。
+  **不要为已经明确的需求强行澄清**。
+
+## 技术栈默认值（重要）
+- 游戏 / 交互 / 3D / VR / AR 类项目一律默认使用 **Unity**（Unity 2022 LTS 或更
+  高、C#、Prefab、ScriptableObject、UGUI/UI Toolkit、Input System、Animator、
+  NavMesh、URP 等）。**禁止默认输出 HTML/JavaScript/Canvas/Phaser/Three.js/Pygame
+  等 Web 或 Python 游戏栈**，除非用户明确指定。
+- 美术资产建模走 Blender，图像生成走 ComfyUI。
+- 其他类型项目（脚本、工具、数据处理）按需选择合适栈。
+
+## 任务方案 JSON 协议
+当方案成熟时输出一个 ```json 代码块：
 {
   "name": "项目名称",
   "execution_kind": "sequential" | "crew" | "flow",
   "tasks": [
     {
       "title": "任务标题",
-      "detail": "详细描述",
+      "detail": "详细描述（点名所需 Unity 模块 / MCP 工具）",
       "deps": [],
       "output_schema": {},
       "kind": "regular"
@@ -40,6 +64,17 @@ SYSTEM_PROMPT = """你是 MyCrew 项目立项助手。用户会描述他们的�
 
 
 class InceptionService:
+    # Per-session lock. Plan Maker runs are long-running and not naturally
+    # serialised — without this, two concurrent /messages or /messages/stream
+    # calls for the same session would race on history reads, persist
+    # overlapping rows, and confuse the LLM with interleaved context. The
+    # frontend already single-flights via useChatQueue; this is the wire-level
+    # safety net so the invariant holds even if a future caller bypasses it.
+    _session_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+    def _lock_for(self, session_id: str) -> asyncio.Lock:
+        return self._session_locks[session_id]
+
     async def create_session(self, llm_id: str,
                               thinking_mode: bool = False) -> dict:
         session = await crud.insert("inception_sessions", {
@@ -76,6 +111,10 @@ class InceptionService:
         return result
 
     async def send_message(self, session_id: str, content: str) -> dict:
+        async with self._lock_for(session_id):
+            return await self._send_message_locked(session_id, content)
+
+    async def _send_message_locked(self, session_id: str, content: str) -> dict:
         session = await crud.get_by_id("inception_sessions", session_id)
         if not session:
             raise KeyError(f"Session {session_id} not found")
@@ -122,14 +161,23 @@ class InceptionService:
     async def stream_message(self, session_id: str, content: str):
         """Send a user message and run Plan Maker (CrewAI) to respond.
 
+        Serialised per session_id so overlapping calls queue up rather than
+        racing on history reads / LLM context.
+        """
+        async with self._lock_for(session_id):
+            return await self._stream_message_locked(session_id, content)
+
+    async def _stream_message_locked(self, session_id: str, content: str):
+        """Inner implementation; assumes the per-session lock is held.
+
         Behaviour:
           1. Persist user message + broadcast inception.message.
           2. If a Plan Maker agent exists, run it via CrewAI with the
-             create_workflow tool bound to this session_id. Stream coarse
-             per-step deltas via inception.delta.
+             create_workflow tool bound to this session_id.
           3. If Plan Maker is missing (fresh DB, etc.), fall back to the
              legacy direct-LLM streaming path.
         """
+        await self._probe(session_id, "lock_acquired", content_chars=len(content))
         session = await crud.get_by_id("inception_sessions", session_id)
         if not session:
             raise KeyError(f"Session {session_id} not found")
@@ -192,12 +240,139 @@ class InceptionService:
 
         blueprint = self._try_parse_blueprint(full_text)
         if blueprint:
-            await manager.broadcast("inception.tasks_drafted", {
-                "session_id": session_id,
-                "blueprint": blueprint,
-            })
+            persisted = await self._persist_salvaged_blueprint(session_id, blueprint)
+            if not persisted:
+                # Couldn't persist — keep at least the preview event so the
+                # frontend can still show the editor in read-only mode.
+                await manager.broadcast("inception.tasks_drafted", {
+                    "session_id": session_id,
+                    "blueprint": blueprint,
+                })
 
         return {"ai_text": full_text, "blueprint": blueprint}
+
+    # Hard ceiling on a single Plan Maker round. CrewAI / litellm has no
+    # default timeout, so a stalled LLM provider can hang the round
+    # indefinitely — exactly the symptom that produced the "stuck" report.
+    PLAN_MAKER_TIMEOUT_S = 120
+
+    async def _persist_salvaged_blueprint(
+        self, session_id: str, blueprint: dict,
+    ) -> bool:
+        """Persist a blueprint that was parsed out of raw LLM text (because
+        Plan Maker emitted ```json instead of calling create_workflow). Mirrors
+        what the tool would have done — so the frontend's blueprint panel
+        renders the same way (it requires `inception.workflow_created`).
+
+        Returns True if persisted, False on failure / duplicate."""
+        try:
+            from services.project_svc import project_svc
+        except Exception as exc:
+            log.warning("inception.salvage_import_failed", error=str(exc))
+            return False
+
+        existing = await crud.get_by_id("inception_sessions", session_id)
+        if not existing or existing.get("project_id"):
+            return False
+
+        tasks = blueprint.get("tasks") or []
+        if not tasks:
+            return False
+
+        task_data = []
+        for t in tasks:
+            if not isinstance(t, dict):
+                continue
+            task_data.append({
+                "title": t.get("title", ""),
+                "detail": t.get("detail", ""),
+                "kind": t.get("kind", "regular"),
+                "output_schema": t.get("output_schema", {}),
+                "deps": t.get("deps", []),
+            })
+        if not task_data:
+            return False
+
+        try:
+            project = await project_svc.create_project_with_tasks(
+                data={
+                    "name": blueprint.get("name") or f"项目-{session_id[-6:]}",
+                    "execution_kind": blueprint.get("execution_kind") or "sequential",
+                },
+                tasks=task_data,
+            )
+        except Exception as exc:
+            log.warning("inception.salvage_create_failed",
+                        session_id=session_id, error=str(exc))
+            return False
+
+        await crud.update_by_id("inception_sessions", session_id, {
+            "project_id": project["id"],
+        })
+        await manager.broadcast("inception.workflow_created", {
+            "session_id": session_id,
+            "project_id": project["id"],
+            "project": project,
+            "blueprint": {
+                **blueprint,
+                "name": blueprint.get("name") or project.get("name"),
+                "execution_kind": blueprint.get("execution_kind") or "sequential",
+            },
+        })
+        await self._probe(session_id, "salvage_persisted",
+                          project_id=project["id"], tasks=len(task_data))
+        return True
+
+    async def _finish_if_workflow_created_this_round(
+        self,
+        session_id: str,
+        had_project_before: bool,
+        reason: str,
+    ) -> dict | None:
+        """If the create_workflow tool succeeded during this round (project_id
+        flipped from None to set), persist a short confirmation message and
+        return — DON'T run the legacy fallback, which would produce an
+        unrelated LLM turn whose text contradicts the persisted blueprint.
+
+        Returns the result dict on early-exit, or None if we should fall
+        through to the legacy retry path.
+        """
+        if had_project_before:
+            return None
+        bound = await crud.get_by_id("inception_sessions", session_id)
+        if not bound or not bound.get("project_id"):
+            return None
+        confirmation = (
+            f"✅ 任务方案已生成（{reason}前完成持久化）。"
+            "请在右侧蓝图面板中查看并编辑。"
+        )
+        await crud.insert("inception_messages", {
+            "session_id": session_id,
+            "role": "assistant",
+            "content": confirmation,
+        }, id_prefix="msg_")
+        await manager.broadcast("inception.message", {
+            "session_id": session_id,
+            "role": "assistant",
+            "content": confirmation,
+        })
+        await self._probe(session_id, "early_exit_workflow_already_created",
+                          reason=reason)
+        return {"ai_text": confirmation, "project_id": bound["project_id"]}
+
+    async def _probe(self, session_id: str, label: str, **extra: object) -> None:
+        """Emit a checkpoint event. Goes both to structlog and to the WS log
+        drawer (event type `inception.probe`) so the user can see exactly
+        which step Plan Maker reached when something stalls."""
+        log.info(f"inception.probe.{label}", session_id=session_id, **extra)
+        try:
+            await manager.broadcast("inception.probe", {
+                "session_id": session_id,
+                "label": label,
+                **{k: str(v)[:200] for k, v in extra.items()},
+            })
+        except Exception as exc:
+            log.warning("inception.probe_broadcast_failed", error=str(exc))
 
     async def _run_plan_maker(
         self,
@@ -206,13 +381,24 @@ class InceptionService:
         content: str,
         plan_maker: dict,
     ) -> dict:
-        """Run the Plan Maker CrewAI agent. Emits inception.delta per step
-        and lets the create_workflow tool emit inception.workflow_created."""
+        """Run the Plan Maker CrewAI agent. Every checkpoint emits an
+        `inception.probe` event so the LogDrawer shows where execution is."""
         import asyncio
         from crewai import Agent, Crew, Process, Task
         from services.crewai_runner import _build_crewai_llm
         from src.tools.builtin.local.create_workflow import make_create_workflow_tool
         from bootstrap.seed_plan_maker import render_plan_maker_backstory
+
+        await self._probe(session_id, "enter")
+
+        # Snapshot whether the session already has a workflow attached BEFORE
+        # this round. If `create_workflow` fires during the round and we hit
+        # a timeout or other failure later, we use this to recognise that
+        # the work was already done — and skip the legacy fallback (which
+        # would otherwise run a fresh LLM turn whose text contradicts the
+        # already-persisted blueprint).
+        session_before = await crud.get_by_id("inception_sessions", session_id)
+        had_project_before = bool(session_before and session_before.get("project_id"))
 
         # Resolve LLM: prefer agent's bound LLM, fall back to session's
         llm_id_source = plan_maker.get("llm_id") or session.get("llm_id", "")
@@ -220,13 +406,18 @@ class InceptionService:
         provider = await crud.get_by_id("llm_providers", provider_id)
         if not provider:
             raise ValueError(f"LLM provider {provider_id} not found")
+        await self._probe(session_id, "llm_resolved",
+                          provider=provider.get("name"), model=model_name)
 
         llm = _build_crewai_llm(provider, model_name)
+        await self._probe(session_id, "llm_built")
 
         # Render placeholders in backstory with current MCP + agent inventory
         rendered_backstory = await render_plan_maker_backstory(
             plan_maker.get("backstory", "")
         )
+        await self._probe(session_id, "backstory_rendered",
+                          chars=len(rendered_backstory))
 
         # Compose task description: history + new user input
         history = await self._format_history_for_task(session_id)
@@ -236,6 +427,9 @@ class InceptionService:
             f"## 用户最新输入\n{content}\n\n"
             "请：(1) 用自然语言回复用户；(2) 当方案明确时调用 create_workflow 工具持久化。"
         )
+        await self._probe(session_id, "description_built",
+                          history_chars=len(history),
+                          description_chars=len(description))
 
         agent = Agent(
             role=plan_maker.get("role", "Plan Maker"),
@@ -252,24 +446,39 @@ class InceptionService:
             expected_output="自然语言回复 + (当方案成熟时) 一次 create_workflow 工具调用。",
             agent=agent,
         )
+        await self._probe(session_id, "agent_and_task_built")
 
         # Capture main loop so step_callback (which runs on worker thread)
         # can hop back here to broadcast WS deltas.
         main_loop = asyncio.get_running_loop()
+        step_count = {"n": 0}
 
         def _step_cb(step: object) -> None:
+            step_count["n"] += 1
             text = self._extract_text_from_step(step)
-            if not text:
-                return
             try:
+                # Probe → log drawer
                 asyncio.run_coroutine_threadsafe(
-                    manager.broadcast("inception.delta", {
+                    manager.broadcast("inception.probe", {
                         "session_id": session_id,
-                        "text": text,
+                        "label": "step",
+                        "n": step_count["n"],
+                        "preview": (text or "")[:120],
                     }),
                     main_loop,
                 )
-            except Exception as exc:  # never let callback errors crash kickoff
+                # Delta → chat streaming subwindow. Without this, Plan Maker
+                # rounds show only "正在思考中" until completion (the legacy
+                # path was the only one streaming).
+                if text:
+                    asyncio.run_coroutine_threadsafe(
+                        manager.broadcast("inception.delta", {
+                            "session_id": session_id,
+                            "text": text + "\n\n",
+                        }),
+                        main_loop,
+                    )
+            except Exception as exc:
                 log.warning("inception.step_broadcast_failed", error=str(exc))
 
         crew = Crew(
@@ -280,13 +489,47 @@ class InceptionService:
             memory=False,
             step_callback=_step_cb,
         )
+        await self._probe(session_id, "crew_built", timeout_s=self.PLAN_MAKER_TIMEOUT_S)
 
         try:
-            result = await asyncio.to_thread(crew.kickoff)
+            result = await asyncio.wait_for(
+                asyncio.to_thread(crew.kickoff),
+                timeout=self.PLAN_MAKER_TIMEOUT_S,
+            )
+            await self._probe(session_id, "kickoff_returned",
+                              steps=step_count["n"])
+        except asyncio.TimeoutError:
+            await self._probe(
+                session_id, "kickoff_timeout",
+                timeout_s=self.PLAN_MAKER_TIMEOUT_S,
+                steps=step_count["n"],
+            )
+            log.warning("inception.crewai_timeout",
+                        session_id=session_id, steps=step_count["n"])
+            early = await self._finish_if_workflow_created_this_round(
+                session_id, had_project_before,
+                reason=f"Plan Maker 超时（{self.PLAN_MAKER_TIMEOUT_S}s）",
+            )
+            if early is not None:
+                return early
+            await manager.broadcast("inception.delta", {
+                "session_id": session_id,
+                "text": (
+                    f"\n⚠️ Plan Maker 超时（{self.PLAN_MAKER_TIMEOUT_S}s 内 LLM 未返回）。"
+                    "降级到直连 LLM…\n\n"
+                ),
+            })
+            return await self._legacy_stream(session_id, session)
         except Exception as exc:
+            await self._probe(session_id, "kickoff_failed", error=str(exc)[:200])
             log.warning("inception.crewai_failed_falling_back_to_legacy",
                         session_id=session_id, error=str(exc))
-            # Push a visible note into the chat so the user sees what happened
+            early = await self._finish_if_workflow_created_this_round(
+                session_id, had_project_before,
+                reason=f"Plan Maker 中断（{exc}）",
+            )
+            if early is not None:
+                return early
             await manager.broadcast("inception.delta", {
                 "session_id": session_id,
                 "text": (
@@ -297,6 +540,7 @@ class InceptionService:
             return await self._legacy_stream(session_id, session)
 
         full_text = str(getattr(result, "raw", result) or "").strip()
+        await self._probe(session_id, "result_unpacked", text_chars=len(full_text))
 
         # Persist assistant message + broadcast final message event
         await crud.insert("inception_messages", {
@@ -309,20 +553,28 @@ class InceptionService:
             "role": "assistant",
             "content": full_text,
         })
+        await self._probe(session_id, "assistant_persisted")
 
         # Fallback: if Plan Maker emitted a JSON block instead of calling
-        # the tool, try to salvage it as a draft (no DB persistence — UI
-        # treats this as legacy preview).
+        # the tool, salvage it AND persist it the same way the tool would —
+        # otherwise the frontend never sees inception.workflow_created, the
+        # blueprint panel stays hidden, and the chat summary falls back to
+        # the verbose LLM text. (Plan Maker disobeying the tool-call rule
+        # is more common than the prompt suggests.)
         bound = await crud.get_by_id("inception_sessions", session_id)
         if bound and not bound.get("project_id"):
             salvaged = self._try_parse_blueprint(full_text)
             if salvaged:
                 log.info("inception.salvaged_blueprint_from_text",
                          session_id=session_id)
-                await manager.broadcast("inception.tasks_drafted", {
-                    "session_id": session_id,
-                    "blueprint": salvaged,
-                })
+                persisted = await self._persist_salvaged_blueprint(
+                    session_id, salvaged,
+                )
+                if not persisted:
+                    await manager.broadcast("inception.tasks_drafted", {
+                        "session_id": session_id,
+                        "blueprint": salvaged,
+                    })
 
         return {
             "ai_text": full_text,

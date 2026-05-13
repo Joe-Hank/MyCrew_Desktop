@@ -1,20 +1,14 @@
 import { useProjects } from "../../queries/useProjectQuery";
 import ProjectCard from "./ProjectCard";
 
-function ProjectGrid({
-  page,
-  onStart,
-}: {
-  page: number;
-  onStart: (id: string) => void;
-}) {
+function ProjectGrid({ page }: { page: number }) {
   const { data, isLoading } = useProjects(page);
 
   const items = data?.items ?? [];
 
   if (isLoading) {
     return (
-      <div className="grid h-full grid-cols-4 gap-4">
+      <div className="grid h-full auto-rows-fr grid-cols-4 gap-4">
         {[1, 2, 3, 4].map((i) => (
           <div
             key={i}
@@ -39,9 +33,9 @@ function ProjectGrid({
   }
 
   return (
-    <div className="grid h-full grid-cols-4 gap-4">
+    <div className="grid h-full auto-rows-fr grid-cols-4 gap-4">
       {items.map((project) => (
-        <ProjectCard key={project.id} project={project} onStart={onStart} />
+        <ProjectCard key={project.id} project={project} />
       ))}
       {items.length < 4 &&
         Array.from({ length: 4 - items.length }).map((_, i) => (

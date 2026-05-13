@@ -67,3 +67,19 @@ async def update_root_path(project_id: str, body: RootPathUpdate):
     if not data:
         raise HTTPException(404, detail="project not found")
     return {"ok": True, "data": data}
+
+
+@router.post("/{project_id}/favorite")
+async def favorite_project(project_id: str):
+    data = await project_svc.favorite(project_id)
+    if not data:
+        raise HTTPException(404, detail="project not found")
+    return {"ok": True, "data": data}
+
+
+@router.post("/{project_id}/unfavorite")
+async def unfavorite_project(project_id: str):
+    data = await project_svc.unfavorite(project_id)
+    if not data:
+        raise HTTPException(404, detail="project not found")
+    return {"ok": True, "data": data}

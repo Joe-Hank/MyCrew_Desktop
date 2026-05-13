@@ -10,20 +10,17 @@ import {
   useSendInceptionMessage,
   type Blueprint,
   type InceptionSession,
+  type InceptionMessage,
 } from "../../queries/useInceptionQuery";
 import { useLlmProviders } from "../../queries/useLlmQuery";
+import { useChatQueue } from "../../hooks/useChatQueue";
 import { useEvent } from "../../hooks/useEvent";
 import { apiFetch } from "../../net/api";
+import { useQueryClient } from "@tanstack/react-query";
 import TaskBlueprintEditor from "./TaskBlueprintEditor";
-
-// On first launch (no persisted preference), fall back to the *first
-// available* provider and its first model. Thinking stays off unless the
-// user enables it. Once they make a choice it's saved to localStorage and
-// restored on next launch — see usePrefsStore.
 
 function InceptionDrawer() {
   const navigate = useNavigate();
-  // Reactive to LogDrawer expanded state so we leave room for it at the bottom.
   const logExpanded = usePrefsStore((s) => s.logDrawerExpanded);
   const {
     drawerOpen,
@@ -37,9 +34,9 @@ function InceptionDrawer() {
   const { data: providers } = useLlmProviders();
   const createSession = useCreateInceptionSession();
   const streamMessage = useStreamInceptionMessage();
-  const sendMessage = useSendInceptionMessage();  // non-streaming fallback (used by Re-evaluate)
+  const sendMessage = useSendInceptionMessage();
+  const qc = useQueryClient();
 
-  // Persisted prefs (LLM / model / thinking restored from localStorage)
   const selectedLlm = usePrefsStore((s) => s.inceptionLlm) ?? "";
   const selectedModel = usePrefsStore((s) => s.inceptionModel) ?? "";
   const thinking = usePrefsStore((s) => s.inceptionThinking);
@@ -50,45 +47,94 @@ function InceptionDrawer() {
   const [input, setInput] = useState("");
   const [reEvaluating, setReEvaluating] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
-  // Streaming assistant text accumulated from inception.delta WS events.
-  // Reset on each new send; cleared when the final inception.message arrives.
-  const [streamingText, setStreamingText] = useState("");
-  // Project id created by Plan Maker's create_workflow tool call. When non-null,
-  // the right blueprint panel becomes editable and the bottom buttons activate.
   const [createdProjectId, setCreatedProjectId] = useState<string | null>(null);
-  // Cache the last user prompt so 重新生成 can re-send it after deleting the project.
   const [lastPrompt, setLastPrompt] = useState<string>("");
-  const abortRef = useRef<AbortController | null>(null);
+
+  // Active-round streaming state — accumulates `inception.delta` deltas.
+  const [streamingText, setStreamingText] = useState("");
+  const [roundStartTs, setRoundStartTs] = useState<number | null>(null);
+  // When a round finishes we snapshot it so the chat can render a collapsed
+  // "已思考 Ns" badge + a short summary bubble in place of the verbose
+  // assistant message that's about to land via session refetch.
+  const [completedRound, setCompletedRound] = useState<{
+    durationS: number;
+    thought: string;
+    blueprint: Blueprint | null;
+    assistantContent: string;
+  } | null>(null);
+  const [thoughtExpanded, setThoughtExpanded] = useState(false);
+  // Blueprint captured during the in-flight round, before the assistant
+  // message lands. Read by the completedRound snapshot.
+  const inFlightBlueprintRef = useRef<Blueprint | null>(null);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const streamBoxRef = useRef<HTMLDivElement>(null);
 
-  const handleBlueprintEvent = useCallback(
-    (msg: { payload: Record<string, unknown> }) => {
-      const bp = msg.payload.blueprint as Blueprint | undefined;
-      if (bp && msg.payload.session_id === activeSessionId) {
-        setDraftBlueprint(bp);
-      }
+  // Stash latest values in refs so the chat-queue callback (created once)
+  // can always see the current session / pref selection without re-binding.
+  const sessionIdRef = useRef<string | null>(activeSessionId);
+  sessionIdRef.current = activeSessionId;
+  const ensureSessionRef = useRef<() => Promise<string | null>>(async () => null);
+
+  ensureSessionRef.current = async (): Promise<string | null> => {
+    if (sessionIdRef.current) return sessionIdRef.current;
+    if (!selectedLlm) return null;
+    const fullLlmId = selectedModel ? `${selectedLlm}:${selectedModel}` : selectedLlm;
+    const res = await createSession.mutateAsync({
+      llm_id: fullLlmId,
+      thinking_mode: thinking,
+    });
+    if (res.ok && res.data) {
+      const id = (res.data as { id: string }).id;
+      setActiveSession(id);
+      sessionIdRef.current = id;
+      return id;
+    }
+    return null;
+  };
+
+  const sendLlmRound = useCallback(
+    async (content: string, signal: AbortSignal) => {
+      setLastPrompt(content);
+      const sid = await ensureSessionRef.current();
+      if (!sid) throw new Error("无法创建会话：请先在工具栏选择 LLM");
+      await streamMessage.mutateAsync({ sessionId: sid, content, signal });
     },
-    [activeSessionId, setDraftBlueprint],
+    [streamMessage],
   );
+  const chat = useChatQueue({ send: sendLlmRound });
 
-  useEvent("inception.tasks_drafted", handleBlueprintEvent);
-
-  // The new path: Plan Maker called create_workflow → project is persisted →
-  // right panel becomes available with the editable blueprint preview.
+  // Workflow created — Plan Maker called the create_workflow tool. Stash the
+  // blueprint for both the right panel and the completed-round snapshot.
   const handleWorkflowCreated = useCallback(
     (msg: { payload: Record<string, unknown> }) => {
       if (msg.payload.session_id !== activeSessionId) return;
       const bp = msg.payload.blueprint as Blueprint | undefined;
       const pid = msg.payload.project_id as string | undefined;
-      if (bp) setDraftBlueprint(bp);
+      if (bp) {
+        setDraftBlueprint(bp);
+        inFlightBlueprintRef.current = bp;
+      }
       if (pid) setCreatedProjectId(pid);
     },
     [activeSessionId, setDraftBlueprint],
   );
   useEvent("inception.workflow_created", handleWorkflowCreated);
 
-  // Listen for streamed LLM tokens — append each delta to the streamingText
-  // buffer, scoped to the current session.
+  // Legacy salvage path — raw JSON blueprint detected in assistant text.
+  const handleBlueprintEvent = useCallback(
+    (msg: { payload: Record<string, unknown> }) => {
+      const bp = msg.payload.blueprint as Blueprint | undefined;
+      if (bp && msg.payload.session_id === activeSessionId) {
+        setDraftBlueprint(bp);
+        inFlightBlueprintRef.current = bp;
+      }
+    },
+    [activeSessionId, setDraftBlueprint],
+  );
+  useEvent("inception.tasks_drafted", handleBlueprintEvent);
+
+  // Streaming tokens — append to the in-flight buffer.
   const handleDelta = useCallback(
     (msg: { payload: Record<string, unknown> }) => {
       if (msg.payload.session_id !== activeSessionId) return;
@@ -99,27 +145,63 @@ function InceptionDrawer() {
   );
   useEvent("inception.delta", handleDelta);
 
-  // When the final assistant message arrives, clear the streaming buffer
-  // (the real message is already in the cache via mutation onSuccess).
-  const handleFullMessage = useCallback(
+  // Plan Maker lifecycle probes — feed the streaming subwindow with human-
+  // readable progress lines so the user has continuous visual feedback even
+  // when no LLM tokens are flowing (CrewAI's step_callback fires per *step*
+  // completion, which leaves long silent gaps inside each LLM call).
+  const handleProbe = useCallback(
     (msg: { payload: Record<string, unknown> }) => {
       if (msg.payload.session_id !== activeSessionId) return;
-      if (msg.payload.role === "assistant") setStreamingText("");
+      const line = probeToLine(msg.payload);
+      if (line) setStreamingText((prev) => prev + line + "\n");
     },
     [activeSessionId],
   );
+  useEvent("inception.probe", handleProbe);
+
+  // Round finished — snapshot streamed text + blueprint into completedRound.
+  // The persisted assistant message lands via session refetch shortly after;
+  // we render the snapshot instead of the verbose message body.
+  const handleFullMessage = useCallback(
+    (msg: { payload: Record<string, unknown> }) => {
+      if (msg.payload.session_id !== activeSessionId) return;
+      if (msg.payload.role !== "assistant") return;
+      const fullContent = (msg.payload.content as string) ?? "";
+      const dur = roundStartTs ? Math.round((Date.now() - roundStartTs) / 1000) : 0;
+      const thought = streamingText.trim() || fullContent;
+      setCompletedRound({
+        durationS: dur,
+        thought,
+        blueprint: inFlightBlueprintRef.current,
+        assistantContent: fullContent,
+      });
+      setStreamingText("");
+      setRoundStartTs(null);
+      setThoughtExpanded(false);
+    },
+    [activeSessionId, roundStartTs, streamingText],
+  );
   useEvent("inception.message", handleFullMessage);
 
-  // Reset streaming buffer + project binding when switching sessions
+  // Auto-scroll the streaming subwindow to the latest token.
   useEffect(() => {
-    setStreamingText("");
+    streamBoxRef.current?.scrollTo({
+      top: streamBoxRef.current.scrollHeight,
+      behavior: "smooth",
+    });
+  }, [streamingText]);
+
+  // Reset round state when switching sessions.
+  useEffect(() => {
     setCreatedProjectId(null);
     setLastPrompt("");
+    setStreamingText("");
+    setRoundStartTs(null);
+    setCompletedRound(null);
+    inFlightBlueprintRef.current = null;
   }, [activeSessionId]);
 
-  // First-launch fallback: if the user has no persisted choice, pick the
-  // first available provider and its first model. A persisted preference
-  // (selectedLlm truthy) always wins.
+  // First-launch fallback: pick the first available provider/model.
   useEffect(() => {
     if (selectedLlm || !providers) return;
     const list = (providers as unknown as Array<{
@@ -137,7 +219,7 @@ function InceptionDrawer() {
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [session?.messages, streamingText]);
+  }, [session?.messages, chat.pending, chat.thinking, streamingText, completedRound]);
 
   if (!drawerOpen) return null;
 
@@ -145,74 +227,72 @@ function InceptionDrawer() {
   const currentProvider = providerList.find((p) => p.id === selectedLlm);
   const modelOptions = currentProvider?.models ?? [];
 
-  async function ensureSession(): Promise<string | null> {
-    if (activeSessionId) return activeSessionId;
-    if (!selectedLlm) return null;
-    const fullLlmId = selectedModel ? `${selectedLlm}:${selectedModel}` : selectedLlm;
-    const res = await createSession.mutateAsync({
-      llm_id: fullLlmId,
-      thinking_mode: thinking,
-    });
-    if (res.ok && res.data) {
-      const id = (res.data as { id: string }).id;
-      setActiveSession(id);
-      return id;
-    }
-    return null;
-  }
-
-  async function handleSend() {
+  function handleSend() {
     const content = input.trim();
     if (!content) return;
-    const sid = await ensureSession();
-    if (!sid) return;
     setInput("");
-    setStreamingText("");  // reset before new stream
-    setLastPrompt(content);  // cache for 重新生成
-    const controller = new AbortController();
-    abortRef.current = controller;
-    try {
-      await streamMessage.mutateAsync({
-        sessionId: sid,
-        content,
-        signal: controller.signal,
-      });
-    } catch (err) {
-      // AbortError on user stop: not a real failure, swallow it.
-      // Other errors propagate via mutation.onError and are logged.
-      const name = (err as { name?: string })?.name;
-      if (name !== "AbortError") {
-        // eslint-disable-next-line no-console
-        console.warn("inception.stream_failed", err);
-      }
-    } finally {
-      abortRef.current = null;
-      // If the user aborted mid-stream, keep the partial text visible by
-      // committing it to the session cache as an optimistic assistant msg.
-      // Otherwise the streamingText was already cleared on inception.message.
-      setStreamingText("");
-    }
+    // Starting a new round — reset all round-scoped UI state. The previous
+    // completedRound snapshot (if any) falls back to the verbose persisted
+    // assistant message in session.messages, which is the canonical history.
+    setCompletedRound(null);
+    setStreamingText("");
+    setRoundStartTs(Date.now());
+    inFlightBlueprintRef.current = null;
+    chat.enqueue(content);
   }
 
   function handleStop() {
-    abortRef.current?.abort();
+    chat.stop();
+    setStreamingText("");
+    setRoundStartTs(null);
   }
 
-  /** 保存项目：项目已在 DB 中（Plan Maker 已经调过 create_workflow），
-   * 只需关闭 drawer 返回 home。home page 自然会显示新项目卡。 */
-  function handleSave() {
-    if (!createdProjectId) return;
+  /** 保存项目：项目已经在 DB 里了 (Plan Maker 已经调过 create_workflow)。
+   *  这里把蓝图里用户选过的 agent_id 同步到 DB 中对应的 task，invalidate
+   *  React Query 的项目列表（否则首页看不到新项目），然后关 drawer。 */
+  async function handleSave() {
+    if (!createdProjectId) {
+      closeDrawer();
+      navigate("/");
+      return;
+    }
+    try {
+      const detail = await apiFetch<{ tasks: Array<{ id: string; title: string }> }>(
+        `/projects/${createdProjectId}`,
+      );
+      const dbTasks = detail.data?.tasks ?? [];
+      const bp = draftBlueprint;
+      if (bp && dbTasks.length > 0) {
+        await Promise.all(
+          bp.tasks.map(async (t, i) => {
+            const dbTask = dbTasks[i];
+            if (!dbTask || !t.agent_id) return;
+            try {
+              await apiFetch(`/workflow/tasks/${dbTask.id}`, {
+                method: "PUT",
+                body: JSON.stringify({ agent_id: t.agent_id }),
+              });
+            } catch (exc) {
+              // eslint-disable-next-line no-console
+              console.warn("inception.save_task_agent_failed", dbTask.id, exc);
+            }
+          }),
+        );
+      }
+    } catch (exc) {
+      // eslint-disable-next-line no-console
+      console.warn("inception.save_lookup_failed", exc);
+    }
+    // Refresh the home grid (and the per-project detail cache) so the new
+    // project card appears immediately after the drawer closes.
+    await qc.invalidateQueries({ queryKey: ["projects"] });
     closeDrawer();
     navigate("/");
   }
 
-  /** 重新生成：DELETE 已创建的项目，清空蓝图状态，
-   * 用上一条用户输入重新触发 Plan Maker。 */
   async function handleRegenerate() {
     if (!createdProjectId || !activeSessionId) return;
     try {
-      // 1. delete via existing project DELETE endpoint (needs name confirmation per backend)
-      //    project_svc.delete_project requires {name} body. We fetch project name first.
       const detail = await apiFetch<{ name: string }>(`/projects/${createdProjectId}`);
       const name = detail.data?.name ?? "";
       if (name) {
@@ -225,31 +305,10 @@ function InceptionDrawer() {
       // eslint-disable-next-line no-console
       console.warn("inception.regenerate_delete_failed", exc);
     }
-    // 2. Clear local state so the panel hides until next workflow_created event
     setDraftBlueprint(null);
     setCreatedProjectId(null);
-    // 3. Re-send the cached prompt to trigger a new Plan Maker run
-    if (lastPrompt) {
-      setStreamingText("");
-      const controller = new AbortController();
-      abortRef.current = controller;
-      try {
-        await streamMessage.mutateAsync({
-          sessionId: activeSessionId,
-          content: lastPrompt,
-          signal: controller.signal,
-        });
-      } catch (err) {
-        const name = (err as { name?: string })?.name;
-        if (name !== "AbortError") {
-          // eslint-disable-next-line no-console
-          console.warn("inception.regenerate_stream_failed", err);
-        }
-      } finally {
-        abortRef.current = null;
-        setStreamingText("");
-      }
-    }
+    setCompletedRound(null);
+    if (lastPrompt) chat.enqueue(lastPrompt);
   }
 
   async function handleReEvaluate() {
@@ -276,42 +335,70 @@ function InceptionDrawer() {
     setActiveSession(null);
     setDraftBlueprint(null);
     setHistoryOpen(false);
+    setCompletedRound(null);
   }
 
-  const messages = session?.messages ?? [];
+  const rawMessages: InceptionMessage[] = session?.messages ?? [];
+  // When we have a completedRound snapshot, hide the very last assistant
+  // message in history (it's the verbose body of the round we just streamed,
+  // rendered specially as a collapsible thought + summary bubble below).
+  const visibleMessages = (() => {
+    if (!completedRound) return rawMessages;
+    let lastAssistantIdx = -1;
+    for (let i = rawMessages.length - 1; i >= 0; i--) {
+      const m = rawMessages[i];
+      if (m && m.role === "assistant") {
+        lastAssistantIdx = i;
+        break;
+      }
+    }
+    if (lastAssistantIdx === -1) return rawMessages;
+    const lastAssistant = rawMessages[lastAssistantIdx];
+    if (lastAssistant && lastAssistant.content === completedRound.assistantContent) {
+      return rawMessages.filter((_, i) => i !== lastAssistantIdx);
+    }
+    return rawMessages;
+  })();
 
-  // Width: blueprint not yet visible → narrower VSCode-LLM-sidebar look;
-  // blueprint shown → expand to fit two columns. Stops far short of the
-  // right edge so the home page underneath stays partially visible.
   const drawerWidth = createdProjectId && draftBlueprint
     ? "min(64vw, 1100px)"
     : "min(38vw, 560px)";
 
   return (
-    <div
-      className="fixed z-30 flex flex-col shadow-2xl"
-      style={{
-        // Skip the sidebar on the left, leave room for the log drawer at
-        // the bottom, and stay short of the right edge so the home page
-        // underneath remains visible (per Figma home_new layout).
-        left: 110,
-        top: 0,
-        bottom: logExpanded ? 224 : 28,
-        width: drawerWidth,
-        backgroundColor: "var(--color-surface)",
-        borderRight: "1px solid var(--color-border-soft)",
-      }}
-    >
-      {/* Inner container (was the main overlay area before) */}
+    <>
+      {/* Semi-transparent backdrop covering the home content (but not the
+          left sidebar at x<110 — so 主导航 stays clickable). Sits below the
+          drawer (z-30) so the chat + blueprint columns remain on top. The
+          bottom edge matches the drawer's so the LogDrawer underneath is
+          still reachable. Pointer events on the backdrop are absorbed by
+          the div itself, blocking clicks from reaching the home grid. */}
       <div
-        className="flex flex-1 flex-col overflow-hidden"
+        className="fixed z-20"
+        style={{
+          left: 110,
+          right: 0,
+          top: 0,
+          bottom: logExpanded ? 224 : 28,
+          backgroundColor: "rgba(0, 0, 0, 0.35)",
+        }}
+      />
+      <div
+        className="fixed z-30 flex flex-col shadow-2xl"
+        style={{
+          left: 110,
+          top: 0,
+          bottom: logExpanded ? 224 : 28,
+          width: drawerWidth,
+          backgroundColor: "var(--color-surface)",
+          borderRight: "1px solid var(--color-border-soft)",
+        }}
       >
-        {/* Top toolbar — compact so it fits in the narrow VSCode-sidebar drawer */}
+      <div className="flex flex-1 flex-col overflow-hidden">
+        {/* Top toolbar */}
         <div
           className="flex items-center gap-1.5 px-3 py-2"
           style={{ borderBottom: "1px solid var(--color-border-soft)", backgroundColor: "var(--color-card)" }}
         >
-          {/* LLM picker */}
           <select
             value={selectedLlm}
             onChange={(e) => {
@@ -329,7 +416,6 @@ function InceptionDrawer() {
             ))}
           </select>
 
-          {/* Model picker */}
           <select
             value={selectedModel}
             onChange={(e) => setSelectedModel(e.target.value)}
@@ -344,7 +430,6 @@ function InceptionDrawer() {
             ))}
           </select>
 
-          {/* Thinking toggle */}
           <div className="flex items-center gap-1 text-xs" style={{ color: "var(--color-ink-label)" }}>
             <span>思考</span>
             <button
@@ -361,7 +446,6 @@ function InceptionDrawer() {
           </div>
 
           <div className="ml-auto flex items-center gap-1">
-            {/* History button */}
             <div className="relative">
               <button
                 onClick={() => setHistoryOpen((v) => !v)}
@@ -387,7 +471,6 @@ function InceptionDrawer() {
               )}
             </div>
 
-            {/* New session button */}
             <button
               onClick={handleNewSession}
               className="flex h-7 w-7 items-center justify-center rounded bg-white transition-colors hover:bg-zinc-50"
@@ -400,7 +483,6 @@ function InceptionDrawer() {
               </svg>
             </button>
 
-            {/* Close button */}
             <button
               onClick={closeDrawer}
               className="flex h-7 w-7 items-center justify-center rounded transition-colors hover:bg-zinc-100"
@@ -417,13 +499,15 @@ function InceptionDrawer() {
 
         {/* Body: chat (left) + blueprint preview (right) */}
         <div className="flex min-h-0 flex-1">
-          {/* Chat panel */}
           <div
             className="flex flex-1 flex-col"
             style={{ borderRight: draftBlueprint ? "1px solid var(--color-border-soft)" : "none" }}
           >
             <div className="flex-1 overflow-auto p-6">
-              {messages.length === 0 ? (
+              {visibleMessages.length === 0
+                && chat.pending.length === 0
+                && !chat.thinking
+                && !completedRound ? (
                 <div
                   className="flex h-full items-center justify-center text-sm"
                   style={{ color: "var(--color-ink-ghost)" }}
@@ -432,7 +516,7 @@ function InceptionDrawer() {
                 </div>
               ) : (
                 <>
-                  {messages.map((msg) => (
+                  {visibleMessages.map((msg) => (
                     <div
                       key={msg.id}
                       className={`mb-4 max-w-[70%] rounded-xl px-4 py-2.5 text-sm leading-relaxed ${
@@ -446,31 +530,27 @@ function InceptionDrawer() {
                       <div className="whitespace-pre-wrap">{msg.content}</div>
                     </div>
                   ))}
-                  {streamingText && (
+
+                  {/* Local user bubbles for messages still in the queue or
+                      mid-flight. Cleared after the round's server invalidate
+                      lands in the cache. */}
+                  {chat.pending.map((p) => (
                     <div
-                      className="mb-4 mr-auto max-w-[70%] rounded-xl px-4 py-2.5 text-sm leading-relaxed"
-                      style={{
-                        backgroundColor: "#FFFFFF",
-                        color: "#1F1F1F",
-                      }}
+                      key={p.id}
+                      className="mb-4 ml-auto max-w-[70%] rounded-xl px-4 py-2.5 text-sm leading-relaxed"
+                      style={{ backgroundColor: "#95EC69", color: "#1F1F1F" }}
                     >
-                      <div className="whitespace-pre-wrap">
-                        {streamingText}
-                        <span className="ml-0.5 inline-block h-3 w-1 animate-pulse"
-                              style={{ backgroundColor: "var(--color-ink-muted)" }} />
-                      </div>
+                      <div className="whitespace-pre-wrap">{p.content}</div>
                     </div>
-                  )}
-                  {/* "Thinking..." placeholder — Plan Maker is between steps,
-                      so no delta has arrived yet. Step-level streaming feels
-                      slow without this indicator. */}
-                  {streamMessage.isPending && !streamingText && (
+                  ))}
+
+                  {/* "正在思考中" — Plan Maker is between steps and no delta
+                      has arrived yet. Persists until the first token of the
+                      streaming subwindow lands. */}
+                  {chat.thinking && !streamingText && (
                     <div
                       className="mb-4 mr-auto flex max-w-[70%] items-center gap-2 rounded-xl px-4 py-2.5 text-sm"
-                      style={{
-                        backgroundColor: "#FFFFFF",
-                        color: "#7A7A7A",
-                      }}
+                      style={{ backgroundColor: "#FFFFFF", color: "#7A7A7A" }}
                     >
                       <span className="flex gap-1">
                         <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-current"
@@ -480,15 +560,91 @@ function InceptionDrawer() {
                         <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-current"
                               style={{ animationDelay: "300ms" }} />
                       </span>
-                      <span>Plan Maker 思考中...</span>
+                      <span>Plan Maker 正在思考中...</span>
                     </div>
                   )}
+
+                  {/* Streaming subwindow — max 5 visible lines, internal
+                      scroll, auto-stick to bottom. Frontier-chat "thinking
+                      content" UX: shows the LLM's reasoning as it streams. */}
+                  {streamingText && (
+                    <div
+                      className="mb-4 mr-auto max-w-[85%] rounded-xl border bg-zinc-50 p-3"
+                      style={{ borderColor: "var(--color-border-soft)" }}
+                    >
+                      <div className="mb-1.5 flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide"
+                           style={{ color: "var(--color-ink-ghost)" }}>
+                        <span className="flex gap-0.5">
+                          <span className="h-1 w-1 animate-bounce rounded-full"
+                                style={{ backgroundColor: "var(--color-ink-ghost)", animationDelay: "0ms" }} />
+                          <span className="h-1 w-1 animate-bounce rounded-full"
+                                style={{ backgroundColor: "var(--color-ink-ghost)", animationDelay: "150ms" }} />
+                          <span className="h-1 w-1 animate-bounce rounded-full"
+                                style={{ backgroundColor: "var(--color-ink-ghost)", animationDelay: "300ms" }} />
+                        </span>
+                        <span>思考中</span>
+                      </div>
+                      <div
+                        ref={streamBoxRef}
+                        className="max-h-[7.5rem] overflow-y-auto whitespace-pre-wrap text-xs leading-relaxed"
+                        style={{ color: "var(--color-ink-muted)" }}
+                      >
+                        {streamingText}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Completed-round snapshot: collapsed thought + summary. */}
+                  {completedRound && !chat.thinking && (
+                    <>
+                      <button
+                        onClick={() => setThoughtExpanded((v) => !v)}
+                        className="mb-2 mr-auto flex items-center gap-1.5 rounded-lg border bg-white px-2.5 py-1 text-[11px] transition-colors hover:bg-zinc-50"
+                        style={{
+                          borderColor: "var(--color-border-soft)",
+                          color: "var(--color-ink-muted)",
+                        }}
+                      >
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none"
+                             stroke="currentColor" strokeWidth="2"
+                             style={{
+                               transform: thoughtExpanded ? "rotate(90deg)" : "rotate(0)",
+                               transition: "transform 150ms",
+                             }}>
+                          <polyline points="9 18 15 12 9 6" />
+                        </svg>
+                        <span>已思考 {completedRound.durationS}s · 点击{thoughtExpanded ? "收起" : "展开"}</span>
+                      </button>
+                      {thoughtExpanded && (
+                        <div
+                          className="mb-4 mr-auto max-w-[85%] rounded-xl border bg-zinc-50 p-3"
+                          style={{ borderColor: "var(--color-border-soft)" }}
+                        >
+                          <div className="max-h-[12rem] overflow-y-auto whitespace-pre-wrap text-xs leading-relaxed"
+                               style={{ color: "var(--color-ink-muted)" }}>
+                            {completedRound.thought}
+                          </div>
+                        </div>
+                      )}
+                      <div
+                        className="mb-4 mr-auto max-w-[70%] rounded-xl px-4 py-2.5 text-sm leading-relaxed"
+                        style={{ backgroundColor: "#FFFFFF", color: "#1F1F1F" }}
+                      >
+                        <div className="whitespace-pre-wrap">
+                          {summariseRound(completedRound.blueprint, completedRound.assistantContent)}
+                        </div>
+                      </div>
+                    </>
+                  )}
+
                   <div ref={messagesEndRef} />
                 </>
               )}
             </div>
 
-            {/* Input area */}
+            {/* Input area — textarea stays unlocked while thinking; new input
+                joins the queue. Send flips to Stop only while a round is
+                mid-flight. */}
             <div className="p-4">
               <div
                 className="flex items-end gap-2 rounded-2xl bg-white p-2"
@@ -498,7 +654,13 @@ function InceptionDrawer() {
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={handleKeyDown}
-                  placeholder={activeSessionId ? "继续对话..." : "你好，请告诉我你当前有什么新的项目想法..."}
+                  placeholder={
+                    chat.thinking
+                      ? "Plan Maker 正在思考…你可以继续输入，将在本轮结束后一并发送"
+                      : activeSessionId
+                        ? "继续对话..."
+                        : "你好，请告诉我你当前有什么新的项目想法..."
+                  }
                   rows={2}
                   className="flex-1 resize-none rounded-md bg-transparent px-2 py-1 text-sm outline-none"
                 />
@@ -511,11 +673,11 @@ function InceptionDrawer() {
                     <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
                   </svg>
                 </button>
-                {streamMessage.isPending ? (
+                {chat.thinking ? (
                   <button
                     onClick={handleStop}
-                    className="flex h-9 items-center gap-1 rounded-lg px-3 text-sm text-white transition-opacity"
-                    style={{ backgroundColor: "#dc2626" }}
+                    className="flex h-9 items-center gap-1 rounded-lg px-3 text-sm text-white transition-opacity hover:opacity-90"
+                    style={{ backgroundColor: "#737373" }}
                     title="终止 AI 响应"
                   >
                     Stop
@@ -541,61 +703,103 @@ function InceptionDrawer() {
             </div>
           </div>
 
-          {/* Blueprint panel — shown only after Plan Maker's create_workflow tool
-              has persisted the project (createdProjectId is non-null). */}
+          {/* Blueprint panel — shown only after Plan Maker's create_workflow
+              tool has persisted the project. Bottom action bar lives inside
+              this column now (per spec: 重新生成 / 保存项目 belong with the
+              blueprint, not the chat). */}
           {createdProjectId && draftBlueprint && (
             <div
-              className="flex w-[45%] min-w-[360px] flex-col p-4 transition-all duration-200"
+              className="flex w-[45%] min-w-[360px] flex-col transition-all duration-200"
               style={{ backgroundColor: "var(--color-surface)" }}
             >
-              <TaskBlueprintEditor
-                blueprint={draftBlueprint}
-                onChange={setDraftBlueprint}
-                onReEvaluate={handleReEvaluate}
-                reEvaluating={reEvaluating}
-              />
+              <div className="min-h-0 flex-1 p-4">
+                <TaskBlueprintEditor
+                  blueprint={draftBlueprint}
+                  onChange={setDraftBlueprint}
+                  onReEvaluate={handleReEvaluate}
+                  reEvaluating={reEvaluating}
+                />
+              </div>
+              <div
+                className="px-4 py-3"
+                style={{
+                  backgroundColor: "var(--color-card)",
+                  borderTop: "1px solid var(--color-border-soft)",
+                }}
+              >
+                <div className="flex gap-2">
+                  <button
+                    onClick={handleRegenerate}
+                    disabled={chat.thinking}
+                    className="rounded-lg border bg-white px-3 py-2 text-xs font-medium transition-colors hover:bg-zinc-50 disabled:opacity-40"
+                    style={{
+                      borderColor: "var(--color-border-soft)",
+                      color: "var(--color-ink-label)",
+                    }}
+                    title="删除当前方案并让 Plan Maker 重新生成"
+                  >
+                    {chat.thinking ? "生成中..." : "重新生成"}
+                  </button>
+                  <button
+                    onClick={handleSave}
+                    disabled={chat.thinking}
+                    className="flex-1 rounded-lg py-2 text-sm font-medium text-white transition-opacity disabled:opacity-40"
+                    style={{ backgroundColor: "var(--color-brand-500)" }}
+                  >
+                    保存项目
+                  </button>
+                </div>
+              </div>
             </div>
           )}
         </div>
-
-        {/* Bottom action bar — only after Plan Maker persists.
-            Two buttons: regenerate (deletes + reruns) | save (closes drawer).
-            Both disabled while Plan Maker is mid-stream. */}
-        {createdProjectId && draftBlueprint && (
-          <div
-            className="px-6 py-4"
-            style={{
-              backgroundColor: "var(--color-card)",
-              borderTop: "1px solid var(--color-border-soft)",
-            }}
-          >
-            <div className="flex gap-3">
-              <button
-                onClick={handleRegenerate}
-                disabled={streamMessage.isPending}
-                className="rounded-lg border bg-white px-5 py-3 text-sm font-medium transition-colors hover:bg-zinc-50 disabled:opacity-40"
-                style={{
-                  borderColor: "var(--color-border-soft)",
-                  color: "var(--color-ink-label)",
-                }}
-                title="删除当前方案并让 Plan Maker 重新生成"
-              >
-                {streamMessage.isPending ? "生成中..." : "重新生成"}
-              </button>
-              <button
-                onClick={handleSave}
-                disabled={streamMessage.isPending}
-                className="flex-1 rounded-lg py-3 text-base font-medium text-white transition-opacity disabled:opacity-40"
-                style={{ backgroundColor: "var(--color-brand-500)" }}
-              >
-                保存项目
-              </button>
-            </div>
-          </div>
-        )}
       </div>
-    </div>
+      </div>
+    </>
   );
+}
+
+/** Map an inception.probe payload into a single readable Chinese line for the
+ *  streaming subwindow. Returning null hides the probe (too low-level for the
+ *  end user). Numeric / preview fields are surfaced inline so the line gives
+ *  meaningful context, not just the raw label. */
+function probeToLine(payload: Record<string, unknown>): string | null {
+  const label = payload.label as string | undefined;
+  if (!label) return null;
+  const s = (k: string) => (payload[k] as string | undefined) ?? "";
+  switch (label) {
+    case "enter": return "→ Plan Maker 已启动";
+    case "llm_resolved": return `→ 选定 LLM：${s("provider")} / ${s("model")}`;
+    case "llm_built": return "→ LLM 实例就绪";
+    case "backstory_rendered": return `→ Plan Maker 提示已渲染（${s("chars")} 字符）`;
+    case "description_built": return "→ 任务上下文已构建";
+    case "agent_and_task_built": return "→ Agent 与任务定义完成";
+    case "crew_built": return `→ 启动 Crew 推理（${s("timeout_s")}s 超时上限）`;
+    case "step": {
+      const prev = s("preview").trim();
+      return `▸ 步骤 ${s("n")}${prev ? `: ${prev}` : ""}`;
+    }
+    case "kickoff_returned": return `✓ 推理完成（共 ${s("steps")} 步）`;
+    case "kickoff_timeout": return `⚠️ Plan Maker 超时（${s("timeout_s")}s）`;
+    case "kickoff_failed": return `⚠️ Plan Maker 中断：${s("error")}`;
+    case "result_unpacked": return `→ 结果解析（${s("text_chars")} 字符）`;
+    case "salvage_persisted": return `✓ 任务方案已持久化（${s("tasks")} 个任务）`;
+    case "early_exit_workflow_already_created": return `✓ 工作流已生成 (${s("reason")})`;
+    // Suppress: lock_acquired, assistant_persisted, probe_broadcast_failed
+    default: return null;
+  }
+}
+
+/** Short user-facing summary shown in place of the verbose Plan Maker reply.
+ *  Prefers a count-based summary when a blueprint is attached; otherwise
+ *  falls back to the assistant's own text (e.g. for clarifying questions
+ *  Plan Maker asks before producing a blueprint). */
+function summariseRound(bp: Blueprint | null, fallback: string): string {
+  if (bp && bp.tasks && bp.tasks.length > 0) {
+    const name = bp.name ? `「${bp.name}」` : "";
+    return `我已帮你设计完整任务路线${name}，包含 ${bp.tasks.length} 个任务（执行模式：${bp.execution_kind}）。你可以在右侧手动编辑，或把修改的需求继续告诉我。`;
+  }
+  return fallback || "（无回复）";
 }
 
 function HistoryDropdown({
@@ -610,7 +814,6 @@ function HistoryDropdown({
   const { data: sessions } = useInceptionSessions();
   const items = (sessions ?? []) as InceptionSession[];
 
-  // Close on outside click via simple click-away (parent handles it through state)
   void onClose;
 
   return (

@@ -4,6 +4,9 @@ import { BrowserRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import App from "./App";
 import "./styles/globals.css";
+// React Flow base styles. Must be imported before any component that uses
+// <ReactFlow>; the canvas's nodes / edges / handles all depend on these.
+import "@xyflow/react/dist/style.css";
 
 const queryClient = new QueryClient({
   defaultOptions: {

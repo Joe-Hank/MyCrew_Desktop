@@ -5,9 +5,39 @@ import {
   useDeleteProject,
   useCloneProject,
   useUpdateRootPath,
+  useToggleFavorite,
   type Project,
   type Task,
 } from "../../queries/useProjectQuery";
+import { useCreateTask } from "../../queries/useWorkflowQuery";
+
+// ── Card state machine ─────────────────────────────────────────────
+//
+//   未定路径   → no root_path           → 任何按钮都不跳转，必须先配路径
+//   待开始     → 路径已配 / 进度 = 0     → 「开始」跳转任务页
+//   待继续     → 进度 > 0 / 非终态       → 「继续」跳转任务页
+//   已完成     → state ∈ terminal set   → 「查看」跳转任务页
+//
+// Per PRD §2.3.6 — only the state-appropriate primary button navigates.
+// Clicking the card body itself does NOT navigate (previously it did).
+type CardState = "no_path" | "ready_to_start" | "ready_to_continue" | "completed";
+
+const TERMINAL_STATES = new Set([
+  "completed",
+  "completed_with_warnings",
+  "completed_with_issues",
+  "aborted",
+]);
+
+function computeCardState(project: Project): CardState {
+  if (!project.root_path) return "no_path";
+  if (TERMINAL_STATES.has(project.state)) return "completed";
+  if ((project.progress_pct ?? 0) > 0) return "ready_to_continue";
+  if (project.state === "running" || project.state === "paused") {
+    return "ready_to_continue";
+  }
+  return "ready_to_start";
+}
 
 const stateLabels: Record<string, string> = {
   ready: "未启动",
@@ -19,22 +49,7 @@ const stateLabels: Record<string, string> = {
   aborted: "已中止",
 };
 
-function primaryButtonLabel(state: string, progress: number): { text: string; tone: "primary" | "resume" } {
-  if (state === "running") return { text: "暂停", tone: "primary" };
-  if (state === "paused") return { text: "继续", tone: "resume" };
-  if (progress > 0 && !["completed", "completed_with_warnings", "completed_with_issues", "aborted"].includes(state)) {
-    return { text: "继续", tone: "resume" };
-  }
-  return { text: "开始", tone: "primary" };
-}
-
-function ProjectCard({
-  project,
-  onStart,
-}: {
-  project: Project;
-  onStart: (id: string) => void;
-}) {
+function ProjectCard({ project }: { project: Project }) {
   const navigate = useNavigate();
   const { data: detail } = useProject(project.id);
   const [deleteConfirm, setDeleteConfirm] = useState(false);
@@ -44,6 +59,8 @@ function ProjectCard({
   const deleteMut = useDeleteProject();
   const cloneMut = useCloneProject();
   const rootPathMut = useUpdateRootPath();
+  const favMut = useToggleFavorite();
+  const isFavorited = !!project.favorited_at;
 
   function handlePathSave() {
     if (!pathInput.trim()) return;
@@ -51,19 +68,51 @@ function ProjectCard({
     setPathModal(false);
   }
 
-  function handleIterate() {
+  function handleCopy() {
     if (cloneMut.isPending) return;
-    if (!confirm(`将基于"${project.name}"创建一个副本进行迭代？`)) return;
     cloneMut.mutate(project.id);
   }
 
+  // 迭代 — per PRD §2.3.8 仅留窗口，不做实际功能. Keep as a visual placeholder.
+  function handleIteratePlaceholder() {
+    alert("迭代功能开发中。当前可使用「复制」生成项目副本。");
+  }
+
+  const cardState = computeCardState(project);
   const progress = project.progress_pct ?? 0;
-  const tasks = detail?.tasks ?? [];
-  const isTerminal = ["completed", "completed_with_warnings", "completed_with_issues", "aborted"].includes(project.state);
   const isRunning = project.state === "running";
-  const btn = primaryButtonLabel(project.state, progress);
+  const tasks = detail?.tasks ?? [];
 
   const dateStr = project.created_at?.substring(0, 10) ?? "";
+
+  function handlePrimaryClick() {
+    // State-gated navigation: every state has exactly one button that
+    // navigates, and it always goes to the same task page (the page itself
+    // decides whether to show "start", "resume", or "view-only").
+    if (cardState === "no_path") return;
+    navigate(`/tasks/${project.id}`);
+  }
+
+  const primary: { label: string; disabled: boolean; tone: "primary" | "resume" | "view" | "locked" } = (() => {
+    switch (cardState) {
+      case "no_path":
+        return { label: "请配置路径", disabled: true, tone: "locked" };
+      case "ready_to_start":
+        return { label: "开始", disabled: false, tone: "primary" };
+      case "ready_to_continue":
+        return { label: "继续", disabled: false, tone: "resume" };
+      case "completed":
+        return { label: "查看", disabled: false, tone: "view" };
+    }
+  })();
+
+  const primaryBg = (() => {
+    if (primary.disabled) return "var(--color-surface-alt)";
+    if (primary.tone === "resume") return "#d39a3b";
+    if (primary.tone === "view") return "var(--color-ink-muted)";
+    return "var(--color-brand-500)";
+  })();
+  const primaryFg = primary.disabled ? "var(--color-ink-disabled)" : "white";
 
   function handleDelete() {
     if (deleteInput === project.name) {
@@ -75,41 +124,65 @@ function ProjectCard({
 
   return (
     <div
-      className="group relative flex h-full cursor-pointer flex-col rounded-[10px] bg-white p-4 transition-shadow"
+      className="group relative flex h-full flex-col rounded-[10px] bg-white p-4"
       style={{
         boxShadow: isRunning
           ? "0 0 16px 3px rgba(12, 140, 233, 0.28)"
           : "0 1px 2px rgba(0,0,0,0.04)",
         border: "1px solid var(--color-border-soft)",
       }}
-      onClick={() => navigate(`/tasks/${project.id}`)}
     >
-      {/* Header */}
-      <div
-        className="mb-1 flex items-start justify-between"
-        onClick={(e) => e.stopPropagation()}
-        role="presentation"
-      >
+      {/* Header: title + 复制 + 删除 (per PRD §2.3.1-2.3.3) */}
+      <div className="mb-1 flex items-start justify-between">
         <h3
-          className="truncate text-base font-semibold leading-tight"
+          className="min-w-0 flex-1 truncate text-base font-semibold leading-tight"
           style={{ color: "var(--color-ink-muted)" }}
           title={project.name}
         >
           {project.name}
         </h3>
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            setDeleteConfirm(true);
-          }}
-          className="ml-2 shrink-0 rounded p-1 transition-colors hover:bg-zinc-100"
-          title="删除"
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
-            style={{ color: "var(--color-ink-ghost)" }}>
-            <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
-          </svg>
-        </button>
+        <div className="ml-2 flex shrink-0 items-center gap-0.5">
+          <button
+            onClick={() => favMut.mutate({ id: project.id, favorited: !isFavorited })}
+            disabled={favMut.isPending}
+            className="rounded p-1 transition-colors hover:bg-zinc-100 disabled:opacity-50"
+            title={isFavorited ? "已收藏 · 点击取消" : "收藏（置顶到第一页最左）"}
+          >
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill={isFavorited ? "#facc15" : "none"}
+              stroke={isFavorited ? "#facc15" : "currentColor"}
+              strokeWidth="2"
+              style={{ color: isFavorited ? undefined : "var(--color-ink-ghost)" }}
+            >
+              <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
+            </svg>
+          </button>
+          <button
+            onClick={handleCopy}
+            disabled={cloneMut.isPending}
+            className="rounded p-1 transition-colors hover:bg-zinc-100 disabled:opacity-50"
+            title="复制项目（仅复制任务，不带路径/进度）"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+              style={{ color: "var(--color-ink-ghost)" }}>
+              <rect x="9" y="9" width="13" height="13" rx="2" />
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+            </svg>
+          </button>
+          <button
+            onClick={() => setDeleteConfirm(true)}
+            className="rounded p-1 transition-colors hover:bg-zinc-100"
+            title="删除"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+              style={{ color: "var(--color-ink-ghost)" }}>
+              <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+            </svg>
+          </button>
+        </div>
       </div>
 
       {/* Meta: date + progress */}
@@ -135,56 +208,37 @@ function ProjectCard({
         />
       </div>
 
-      {/* Actions row */}
-      {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions */}
-      <div className="mb-3 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
-        {!isTerminal ? (
-          <button
-            onClick={() => onStart(project.id)}
-            className="flex-1 rounded-lg py-2 text-sm font-medium text-white transition-opacity hover:opacity-90"
-            style={{
-              backgroundColor: btn.tone === "resume" ? "#d39a3b" : "var(--color-brand-500)",
-            }}
-          >
-            {btn.text}
-          </button>
-        ) : (
-          <button
-            disabled
-            className="flex-1 cursor-not-allowed rounded-lg py-2 text-sm"
-            style={{
-              backgroundColor: "var(--color-surface-alt)",
-              color: "var(--color-ink-disabled)",
-            }}
-          >
-            已结束
-          </button>
-        )}
+      {/* Actions row: primary button + 路径 + 迭代 (placeholder) */}
+      <div className="mb-3 flex items-center gap-2">
+        <button
+          onClick={handlePrimaryClick}
+          disabled={primary.disabled}
+          className="flex-1 rounded-lg py-2 text-sm font-medium transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-100"
+          style={{ backgroundColor: primaryBg, color: primaryFg }}
+          title={primary.disabled ? "请先配置项目根路径" : `跳转到任务页：${primary.label}`}
+        >
+          {primary.label}
+        </button>
 
         <PathButton
           locked={!!project.root_path}
           configured={!!project.root_path}
-          onClick={(e) => {
-            e.stopPropagation();
+          onClick={() => {
             setPathInput(project.root_path ?? "");
             setPathModal(true);
           }}
         />
 
         <button
-          onClick={(e) => {
-            e.stopPropagation();
-            handleIterate();
-          }}
-          disabled={!isTerminal || cloneMut.isPending}
-          className="rounded-lg border bg-white px-3 py-2 text-sm transition-colors disabled:opacity-50"
+          onClick={handleIteratePlaceholder}
+          className="rounded-lg border bg-white px-3 py-2 text-sm transition-colors hover:bg-zinc-50"
           style={{
             borderColor: "var(--color-border-soft)",
-            color: isTerminal ? "var(--color-ink-label)" : "var(--color-ink-disabled)",
+            color: "var(--color-ink-disabled)",
           }}
-          title={isTerminal ? "基于本项目创建一个迭代副本" : "项目结束后可迭代"}
+          title="迭代功能开发中（仅占位）"
         >
-          {cloneMut.isPending ? "..." : "迭代"}
+          迭代
         </button>
       </div>
 
@@ -196,8 +250,10 @@ function ProjectCard({
         {stateLabels[project.state] ?? project.state}
       </div>
 
-      {/* Task pills list */}
-      <div className="flex-1 space-y-2 overflow-y-auto pr-1">
+      {/* Task pills list — click any pill to expand its read-only detail.
+          "+ 新建任务" is rendered at the bottom of the scroll area so a
+          long list still leaves it discoverable. */}
+      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
         {tasks.length === 0 ? (
           <div
             className="rounded-lg py-3 text-center text-[11px]"
@@ -211,15 +267,12 @@ function ProjectCard({
         ) : (
           tasks.map((task, idx) => <TaskPill key={task.id} task={task} index={idx} />)
         )}
+        <NewTaskButton projectId={project.id} />
       </div>
 
       {/* Path config overlay */}
       {pathModal && (
-        // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
-        <div
-          className="absolute inset-0 z-10 flex flex-col items-stretch justify-center rounded-[10px] bg-white/95 p-4"
-          onClick={(e) => e.stopPropagation()}
-        >
+        <div className="absolute inset-0 z-10 flex flex-col items-stretch justify-center rounded-[10px] bg-white/95 p-4">
           <p className="mb-2 text-xs" style={{ color: "var(--color-ink-soft)" }}>
             配置项目根路径（Agent 文件操作的工作目录）
           </p>
@@ -253,11 +306,7 @@ function ProjectCard({
 
       {/* Delete confirm overlay */}
       {deleteConfirm && (
-        // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
-        <div
-          className="absolute inset-0 z-10 flex flex-col items-center justify-center rounded-[10px] bg-white/95 p-4"
-          onClick={(e) => e.stopPropagation()}
-        >
+        <div className="absolute inset-0 z-10 flex flex-col items-center justify-center rounded-[10px] bg-white/95 p-4">
           <p className="mb-2 text-xs" style={{ color: "var(--color-ink-soft)" }}>
             输入项目名 <strong>{project.name}</strong> 确认删除
           </p>
@@ -301,7 +350,7 @@ function PathButton({
 }: {
   locked: boolean;
   configured: boolean;
-  onClick: (e: React.MouseEvent) => void;
+  onClick: () => void;
 }) {
   return (
     <button
@@ -324,28 +373,62 @@ function PathButton({
   );
 }
 
+const statusDotColor: Record<string, string> = {
+  pending: "#cbd5e1",
+  running: "var(--color-brand-500)",
+  done: "#10b981",
+  failed: "#ef4444",
+  validation_failed: "#f59e0b",
+  aborted: "#737373",
+  blocked: "#a78bfa",
+  paused: "#facc15",
+};
+
+function TaskStatusIndicator({ status }: { status: string }) {
+  if (status === "done") {
+    return (
+      <span className="text-[12px] font-bold" style={{ color: "#10b981" }} title="已完成">
+        ✓
+      </span>
+    );
+  }
+  if (status === "running") {
+    return (
+      <span className="inline-flex gap-0.5" title="进行中">
+        <span className="animate-pulse text-[12px]" style={{ color: "var(--color-brand-500)", animationDelay: "0ms" }}>·</span>
+        <span className="animate-pulse text-[12px]" style={{ color: "var(--color-brand-500)", animationDelay: "200ms" }}>·</span>
+        <span className="animate-pulse text-[12px]" style={{ color: "var(--color-brand-500)", animationDelay: "400ms" }}>·</span>
+      </span>
+    );
+  }
+  if (status === "failed" || status === "validation_failed") {
+    return <span className="text-[12px]" style={{ color: "#ef4444" }} title={status}>!</span>;
+  }
+  // pending and everything else → empty (the left-side coloured dot already
+  // carries the lower-fidelity status signal).
+  return <span className="inline-block w-3" />;
+}
+
+/** Home-card task pill. Click toggles read-only detail; no inline edit
+ *  here (full edit lives in the task page). Per PRD §2.3.9 & user
+ *  feedback: 仅展开详情 / 不重复标题 / 不再可编辑. */
 function TaskPill({ task, index }: { task: Task; index: number }) {
+  const [expanded, setExpanded] = useState(false);
   const agentLabel = task.agent_id ? task.agent_id.replace(/^agent_/, "") : "未分配";
-  const statusDot: Record<string, string> = {
-    pending: "#cbd5e1",
-    running: "var(--color-brand-500)",
-    done: "#10b981",
-    failed: "#ef4444",
-    validation_failed: "#f59e0b",
-    aborted: "#737373",
-    blocked: "#a78bfa",
-    paused: "#facc15",
-  };
 
   return (
     <div
-      className="rounded-lg px-3 py-2"
+      className="rounded-lg transition-colors"
       style={{ backgroundColor: "var(--color-surface-alt)" }}
     >
-      <div className="flex items-start gap-2">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        className="flex w-full items-start gap-2 px-3 py-2 text-left"
+      >
         <span
           className="mt-1 inline-block h-2 w-2 shrink-0 rounded-full"
-          style={{ backgroundColor: statusDot[task.status] ?? "#cbd5e1" }}
+          style={{ backgroundColor: statusDotColor[task.status] ?? "#cbd5e1" }}
         />
         <div className="min-w-0 flex-1">
           <div className="truncate text-[12px] font-medium" style={{ color: "var(--color-ink-soft)" }}>
@@ -359,8 +442,50 @@ function TaskPill({ task, index }: { task: Task; index: number }) {
             <span className="truncate">{agentLabel}</span>
           </div>
         </div>
-      </div>
+        <span className="mt-1 shrink-0">
+          <TaskStatusIndicator status={task.status} />
+        </span>
+      </button>
+
+      {/* Read-only detail panel — no inputs, no save/cancel buttons.
+          Title is intentionally NOT repeated (already in the header row). */}
+      {expanded && (
+        <div
+          className="px-3 pb-3 pt-1.5"
+          style={{ borderTop: "1px solid var(--color-border-soft)" }}
+        >
+          <div
+            className="whitespace-pre-wrap text-[11px] leading-relaxed"
+            style={{ color: "var(--color-ink-muted)" }}
+          >
+            {task.detail?.trim() || "（暂无详情）"}
+          </div>
+        </div>
+      )}
     </div>
+  );
+}
+
+/** Inline "+ 新建任务" button rendered as the last item of a project card's
+ *  task list. One click POSTs a placeholder task to this project; renaming
+ *  / editing happens in the task page. */
+function NewTaskButton({ projectId }: { projectId: string }) {
+  const createMut = useCreateTask();
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        if (createMut.isPending) return;
+        createMut.mutate({ project_id: projectId, title: "新任务" });
+      }}
+      disabled={createMut.isPending}
+      className="flex w-full items-center justify-center gap-1 rounded-lg border border-dashed py-1.5 text-[11px] transition-colors hover:bg-white/60 disabled:opacity-50"
+      style={{ borderColor: "var(--color-border-strong)", color: "var(--color-ink-muted)" }}
+      title="为该项目创建一个空任务（可在任务页编辑）"
+    >
+      <span>+</span>
+      <span>{createMut.isPending ? "创建中..." : "新建任务"}</span>
+    </button>
   );
 }
 

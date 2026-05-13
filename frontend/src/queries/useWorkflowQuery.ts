@@ -62,24 +62,64 @@ export function useRetryTask() {
   });
 }
 
+export interface TaskPatch {
+  title?: string;
+  detail?: string;
+  agent_id?: string | null;
+  deps?: string[];
+  position_x?: number;
+  position_y?: number;
+}
+
 export function useUpdateTask() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({
-      taskId,
-      ...body
-    }: {
-      taskId: string;
-      title?: string;
-      detail?: string;
-      agent_id?: string;
-    }) =>
+    mutationFn: ({ taskId, ...body }: { taskId: string } & TaskPatch) =>
       apiFetch(`/workflow/tasks/${taskId}`, {
         method: "PUT",
         body: JSON.stringify(body),
       }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["project"] });
+      qc.invalidateQueries({ queryKey: ["projects"] });
+    },
+  });
+}
+
+export interface TaskCreatePayload {
+  project_id: string;
+  title?: string;
+  detail?: string;
+  agent_id?: string | null;
+  deps?: string[];
+  kind?: string;
+  position_x?: number;
+  position_y?: number;
+}
+
+export function useCreateTask() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: TaskCreatePayload) =>
+      apiFetch(`/workflow/tasks`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["project"] });
+      qc.invalidateQueries({ queryKey: ["projects"] });
+    },
+  });
+}
+
+export function useDeleteTask() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (taskId: string) =>
+      apiFetch(`/workflow/tasks/${taskId}`, { method: "DELETE" }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["project"] });
+      qc.invalidateQueries({ queryKey: ["projects"] });
     },
   });
 }
