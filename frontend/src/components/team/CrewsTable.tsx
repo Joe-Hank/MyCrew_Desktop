@@ -1,9 +1,12 @@
 import { useCrews, useDeleteCrew, useAgents, type Crew } from "../../queries/useTeamQuery";
 import RowActionsMenu from "../common/RowActionsMenu";
 
-// 1.2fr → narrower 70px fixed: the process-control toggle is a tight
-// 60-ish-px chip and previously the column inflated whitespace around it.
-const GRID = "grid-cols-[1.4fr_2fr_70px_60px]";
+// Tuned column ratios: name + members are the only variable cols and
+// share ~3/5 of the row each; the toggle column hugs its 60-px chip
+// (80px gives ~10px breathing room on each side) and actions is just
+// the ⋯ icon (40px is plenty). Old 1.4fr+2fr starved the right side and
+// floated 过程控制 + 操作 to the far edge of the table.
+const GRID = "grid-cols-[1fr_1.5fr_80px_40px]";
 
 function CrewsTable({ onEdit }: { onEdit: (c: Crew) => void }) {
   const { data: crews, isLoading } = useCrews();
