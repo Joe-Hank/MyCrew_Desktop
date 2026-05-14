@@ -269,19 +269,147 @@ class InceptionService:
         updated = await crud.get_by_id("inception_sessions", session_id)
         return dict(updated or {})
 
-    async def list_sessions(self) -> list[dict]:
-        rows = await crud.get_all("inception_sessions")
-        result = []
+    async def list_sessions(
+        self,
+        *,
+        search: str | None = None,
+        limit: int = 10,
+        offset: int = 0,
+    ) -> dict:
+        """List sessions with sort (most recent first), search, pagination.
+
+        Returns:
+          {
+            "items": [{...session, title_resolved, preview, is_draft}],
+            "total": int,
+            "offset": int,
+            "limit": int,
+          }
+
+        Sort key: COALESCE(last_activity_at, created_at) DESC.
+        Search matches: title / project_name / first user message content
+        (case-insensitive substring).
+        """
+        from infra.repo.sqlite_repo import get_db
+
+        search_term = (search or "").strip()
+        like = f"%{search_term.lower()}%" if search_term else None
+
+        db = await get_db()
+
+        # Base SQL — left-join projects for project_name, and pre-find the
+        # first user message per session for preview / search. Compute
+        # `sort_ts = COALESCE(last_activity_at, created_at)` for ORDER BY.
+        base_query = """
+            SELECT
+              s.id, s.project_id, s.llm_id, s.thinking_mode,
+              s.created_at, s.template_id, s.mode,
+              s.last_activity_at, s.title,
+              p.name AS project_name,
+              (
+                SELECT content FROM inception_messages
+                WHERE session_id = s.id AND role = 'user'
+                ORDER BY rowid LIMIT 1
+              ) AS first_user_message,
+              COALESCE(s.last_activity_at, s.created_at) AS sort_ts
+            FROM inception_sessions s
+            LEFT JOIN projects p ON p.id = s.project_id
+        """
+
+        params: list[object] = []
+        where_clauses: list[str] = []
+        if like:
+            where_clauses.append(
+                "(LOWER(COALESCE(s.title, '')) LIKE ? "
+                "OR LOWER(COALESCE(p.name, '')) LIKE ? "
+                "OR LOWER(COALESCE((SELECT content FROM inception_messages "
+                "                   WHERE session_id = s.id AND role = 'user' "
+                "                   ORDER BY rowid LIMIT 1), '')) LIKE ?)"
+            )
+            params.extend([like, like, like])
+
+        where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+        # Total count first (separate query for accurate pagination)
+        count_cursor = await db.execute(
+            f"SELECT COUNT(*) FROM inception_sessions s "
+            f"LEFT JOIN projects p ON p.id = s.project_id{where_sql}",
+            tuple(params),
+        )
+        total = (await count_cursor.fetchone())[0] or 0
+
+        # Paginated rows
+        rows_cursor = await db.execute(
+            base_query + where_sql + " ORDER BY sort_ts DESC LIMIT ? OFFSET ?",
+            tuple(params) + (limit, offset),
+        )
+        rows = await rows_cursor.fetchall()
+
+        items: list[dict] = []
         for r in rows:
             session = dict(r)
-            if session.get("project_id"):
-                project = await crud.get_by_id("projects", session["project_id"])
-                session["project_name"] = project["name"] if project else None
-            else:
-                session["project_name"] = None
+            project_name = session.get("project_name")
             session["is_draft"] = session.get("project_id") is None
-            result.append(session)
-        return result
+            # title_resolved: user title > project name > "会话 <suffix>"
+            title = session.get("title")
+            if title:
+                session["title_resolved"] = title
+            elif project_name:
+                session["title_resolved"] = project_name
+            else:
+                session["title_resolved"] = f"会话 {session['id'][-6:]}"
+            # preview from first user message, ≤ 80 chars
+            raw_preview = (session.get("first_user_message") or "").strip()
+            session["preview"] = raw_preview[:80]
+            items.append(session)
+
+        return {
+            "items": items,
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+        }
+
+    async def rename_session(self, session_id: str, new_title: str) -> dict:
+        """Set or clear the session title. Empty string → clears (back to
+        project_name fallback)."""
+        existing = await crud.get_by_id("inception_sessions", session_id)
+        if not existing:
+            raise KeyError(session_id)
+        title = (new_title or "").strip()
+        await crud.update_by_id("inception_sessions", session_id, {
+            "title": title if title else None,
+        })
+        updated = await crud.get_by_id("inception_sessions", session_id)
+        return dict(updated or {})
+
+    async def delete_session(self, session_id: str) -> None:
+        """Hard-delete a session + cascading messages. Does NOT touch the
+        bound project (use /projects DELETE for that)."""
+        existing = await crud.get_by_id("inception_sessions", session_id)
+        if not existing:
+            raise KeyError(session_id)
+        msgs = await crud.get_all(
+            "inception_messages", "session_id = ?", (session_id,),
+        )
+        for m in msgs:
+            await crud.delete_by_id("inception_messages", m["id"])
+        await crud.delete_by_id("inception_sessions", session_id)
+        log.info("inception.session_deleted",
+                 id=session_id, messages_removed=len(msgs))
+
+    async def touch_session(self, session_id: str) -> None:
+        """Update last_activity_at to now. Called from router after each
+        dispatch so the session bubbles to the top of the history list."""
+        from datetime import datetime, timezone
+        now_iso = datetime.now(timezone.utc).isoformat()
+        try:
+            await crud.update_by_id("inception_sessions", session_id, {
+                "last_activity_at": now_iso,
+            })
+        except Exception as exc:  # noqa: BLE001
+            log.warning("inception.touch_failed",
+                        session_id=session_id, error=str(exc))
 
     async def get_session(self, session_id: str) -> dict | None:
         session = await crud.get_by_id("inception_sessions", session_id)
@@ -561,6 +689,10 @@ class InceptionService:
         await self._probe(session_id, "router_enter",
                           content_chars=len(content))
         result = await dispatch(content, session)
+
+        # Update last_activity_at so this session bubbles to the top of
+        # the history list next time it's queried. Best-effort.
+        await self.touch_session(session_id)
         await self._probe(
             session_id, "router_result",
             decision=result.decision,

@@ -4,12 +4,10 @@ import { useInceptionStore } from "../../stores/useInceptionStore";
 import { usePrefsStore } from "../../stores/usePrefsStore";
 import {
   useInceptionSession,
-  useInceptionSessions,
   useCreateInceptionSession,
   useStreamInceptionMessage,
   useSendInceptionMessage,
   type Blueprint,
-  type InceptionSession,
   type InceptionMessage,
 } from "../../queries/useInceptionQuery";
 import { useLlmProviders } from "../../queries/useLlmQuery";
@@ -20,6 +18,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import TaskBlueprintEditor from "./TaskBlueprintEditor";
 import ChoicePanel, { type ChoiceOption } from "./ChoicePanel";
 import PathInputPanel from "./PathInputPanel";
+import HistoryDropdown from "./HistoryDropdown";
 import { useTemplates } from "../../queries/useTemplatesQuery";
 
 function InceptionDrawer() {
@@ -566,7 +565,10 @@ function InceptionDrawer() {
                     setDraftBlueprint(null);
                     setHistoryOpen(false);
                   }}
-                  onClose={() => setHistoryOpen(false)}
+                  onActiveDeleted={() => {
+                    setActiveSession(null);
+                    setDraftBlueprint(null);
+                  }}
                 />
               )}
             </div>
@@ -990,69 +992,6 @@ function summariseRound(bp: Blueprint | null, fallback: string): string {
   return fallback || "（无回复）";
 }
 
-function HistoryDropdown({
-  activeId,
-  onSelect,
-  onClose,
-}: {
-  activeId: string | null;
-  onSelect: (id: string) => void;
-  onClose: () => void;
-}) {
-  const { data: sessions } = useInceptionSessions();
-  const items = (sessions ?? []) as InceptionSession[];
-
-  void onClose;
-
-  return (
-    <div
-      className="absolute right-0 top-11 z-40 max-h-80 w-72 overflow-auto rounded-lg bg-white shadow-xl"
-      style={{ border: "1px solid var(--color-border-soft)" }}
-    >
-      <div
-        className="px-3 py-2 text-xs font-medium"
-        style={{
-          color: "var(--color-ink-faint)",
-          borderBottom: "1px solid var(--color-border-soft)",
-        }}
-      >
-        历史会话
-      </div>
-      {items.length === 0 ? (
-        <div className="p-4 text-center text-xs" style={{ color: "var(--color-ink-ghost)" }}>暂无</div>
-      ) : (
-        items.map((s) => (
-          <button
-            key={s.id}
-            onClick={() => onSelect(s.id)}
-            className="flex w-full flex-col items-start gap-0.5 px-3 py-2 text-left transition-colors hover:bg-zinc-50"
-            style={{
-              backgroundColor: activeId === s.id ? "var(--color-surface-alt)" : "transparent",
-              borderBottom: "1px solid var(--color-border-soft)",
-            }}
-          >
-            <div className="flex w-full items-center justify-between">
-              <span className="truncate text-xs font-medium" style={{ color: "var(--color-ink-soft)" }}>
-                {s.project_name ?? `会话 ${s.id.slice(-6)}`}
-              </span>
-              {s.is_draft && (
-                <span
-                  className="shrink-0 rounded px-1 text-[9px]"
-                  style={{ backgroundColor: "rgba(245, 158, 11, 0.18)", color: "#92400e" }}
-                >
-                  草稿
-                </span>
-              )}
-            </div>
-            <span className="text-[10px]" style={{ color: "var(--color-ink-ghost)" }}>
-              {s.created_at?.substring(0, 16)}
-            </span>
-          </button>
-        ))
-      )}
-    </div>
-  );
-}
 
 /** Pre-session template picker — shown when the drawer is open but no
  *  inception session exists yet (the "新建项目" flow's very first screen).

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from services.inception_svc import inception_svc
@@ -44,10 +44,38 @@ class FinalizeBody(BaseModel):
     blueprint: dict | None = None
 
 
+class RenameSessionBody(BaseModel):
+    title: str = ""    # empty → clear (revert to project_name fallback)
+
+
 @router.get("/sessions")
-async def list_sessions():
-    data = await inception_svc.list_sessions()
+async def list_sessions(
+    q: str | None = Query(None, description="模糊搜 title / project_name / 首条 user 消息"),
+    limit: int = Query(10, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    data = await inception_svc.list_sessions(
+        search=q, limit=limit, offset=offset,
+    )
     return {"ok": True, "data": data}
+
+
+@router.patch("/sessions/{session_id}")
+async def rename_session(session_id: str, body: RenameSessionBody):
+    try:
+        data = await inception_svc.rename_session(session_id, body.title)
+        return {"ok": True, "data": data}
+    except KeyError:
+        raise HTTPException(404, detail="session not found")
+
+
+@router.delete("/sessions/{session_id}")
+async def delete_session(session_id: str):
+    try:
+        await inception_svc.delete_session(session_id)
+        return {"ok": True}
+    except KeyError:
+        raise HTTPException(404, detail="session not found")
 
 
 @router.post("/sessions")

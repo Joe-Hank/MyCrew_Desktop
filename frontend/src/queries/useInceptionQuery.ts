@@ -7,8 +7,19 @@ export interface InceptionSession {
   llm_id: string;
   thinking_mode: boolean;
   created_at: string;
+  last_activity_at: string | null;
+  title: string | null;
+  title_resolved: string;           // title || project_name || `会话 <id 后6>`
   project_name: string | null;
+  preview: string;                  // first user message, ≤ 80 chars
   is_draft: boolean;
+}
+
+export interface InceptionSessionListResult {
+  items: InceptionSession[];
+  total: number;
+  offset: number;
+  limit: number;
 }
 
 export interface InceptionMessage {
@@ -43,13 +54,50 @@ export interface Blueprint {
   }[];
 }
 
-export function useInceptionSessions() {
+interface ListSessionsParams {
+  q?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export function useInceptionSessions(params: ListSessionsParams = {}) {
+  const q = (params.q ?? "").trim();
+  const limit = params.limit ?? 10;
+  const offset = params.offset ?? 0;
   return useQuery({
-    queryKey: ["inception", "sessions"],
+    queryKey: ["inception", "sessions", { q, limit, offset }],
     queryFn: async () => {
-      const res = await apiFetch<InceptionSession[]>("/inceptions/sessions");
-      return res.data ?? [];
+      const url = `/inceptions/sessions?` + new URLSearchParams({
+        ...(q ? { q } : {}),
+        limit: String(limit),
+        offset: String(offset),
+      }).toString();
+      const res = await apiFetch<InceptionSessionListResult>(url);
+      return res.data ?? { items: [], total: 0, offset, limit };
     },
+  });
+}
+
+export function useDeleteInceptionSession() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (sessionId: string) =>
+      apiFetch(`/inceptions/sessions/${sessionId}`, { method: "DELETE" }),
+    onSuccess: () =>
+      qc.invalidateQueries({ queryKey: ["inception", "sessions"] }),
+  });
+}
+
+export function useRenameInceptionSession() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, title }: { id: string; title: string }) =>
+      apiFetch(`/inceptions/sessions/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ title }),
+      }),
+    onSuccess: () =>
+      qc.invalidateQueries({ queryKey: ["inception", "sessions"] }),
   });
 }
 
