@@ -68,6 +68,7 @@ async def run_crewai_agent(
     max_iter: int,
     temperature: float | None = None,
     max_tokens: int | None = None,
+    broadcast_steps: bool = True,
 ) -> str:
     """Standardised CrewAI invocation. Wraps:
       - LLM construction via crewai_runner._build_crewai_llm
@@ -76,6 +77,10 @@ async def run_crewai_agent(
 
     `temperature` and `max_tokens` are passed to the LLM construction
     when set, letting per-intent sub-agents tune output style.
+
+    `broadcast_steps=False` suppresses the inception.probe / inception.delta
+    WS broadcasts — used by background repair kickoffs that shouldn't
+    surface their internal steps in the user-facing chat stream.
 
     Returns the final assistant text. Errors bubble up.
     """
@@ -100,6 +105,8 @@ async def run_crewai_agent(
 
     def _step_cb(step: object) -> None:
         step_n["n"] += 1
+        if not broadcast_steps:
+            return
         text = _extract_step_text(step)
         try:
             asyncio.run_coroutine_threadsafe(
