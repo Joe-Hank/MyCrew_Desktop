@@ -30,6 +30,15 @@ class ConnectionManager:
         log.info("ws.disconnected", total=len(self._connections))
 
     async def broadcast(self, event_type: str, payload: dict[str, Any] | None = None) -> None:
+        # Persist before fanout so the audit trail survives even if every
+        # connected client is stale. Fire-and-forget; failures are caught
+        # inside events_svc.record_event and never bubble out.
+        try:
+            from services.events_svc import record_event
+            await record_event(event_type, payload or {}, actor="system")
+        except Exception:
+            pass  # never let audit failure stop the broadcast
+
         message = json.dumps({
             "type": event_type,
             "ts": datetime.now(timezone.utc).isoformat(),

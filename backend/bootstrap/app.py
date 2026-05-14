@@ -1,13 +1,72 @@
+import time
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 
 import structlog
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from bootstrap.paths import ensure_dirs
 
 log = structlog.get_logger()
+
+
+# Methods we treat as "mutations" — recorded in the audit event log so
+# the Brain (and the LogDrawer) can later replay who changed what.
+_AUDIT_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+# Paths to NEVER audit — high-volume streaming endpoints whose semantics
+# are already covered by the inception.* / agent.output events.
+_AUDIT_SKIP_PREFIXES = (
+    "/api/v1/ws",
+    "/api/v1/inceptions/sessions/",   # message streams handle their own
+    "/api/v1/events",                  # don't audit reads of audit log
+)
+
+
+async def _audit_middleware(request: Request, call_next):
+    """Record every mutation API call into the events table.
+
+    Captures: method, path, status_code, latency_ms, query params (no body
+    to avoid blowing up the row size — sensitive bodies like LLM keys live
+    in PUT /llm/* requests and we don't want them in the audit table)."""
+    started = time.monotonic()
+    try:
+        response = await call_next(request)
+    except Exception:
+        # Let the framework's error handler send the response; we still
+        # log the attempt so the audit trail isn't dark on crashes.
+        latency_ms = int((time.monotonic() - started) * 1000)
+        await _record_mutation(request, status=500, latency_ms=latency_ms)
+        raise
+
+    if (request.method in _AUDIT_METHODS
+            and not any(request.url.path.startswith(p)
+                        for p in _AUDIT_SKIP_PREFIXES)):
+        latency_ms = int((time.monotonic() - started) * 1000)
+        await _record_mutation(
+            request, status=response.status_code, latency_ms=latency_ms,
+        )
+    return response
+
+
+async def _record_mutation(request: Request, status: int, latency_ms: int) -> None:
+    """Fire-and-forget audit write; never raises."""
+    try:
+        from services.events_svc import record_event
+        await record_event(
+            "api.mutation",
+            {
+                "method": request.method,
+                "path": request.url.path,
+                "query": str(request.url.query) if request.url.query else "",
+                "status": status,
+                "latency_ms": latency_ms,
+            },
+            actor="user",  # all UI-originating mutations are user-driven
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("audit.mutation_record_failed", error=str(exc))
 
 
 @asynccontextmanager
@@ -86,18 +145,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     watchdog_task = asyncio.create_task(run_watchdog())
     log.info("startup.watchdog_started")
 
+    # STEP 7: event-log janitor (6h cadence; drops rows past retention)
+    from services.events_svc import run_event_janitor
+    events_janitor_task = asyncio.create_task(run_event_janitor())
+    log.info("startup.events_janitor_started")
+
     log.info("startup.complete")
     yield
 
     # Shutdown sequence
     log.info("shutdown.begin")
 
-    # Stop watchdog first so it doesn't fire during MCP teardown
-    watchdog_task.cancel()
-    try:
-        await watchdog_task
-    except asyncio.CancelledError:
-        pass
+    # Stop watchdog + janitor before MCP teardown
+    for t in (watchdog_task, events_janitor_task):
+        t.cancel()
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
 
     # Gracefully stop MCP pool (signals → wait → force kill)
     await mcp_svc.shutdown_all()
@@ -125,6 +190,11 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    # Mutation audit — every POST/PUT/PATCH/DELETE writes one row into
+    # `events` so the Brain (and the LogDrawer) sees what UI did. Reads
+    # are skipped to keep table small.
+    app.middleware("http")(_audit_middleware)
+
     from api.routes_health import router as health_router
     from api.ws import router as ws_router
     from api.routes_llm import router as llm_router
@@ -139,6 +209,7 @@ def create_app() -> FastAPI:
     from api.routes_tool import router as tool_router
     from api.routes_lifecycle import router as lifecycle_router
     from api.routes_template import router as template_router
+    from api.routes_events import router as events_router
 
     app.include_router(health_router, prefix="/api/v1")
     app.include_router(ws_router, prefix="/api/v1")
@@ -154,5 +225,6 @@ def create_app() -> FastAPI:
     app.include_router(tool_router, prefix="/api/v1")
     app.include_router(lifecycle_router, prefix="/api/v1")
     app.include_router(template_router, prefix="/api/v1")
+    app.include_router(events_router, prefix="/api/v1")
 
     return app
