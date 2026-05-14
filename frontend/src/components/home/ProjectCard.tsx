@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   useProject,
   useDeleteProject,
@@ -74,6 +75,36 @@ function ProjectCard({ project }: { project: Project }) {
     if (!pathInput.trim()) return;
     rootPathMut.mutate({ id: project.id, root_path: pathInput.trim() });
     setPathModal(false);
+  }
+
+  /** Tauri folder picker. Returns the chosen absolute path, or null if the
+   *  user cancelled / dialog failed. Same helper used by both the "设置路径"
+   *  fast-path and the modal's "浏览…" button. */
+  async function pickFolder(): Promise<string | null> {
+    try {
+      const result = await openDialog({
+        directory: true,
+        multiple: false,
+        title: "选择项目根目录",
+      });
+      return typeof result === "string" ? result : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Click handler for the "设置路径" button. Opens the folder picker
+   *  immediately; if the user picks one, save and skip the modal entirely.
+   *  If they cancel (or the dialog plugin isn't loaded), fall back to the
+   *  manual-entry modal so they can paste a path. */
+  async function handleConfigurePath() {
+    const picked = await pickFolder();
+    if (picked) {
+      rootPathMut.mutate({ id: project.id, root_path: picked });
+      return;
+    }
+    setPathInput(project.root_path ?? "");
+    setPathModal(true);
   }
 
   function handleCopy() {
@@ -280,10 +311,7 @@ function ProjectCard({ project }: { project: Project }) {
         <PathButton
           locked={!!project.root_path}
           configured={!!project.root_path}
-          onClick={() => {
-            setPathInput(project.root_path ?? "");
-            setPathModal(true);
-          }}
+          onClick={handleConfigurePath}
         />
 
         <button
@@ -347,6 +375,20 @@ function ProjectCard({ project }: { project: Project }) {
             autoFocus
           />
           <div className="flex justify-end gap-2">
+            <button
+              onClick={async () => {
+                const picked = await pickFolder();
+                if (picked) setPathInput(picked);
+              }}
+              className="rounded-lg border bg-white px-3 py-1.5 text-xs transition-colors hover:bg-zinc-50"
+              style={{
+                borderColor: "var(--color-border-soft)",
+                color: "var(--color-ink-label)",
+              }}
+              title="打开资源管理器选择文件夹"
+            >
+              浏览…
+            </button>
             <button
               onClick={() => setPathModal(false)}
               className="rounded-lg border bg-white px-3 py-1.5 text-xs"
