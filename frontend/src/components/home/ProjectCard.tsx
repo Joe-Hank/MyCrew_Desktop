@@ -78,30 +78,39 @@ function ProjectCard({ project }: { project: Project }) {
   }
 
   /** Tauri folder picker. Returns the chosen absolute path, or null if the
-   *  user cancelled / dialog failed. Same helper used by both the "设置路径"
-   *  fast-path and the modal's "浏览…" button. */
+   *  user cancelled. Throws with a descriptive message if Tauri isn't
+   *  available (running in a plain browser) or the plugin call failed —
+   *  callers decide whether to alert or silently fall through. */
   async function pickFolder(): Promise<string | null> {
-    try {
-      const result = await openDialog({
-        directory: true,
-        multiple: false,
-        title: "选择项目根目录",
-      });
-      return typeof result === "string" ? result : null;
-    } catch {
-      return null;
+    const hasTauri =
+      typeof window !== "undefined" &&
+      !!(window as unknown as { __TAURI_INTERNALS__?: unknown })
+        .__TAURI_INTERNALS__;
+    if (!hasTauri) {
+      throw new Error("非 Tauri 运行环境，无法调用系统文件选择器");
     }
+    const result = await openDialog({
+      directory: true,
+      multiple: false,
+      title: "选择项目根目录",
+    });
+    return typeof result === "string" ? result : null;
   }
 
   /** Click handler for the "设置路径" button. Opens the folder picker
    *  immediately; if the user picks one, save and skip the modal entirely.
-   *  If they cancel (or the dialog plugin isn't loaded), fall back to the
-   *  manual-entry modal so they can paste a path. */
+   *  On any failure surface the error then fall back to the manual-entry
+   *  modal so the user can still paste a path. */
   async function handleConfigurePath() {
-    const picked = await pickFolder();
-    if (picked) {
-      rootPathMut.mutate({ id: project.id, root_path: picked });
-      return;
+    try {
+      const picked = await pickFolder();
+      if (picked) {
+        rootPathMut.mutate({ id: project.id, root_path: picked });
+        return;
+      }
+    } catch (err) {
+      console.error("[ProjectCard] pickFolder failed:", err);
+      alert(`系统文件选择器调用失败：${(err as Error).message}\n请改用下方输入框手动粘贴路径。`);
     }
     setPathInput(project.root_path ?? "");
     setPathModal(true);
@@ -377,8 +386,13 @@ function ProjectCard({ project }: { project: Project }) {
           <div className="flex justify-end gap-2">
             <button
               onClick={async () => {
-                const picked = await pickFolder();
-                if (picked) setPathInput(picked);
+                try {
+                  const picked = await pickFolder();
+                  if (picked) setPathInput(picked);
+                } catch (err) {
+                  console.error("[ProjectCard] pickFolder failed:", err);
+                  alert(`系统文件选择器调用失败：${(err as Error).message}`);
+                }
               }}
               className="rounded-lg border bg-white px-3 py-1.5 text-xs transition-colors hover:bg-zinc-50"
               style={{
@@ -387,7 +401,7 @@ function ProjectCard({ project }: { project: Project }) {
               }}
               title="打开资源管理器选择文件夹"
             >
-              浏览…
+              浏览
             </button>
             <button
               onClick={() => setPathModal(false)}

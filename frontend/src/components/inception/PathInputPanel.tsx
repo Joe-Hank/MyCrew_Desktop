@@ -18,6 +18,14 @@ function PathInputPanel({
   const [path, setPath] = useState(confirmedPath ?? "");
 
   async function pickFolder() {
+    const hasTauri =
+      typeof window !== "undefined" &&
+      !!(window as unknown as { __TAURI_INTERNALS__?: unknown })
+        .__TAURI_INTERNALS__;
+    if (!hasTauri) {
+      alert("非 Tauri 运行环境，无法调用系统文件选择器。请在输入框手动粘贴路径。");
+      return;
+    }
     try {
       const result = await openDialog({
         directory: true,
@@ -25,8 +33,9 @@ function PathInputPanel({
         title: "选择 Unity 项目根目录",
       });
       if (typeof result === "string") setPath(result);
-    } catch {
-      /* user cancelled or dialog plugin not loaded — fall through */
+    } catch (err) {
+      console.error("[PathInputPanel] pickFolder failed:", err);
+      alert(`系统文件选择器调用失败：${(err as Error).message}`);
     }
   }
 
@@ -87,7 +96,7 @@ function PathInputPanel({
             color: "var(--color-ink-label)",
           }}
         >
-          浏览…
+          浏览
         </button>
       </div>
 
