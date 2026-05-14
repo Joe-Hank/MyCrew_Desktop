@@ -56,6 +56,15 @@ function InceptionDrawer() {
   const [streamingText, setStreamingText] = useState("");
   const [roundStartTs, setRoundStartTs] = useState<number | null>(null);
 
+  // "Drafting" = a create/iterate sub-agent has started its kickoff but
+  // hasn't yet emitted inception.workflow_created. We open the right
+  // panel with a skeleton in this window so the user has immediate
+  // feedback instead of staring at a chat-only column for 10-30s.
+  const [drafting, setDrafting] = useState<null | {
+    intent: "create_new" | "iterate_existing";
+    mode: "create" | "iterate";
+  }>(null);
+
   // Pending structured-choice / path-input prompt from Plan Maker (e.g.
   // "pick a Unity template" or "supply iteration root path"). Cleared once
   // the user confirms; the confirmation goes through POST /choices.
@@ -129,6 +138,21 @@ function InceptionDrawer() {
   );
   const chat = useChatQueue({ send: sendLlmRound });
 
+  // Drafting started — a create_new / iterate_existing sub-agent picked
+  // up the round. Open the right panel skeleton immediately so the user
+  // sees "生成中…" while waiting for create_workflow to land.
+  const handleDraftingStarted = useCallback(
+    (msg: { payload: Record<string, unknown> }) => {
+      if (msg.payload.session_id !== activeSessionId) return;
+      const intent = msg.payload.intent as "create_new" | "iterate_existing" | undefined;
+      const mode = msg.payload.mode as "create" | "iterate" | undefined;
+      if (!intent || !mode) return;
+      setDrafting({ intent, mode });
+    },
+    [activeSessionId],
+  );
+  useEvent("inception.drafting_started", handleDraftingStarted);
+
   // Workflow created — Plan Maker called the create_workflow tool. Stash the
   // blueprint for both the right panel and the completed-round snapshot.
   const handleWorkflowCreated = useCallback(
@@ -141,10 +165,49 @@ function InceptionDrawer() {
         inFlightBlueprintRef.current = bp;
       }
       if (pid) setCreatedProjectId(pid);
+      // Tasks have landed — drafting skeleton can transition to the real
+      // blueprint editor, but keep `drafting` flag so any unassigned
+      // task pills still show the "agent 待分配" shimmer until
+      // inception.agents_assigned arrives.
     },
     [activeSessionId, setDraftBlueprint],
   );
   useEvent("inception.workflow_created", handleWorkflowCreated);
+
+  // Agents assigned — merge the task→agent mapping into the in-flight
+  // blueprint so the right panel pills flip "待分配" → real role label
+  // without a server round-trip.
+  const handleAgentsAssigned = useCallback(
+    (msg: { payload: Record<string, unknown> }) => {
+      if (msg.payload.session_id !== activeSessionId) return;
+      const assignments = (msg.payload.assignments as Array<{
+        task_id: string;
+        task_index: number;
+        agent_id: string;
+        agent_role: string;
+      }>) ?? [];
+      if (assignments.length === 0) {
+        setDrafting(null);
+        return;
+      }
+      const prev = inFlightBlueprintRef.current;
+      if (prev) {
+        const byIndex = new Map(assignments.map((a) => [a.task_index, a]));
+        const newTasks = prev.tasks.map((t, i) => {
+          const a = byIndex.get(i);
+          return a
+            ? { ...t, agent_id: a.agent_id, agent_role: a.agent_role }
+            : t;
+        });
+        const next: Blueprint = { ...prev, tasks: newTasks };
+        inFlightBlueprintRef.current = next;
+        setDraftBlueprint(next);
+      }
+      setDrafting(null);
+    },
+    [activeSessionId, setDraftBlueprint],
+  );
+  useEvent("inception.agents_assigned", handleAgentsAssigned);
 
   // Legacy salvage path — raw JSON blueprint detected in assistant text.
   const handleBlueprintEvent = useCallback(
@@ -297,8 +360,20 @@ function InceptionDrawer() {
     setStreamingText("");
     setRoundStartTs(null);
     setCompletedRound(null);
+    setDrafting(null);
     inFlightBlueprintRef.current = null;
   }, [activeSessionId]);
+
+  // Safety: clear "drafting" skeleton once the round finishes, in case the
+  // backend never emitted inception.agents_assigned (e.g. assign_agents
+  // silently skipped — drafting must not stay stuck on forever).
+  useEffect(() => {
+    if (!chat.thinking && drafting) {
+      const t = setTimeout(() => setDrafting(null), 1500);
+      return () => clearTimeout(t);
+    }
+    return;
+  }, [chat.thinking, drafting]);
 
   // First-launch fallback: pick the first available provider/model.
   useEffect(() => {
@@ -459,7 +534,21 @@ function InceptionDrawer() {
     return rawMessages;
   })();
 
-  const drawerWidth = createdProjectId && draftBlueprint
+  // De-dupe local pending bubbles against persisted user messages.
+  // Once a user message has been persisted server-side and landed in
+  // `rawMessages` (via React Query refetch or WS-driven invalidate),
+  // the matching `chat.pending` entry would otherwise render *twice*
+  // until `runLoop` clears it. Filter out any pending whose content
+  // already appears as a recent user-role message.
+  const recentUserContents = new Set(
+    rawMessages.filter((m) => m.role === "user").slice(-8).map((m) => m.content),
+  );
+  const visiblePending = chat.pending.filter((p) => !recentUserContents.has(p.content));
+
+  // Right panel is shown whenever (a) we already have a blueprint, OR
+  // (b) a create/iterate sub-agent is mid-draft. Drives drawer width.
+  const showRightPanel = !!(createdProjectId && draftBlueprint) || !!drafting;
+  const drawerWidth = showRightPanel
     ? "min(64vw, 1100px)"
     : "min(38vw, 560px)";
 
@@ -668,8 +757,11 @@ function InceptionDrawer() {
 
                   {/* Local user bubbles for messages still in the queue or
                       mid-flight. Cleared after the round's server invalidate
-                      lands in the cache. */}
-                  {chat.pending.map((p) => (
+                      lands in the cache. Filtered to hide any whose content
+                      already exists in rawMessages (otherwise the user's
+                      message would briefly render twice — once persisted,
+                      once still-pending). */}
+                  {visiblePending.map((p) => (
                     <div
                       key={p.id}
                       className="mb-4 ml-auto max-w-[70%] rounded-xl px-4 py-2.5 text-sm leading-relaxed"
@@ -893,22 +985,27 @@ function InceptionDrawer() {
             </div>
           </div>
 
-          {/* Blueprint panel — shown only after Plan Maker's create_workflow
-              tool has persisted the project. Bottom action bar lives inside
-              this column now (per spec: 重新生成 / 保存项目 belong with the
-              blueprint, not the chat). */}
-          {createdProjectId && draftBlueprint && (
+          {/* Blueprint panel — shown either with the real blueprint editor
+              (after create_workflow lands) OR with a "drafting" skeleton
+              the moment a create/iterate sub-agent picks up the round.
+              Bottom action bar lives inside this column now (per spec:
+              重新生成 / 保存项目 belong with the blueprint, not the chat). */}
+          {showRightPanel && (
             <div
               className="flex w-[45%] min-w-[360px] flex-col transition-all duration-200"
               style={{ backgroundColor: "var(--color-surface)" }}
             >
               <div className="min-h-0 flex-1 p-4">
-                <TaskBlueprintEditor
-                  blueprint={draftBlueprint}
-                  onChange={setDraftBlueprint}
-                  onReEvaluate={handleReEvaluate}
-                  reEvaluating={reEvaluating}
-                />
+                {createdProjectId && draftBlueprint ? (
+                  <TaskBlueprintEditor
+                    blueprint={draftBlueprint}
+                    onChange={setDraftBlueprint}
+                    onReEvaluate={handleReEvaluate}
+                    reEvaluating={reEvaluating}
+                  />
+                ) : (
+                  <DraftingSkeleton mode={drafting?.mode ?? "create"} />
+                )}
               </div>
               <div
                 className="px-4 py-3"
@@ -946,6 +1043,55 @@ function InceptionDrawer() {
       </div>
       </div>
     </>
+  );
+}
+
+/** Right-panel skeleton shown while the create/iterate sub-agent is
+ *  drafting the task list. Renders 3 shimmering task-pill placeholders
+ *  + a header explaining what's happening, so the user has immediate
+ *  visual feedback instead of staring at a chat-only column for 10-30s. */
+function DraftingSkeleton({ mode }: { mode: "create" | "iterate" }) {
+  const label = mode === "iterate" ? "正在规划迭代任务…" : "正在拆解项目任务…";
+  return (
+    <div className="flex h-full flex-col">
+      <div
+        className="mb-3 flex items-center gap-2 text-sm font-medium"
+        style={{ color: "var(--color-ink-soft)" }}
+      >
+        <span className="inline-flex h-2 w-2 animate-pulse rounded-full"
+              style={{ backgroundColor: "var(--color-brand-500)" }} />
+        <span>{label}</span>
+      </div>
+      <div
+        className="mb-3 text-[11px]"
+        style={{ color: "var(--color-ink-ghost)" }}
+      >
+        Plan Maker 正在按你的需求设计任务图，完成后会在这里逐项填入。
+      </div>
+      <div className="flex-1 space-y-2 overflow-hidden">
+        {[0, 1, 2].map((i) => (
+          <div
+            key={i}
+            className="rounded-lg p-3"
+            style={{
+              backgroundColor: "var(--color-card-alt)",
+              border: "1px solid var(--color-border-soft)",
+              opacity: 1 - i * 0.18,
+            }}
+          >
+            <div
+              className="mb-2 h-3 w-3/4 animate-pulse rounded"
+              style={{ backgroundColor: "var(--color-border-soft)" }}
+            />
+            <div
+              className="h-2.5 w-1/2 animate-pulse rounded"
+              style={{ backgroundColor: "var(--color-border-soft)",
+                       animationDelay: `${i * 150}ms` }}
+            />
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 

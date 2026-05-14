@@ -124,6 +124,18 @@ async def run(user_message: str, session: dict) -> SubAgentResult:
 
     backstory = await _render_backstory(session)
 
+    # Tell the frontend the right-side blueprint panel should open NOW
+    # with a "drafting" skeleton — tasks land later via inception.workflow_created.
+    try:
+        from api.ws import manager as _ws_manager
+        await _ws_manager.broadcast("inception.drafting_started", {
+            "session_id": session_id,
+            "intent": "iterate_existing",
+            "mode": "iterate",
+        })
+    except Exception:
+        pass  # best-effort
+
     from src.tools.builtin.local.create_workflow import make_create_workflow_tool
     from src.tools.builtin.local.assign_agents import make_assign_agents_tool
     from src.tools.builtin.local.write_blueprint import make_write_blueprint_tool

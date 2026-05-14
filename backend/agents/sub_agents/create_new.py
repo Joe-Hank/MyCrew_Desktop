@@ -137,6 +137,19 @@ async def run(user_message: str, session: dict) -> SubAgentResult:
 
     backstory = await _render_backstory(session)
 
+    # Tell the frontend the right-side blueprint panel should open NOW
+    # with a "drafting" skeleton. Tasks land later via inception.workflow_created;
+    # agents land via inception.agents_assigned.
+    try:
+        from api.ws import manager as _ws_manager
+        await _ws_manager.broadcast("inception.drafting_started", {
+            "session_id": session_id,
+            "intent": "create_new",
+            "mode": "create",
+        })
+    except Exception:
+        pass  # best-effort
+
     # Bind the 3 mutation tools — same factories the old monolithic agent used
     from src.tools.builtin.local.create_workflow import make_create_workflow_tool
     from src.tools.builtin.local.assign_agents import make_assign_agents_tool

@@ -240,6 +240,10 @@ class AssignAgentsTool(GuardedLocalTool):
             # Apply each assignment
             results: list[str] = []
             created_agents: list[dict] = []
+            # Per-task assignment map for the frontend (task_id → agent label).
+            # Included in the inception.agents_assigned event so the right-side
+            # blueprint panel can flip "待分配" → real role without re-fetching.
+            assignments_map: list[dict] = []
             for a in norm:
                 idx = a.get("task_index")
                 if not isinstance(idx, int) or idx < 0 or idx >= len(tasks):
@@ -260,6 +264,12 @@ class AssignAgentsTool(GuardedLocalTool):
                         continue
                     await crud.update_by_id("tasks", task["id"], {
                         "agent_id": existing_id,
+                    })
+                    assignments_map.append({
+                        "task_id": task["id"],
+                        "task_index": idx,
+                        "agent_id": existing_id,
+                        "agent_role": found.get("role", "?"),
                     })
                     results.append(
                         f"  · task #{idx} ({task.get('title','?')}) → "
@@ -303,6 +313,12 @@ class AssignAgentsTool(GuardedLocalTool):
                     await crud.update_by_id("tasks", task["id"], {
                         "agent_id": new_row["id"],
                     })
+                    assignments_map.append({
+                        "task_id": task["id"],
+                        "task_index": idx,
+                        "agent_id": new_row["id"],
+                        "agent_role": new_row.get("role", "?"),
+                    })
                     results.append(
                         f"  · task #{idx} ({task.get('title','?')}) → "
                         f"NEW agent {new_row.get('role','?')}",
@@ -313,7 +329,8 @@ class AssignAgentsTool(GuardedLocalTool):
                     f"  · skip task #{idx}: neither existing_agent_id nor new_agent supplied",
                 )
 
-            # Broadcast for the frontend (drawer can announce created agents)
+            # Broadcast for the frontend (drawer can announce created agents
+            # AND flip each task's "待分配" pill to its real role label).
             await manager.broadcast("inception.agents_assigned", {
                 "session_id": session_id,
                 "project_id": project_id,
@@ -321,6 +338,7 @@ class AssignAgentsTool(GuardedLocalTool):
                     {"id": a["id"], "role": a.get("role", "?")}
                     for a in created_agents
                 ],
+                "assignments": assignments_map,
             })
 
             summary_lines = [
