@@ -1,8 +1,14 @@
 # MyCrew 前端设计系统
 
+> **状态：✅ DEFAULT — 默认风格**
 > 经过 N 轮迭代沉淀的视觉语言 + 组件参数 + 反复踩过的坑。
 > 适用：MyCrew 当前产品 + 未来要做的同系列产品（Tauri/Electron 桌面 + React + Tailwind v4）。
 > 读者：人 + AI（Brain / Claude Code 等）。
+>
+> **新产品起手默认走这套**。不需要专门说明，AI 直接按本文档复刻。
+> 如果某个新产品需要不同风格（如 brutalist / glass / 极简黑白），
+> 不要改本文件，而是在同目录新建 `DESIGN-SYSTEM-<风格名>.md`，
+> 并在 README 顶部注明 "采用 `DESIGN-SYSTEM-XXX.md` 替代默认"。
 
 ---
 
