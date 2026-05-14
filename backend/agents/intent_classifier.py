@@ -48,28 +48,54 @@ class IntentResult:
     reason: str = ""     # short explanation
 
 
-_CLASSIFIER_SYSTEM_PROMPT = """你是 MyCrew 立项助手的意图分类器。
+DEFAULT_PARAMS = {
+    "llm_preference": "cheap",
+    "temperature": 0.2,
+    "max_tokens": 80,
+}
 
-输入：
-- user_message: 用户当前输入
-- session_summary: 当前会话状态摘要
 
-输出**严格 JSON**（不要 markdown 代码块、不要任何解释）：
+_CLASSIFIER_SYSTEM_PROMPT = """你是 MyCrew 立项助手的意图路由器。给用户输入分类到 5 个 intent。
+
+# 输出
+严格 JSON（无 markdown 包装）：
 {"intent": "<name>", "confidence": 0.0-1.0, "reason": "<≤20字>"}
 
-可选 intent（必须是以下 5 个之一）：
+# Intent 表
 
-- create_new        用户想新建项目 / 设计一个游戏 / 提出全新需求
-- iterate_existing  在已有项目（mode=iterate 或提到 root_path）上加东西、改东西
-- clarify_design    问已有蓝图 / 任务的设计原因、解释、详情，**不修改**
-- modify_blueprint  在草稿蓝图（has_draft_blueprint=true）上微调：加 task、删 task、改描述
-- abort_or_restart  用户说"算了"、"重来"、"取消"、"清空"
+| name | 触发 | 典型话术 |
+|---|---|---|
+| create_new | 全新项目立项 | "做一个 X" / "Tetris 复刻" |
+| iterate_existing | 在已有项目上加/改东西 | "加一关 boss" / "补存档" / session.mode=iterate |
+| clarify_design | 问设计原因，不修改 | "为什么用 X" / "蓝图是啥样" |
+| modify_blueprint | 改草稿任务（未启动） | "把任务 3 改详细些" / has_draft_blueprint=true |
+| abort_or_restart | 中断/放弃 | "算了" / "重来" / "清空" |
 
-规则：
-- has_draft_blueprint=true 且用户想改 → modify_blueprint（不是 create_new）
-- mode=iterate → 优先 iterate_existing（除非显然在问问题就 clarify_design）
-- 不确定就给 create_new + 较低 confidence
-- confidence 反映你的把握度，不是任务复杂度"""
+# 决策规则
+- has_draft_blueprint=true 且要修改 → modify_blueprint（不要误判成 create_new）
+- mode=iterate → 优先 iterate_existing，除非显然是问问题
+- 不确定 → create_new + 低 confidence
+
+# 示例
+
+输入: 做个吃豆人复刻
+session: mode=create, template=unity_2d, has_project=false
+→ {"intent": "create_new", "confidence": 0.95, "reason": "全新项目"}
+
+输入: 把第 3 个任务的细节写详细些
+session: mode=create, template=unity_2d, has_project=true, has_draft_blueprint=true
+→ {"intent": "modify_blueprint", "confidence": 0.9, "reason": "改草稿任务"}
+
+输入: 在 Mercy_1910 上加存档加密
+session: mode=iterate, template=unity_2d, has_project=true
+→ {"intent": "iterate_existing", "confidence": 0.95, "reason": "迭代加功能"}
+
+输入: QA 那一步设计成那样的理由是什么？
+session: has_project=true
+→ {"intent": "clarify_design", "confidence": 0.85, "reason": "问设计原因"}
+
+输入: 算了换个思路
+→ {"intent": "abort_or_restart", "confidence": 0.95, "reason": "明确放弃"}"""
 
 
 async def classify_intent(
@@ -77,8 +103,9 @@ async def classify_intent(
     session: dict,
 ) -> IntentResult:
     """Run the classifier. Returns IntentResult; defaults to create_new on
-    LLM/parse failure (fail-safe — create_new has the most graceful path)."""
-    from agents.compliance_gate import _resolve_session_llm
+    LLM/parse failure (fail-safe — create_new has the most graceful path).
+    """
+    from agents._llm_picker import pick_llm
 
     summary = _summarize_session(session)
     user_payload = (
@@ -87,11 +114,10 @@ async def classify_intent(
     )
 
     try:
-        provider_id, model_name = await _resolve_session_llm(session)
-        provider = await crud.get_by_id("llm_providers", provider_id)
-        if not provider:
-            raise ValueError(f"provider {provider_id} not found")
-    except Exception as exc:  # noqa: BLE001
+        provider, model_name = await pick_llm(
+            session, DEFAULT_PARAMS["llm_preference"],
+        )
+    except (ValueError, KeyError) as exc:
         log.warning("intent_classifier.no_llm", error=str(exc))
         return IntentResult(intent="create_new", confidence=0.0,
                             reason="no_llm_fallback")
@@ -102,8 +128,8 @@ async def classify_intent(
     ]
     try:
         resp = await llm_gateway.chat(
-            provider_id, model_name, messages,
-            max_tokens=80,
+            provider["id"], model_name, messages,
+            max_tokens=DEFAULT_PARAMS["max_tokens"],
         )
     except Exception as exc:  # noqa: BLE001
         log.warning("intent_classifier.llm_call_failed", error=str(exc))

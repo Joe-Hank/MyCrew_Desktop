@@ -56,8 +56,20 @@ def _build_litellm_model_string(provider_type: str, model_name: str) -> str:
     return model_name
 
 
-def _build_crewai_llm(provider: dict, model_name: str):
-    """Build a `crewai.LLM` instance from a v3 provider row."""
+def _build_crewai_llm(
+    provider: dict,
+    model_name: str,
+    *,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+):
+    """Build a `crewai.LLM` instance from a v3 provider row.
+
+    Optional `temperature` + `max_tokens` are passed through to litellm
+    when set — used by Plan Maker 2.0 sub-agents to tune per-intent
+    output behavior (cheap classifier at temp=0 vs creative architect
+    at temp=0.7, etc.).
+    """
     from crewai import LLM
 
     model_string = _build_litellm_model_string(provider.get("type", "openai"), model_name)
@@ -68,6 +80,10 @@ def _build_crewai_llm(provider: dict, model_name: str):
     base_url = provider.get("base_url")
     if base_url:
         kwargs["base_url"] = base_url
+    if temperature is not None:
+        kwargs["temperature"] = float(temperature)
+    if max_tokens is not None:
+        kwargs["max_tokens"] = int(max_tokens)
     return LLM(**kwargs)
 
 

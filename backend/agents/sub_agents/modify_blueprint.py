@@ -1,8 +1,9 @@
-"""Modify-blueprint sub-agent — edit a not-yet-started project's task list.
+"""Modify-blueprint sub-agent — translate edits into precise patch_blueprint ops.
 
 Operates on the DRAFT blueprint — projects in `state='ready'` whose tasks
 haven't started yet. User asks to "add a task" / "delete X" / "rename to Y";
-this sub-agent uses the `patch_blueprint` tool to apply ops.
+this sub-agent translates the request into op JSON and applies via
+patch_blueprint. Low temperature for deterministic output.
 
 Token target: ~700 in / 2-4 LLM iter.
 """
@@ -13,36 +14,119 @@ import structlog
 from agents.sub_agents._base import (
     SubAgentResult,
     empty_result,
-    resolve_session_llm_with_provider,
     run_crewai_agent,
 )
 
 log = structlog.get_logger()
 
 
-_ROLE = "Plan Maker - Edit Draft"
-_GOAL = "在用户的草稿蓝图上做精确微调（增删改任务、改 agent 分配）。"
+DEFAULT_PARAMS = {
+    "llm_preference": "pro",
+    "temperature": 0.1,
+    "max_tokens": 1500,
+}
 
-_BACKSTORY = """## 你的工作
-在用户的**未启动项目**草稿蓝图上做精确微调。可用操作：
+_ROLE = "MyCrew 草稿编辑器"
+_GOAL = (
+    "你是 MyCrew 草稿编辑器。把用户的自然语言修改请求精确翻译成 "
+    "patch_blueprint 的 ops，仅修改用户明确点到的地方，绝不重建蓝图。"
+)
 
-- add_task     新增一个任务
-- remove_task  删除任务（按 task_index 或 task_id）
-- update_task  改某 task 的字段（title / detail / output_schema / kind 等）
-- reorder      重排任务顺序
-- assign_agent 改某 task 的 agent_id
+_BACKSTORY = """# 身份
+你是 **MyCrew 草稿编辑器**。座右铭：**只动用户点到的地方**。
+你不重新设计蓝图（那是 Unity 游戏架构师的活），只把请求翻译成精确的 op。
 
-## 工具
-- `patch_blueprint(ops)` — 唯一写工具，应用一组 ops
-  - 仅作用于 state='ready' 的项目（未启动）
-  - ops 形如 [{op:"update_task", task_id:"...", patch:{title:"..."}}, ...]
-- `read_file_local` / `list_directory_local` — 必要时读 `.mycrew/` 看现状
+# 唯一写工具
+`patch_blueprint(ops)` — 一次提交一组 ops，仅对 state='ready' 的项目生效
 
-## 规则
-- 不要重建整个蓝图（那是 create_new 的事）
-- 一次只做用户明确要求的修改
-- 改完后简短确认："已修改：删除 task X / 添加 task Y / ..."
-- 改不了（项目已启动 / 任务 id 找不到）→ 坦诚告知，不要伪造成功"""
+# Op Schema（5 种 op）
+
+```json
+{ "op": "add_task",
+  "after_task_id": "<id 或 null=末尾>",
+  "task": {
+    "title": "...",
+    "detail": "...",
+    "output_schema": { "file_path": "..." },
+    "kind": "normal" | "final_qa",
+    "deps": ["<task_id>", ...]
+  }
+}
+
+{ "op": "remove_task",
+  "task_id": "<id>"   // 或 "task_index": <从 0 起的位置>
+}
+
+{ "op": "update_task",
+  "task_id": "<id>",
+  "patch": { "title": "...", "detail": "...", "output_schema": {...} }
+}
+
+{ "op": "reorder",
+  "task_ids": ["<id1>", "<id2>", ...]   // 新顺序
+}
+
+{ "op": "assign_agent",
+  "task_id": "<id>",
+  "agent_id": "<existing agent id>"
+}
+```
+
+# 流程
+1. 必要时用 `read_file_local('.mycrew/blueprint.json')` 看现状（确认 task_id）
+2. 设计最小 op 列表（用户没要求的字段不动）
+3. 调一次 `patch_blueprint(ops=[...])`
+4. 一句中文确认改了什么
+
+# 4 个 op 示例
+
+**示例 1 — 加 BGM 任务**
+> 用户：在 Player 控制之后加一个 BGM 接入任务
+```json
+[{ "op": "add_task",
+   "after_task_id": "task_01_player",
+   "task": {
+     "title": "接入背景音乐",
+     "detail": "用 AudioSource + AudioMixer 在 GameManager 启动时播放 BGM",
+     "output_schema": { "file_path": "Assets/Scripts/Audio/BGMController.cs" },
+     "kind": "normal"
+   }}]
+```
+→ 回："已添加：在 task_01 之后插入『接入背景音乐』。"
+
+**示例 2 — 删第 3 个任务**
+> 用户：把第 3 个任务删了，用不上
+```json
+[{ "op": "remove_task", "task_index": 2 }]
+```
+→ 回："已删除：第 3 个任务（task_index=2）。"
+
+**示例 3 — 改任务标题**
+> 用户：task 3 的标题改成「Ghost AI 状态机」
+```json
+[{ "op": "update_task",
+   "task_id": "task_03_ghost",
+   "patch": { "title": "Ghost AI 状态机" }}]
+```
+→ 回："已改 task_03 标题为『Ghost AI 状态机』。"
+
+**示例 4 — 改 agent 分配**
+> 用户：task 5 的关卡数据应该让 Unity Developer 做
+```json
+[{ "op": "assign_agent",
+   "task_id": "task_05_level",
+   "agent_id": "agent_unity_dev" }]
+```
+→ 回："已把 task_05 改派给 Unity Developer。"
+
+# 硬约束
+- **绝不重建** — 不调 create_workflow / write_blueprint
+- **最小改动** — 用户没点到的字段保持不变
+- **一次一组** — 把所有 op 合到一次 patch_blueprint 调用
+- **找不到 task_id** → 坦诚回 "没找到这个任务"，不要伪造成功
+- **项目已启动** → patch_blueprint 会拒绝，把错误原样转告用户
+- 输出**只是工具调用 + 一句中文确认**，不要把 op JSON 再打印一遍
+"""
 
 
 async def run(user_message: str, session: dict) -> SubAgentResult:
@@ -55,11 +139,13 @@ async def run(user_message: str, session: dict) -> SubAgentResult:
         )
 
     try:
-        provider, model_name = await resolve_session_llm_with_provider(session)
-    except ValueError as exc:
+        from agents._llm_picker import pick_llm
+        provider, model_name = await pick_llm(
+            session, DEFAULT_PARAMS["llm_preference"],
+        )
+    except (ValueError, KeyError) as exc:
         return empty_result(f"⚠️ LLM 配置错误：{exc}")
 
-    # patch_blueprint tool — lazy import in case stage F isn't merged yet
     try:
         from src.tools.builtin.local.patch_blueprint import (
             make_patch_blueprint_tool,
@@ -83,7 +169,7 @@ async def run(user_message: str, session: dict) -> SubAgentResult:
 
     description = (
         f"## 用户请求\n{user_message}\n\n"
-        "用 patch_blueprint 应用必要的 ops，然后一句中文确认改了什么。"
+        "翻译成最小 op 列表，一次 patch_blueprint 调用，然后一句中文确认。"
     )
 
     try:
@@ -91,10 +177,12 @@ async def run(user_message: str, session: dict) -> SubAgentResult:
             session_id=session_id,
             role=_ROLE, goal=_GOAL, backstory=_BACKSTORY,
             description=description,
-            expected_output="调 patch_blueprint 应用必要修改，然后一句中文确认。",
+            expected_output="调一次 patch_blueprint 应用最小 op 集，然后一句中文确认改了什么。",
             tools=tools,
             provider=provider, model_name=model_name,
             max_iter=4,
+            temperature=DEFAULT_PARAMS["temperature"],
+            max_tokens=DEFAULT_PARAMS["max_tokens"],
         )
     except Exception as exc:  # noqa: BLE001
         log.error("modify_blueprint.kickoff_failed", error=str(exc),

@@ -1,18 +1,20 @@
 """Stage 1: LLM-based compliance gate.
 
-Tiny single-shot classifier. Three outcomes:
+Three-way classifier with few-shot examples covering the tricky boundaries
+(game-mechanics violence vs real violence; software help-seeking vs care
+trigger; mixed cases where care-priority dominates).
 
+Outcomes:
   ALLOW              — proceed to intent classifier
-  CARE               — user appears to be in distress / asking about
-                       self-harm / criminal intent etc. Router returns
-                       a fixed care template without further LLM.
-  HARMONIOUS_BLOCK   — request involves potentially illegal / political /
-                       sexual / violent content. Router checks the
-                       app-wide compliance_mode setting:
-                         free       → treat as ALLOW (fall through)
-                         harmonious → return polite refusal template
+  CARE               — user shows distress about themselves; router
+                       returns a fixed care template, no further LLM
+  HARMONIOUS_BLOCK   — content-generation request that the harmonious
+                       compliance mode would block (free mode falls
+                       through to ALLOW automatically in router.py)
 
-Prompt is ~80 tokens in / 10 out. Cheap.
+Uses the cheapest LLM (`llm_preference="cheap"`), temperature=0,
+max_tokens=10. Care-priority is enforced both in the prompt and in the
+label parser.
 """
 from __future__ import annotations
 
@@ -23,12 +25,19 @@ import structlog
 
 from infra.llm.base import LlmMessage
 from infra.llm.gateway import llm_gateway
-from infra.repo import crud
 
 log = structlog.get_logger()
 
 
 VerdictKind = Literal["ALLOW", "CARE", "HARMONIOUS_BLOCK"]
+
+
+# Per-intent LLM/sampling params (per Plan Maker 2.0 design)
+DEFAULT_PARAMS = {
+    "llm_preference": "cheap",
+    "temperature": 0,
+    "max_tokens": 10,
+}
 
 
 @dataclass
@@ -37,19 +46,33 @@ class ComplianceVerdict:
     reason: str = ""    # short tag for logging / events
 
 
-_GATE_SYSTEM_PROMPT = """你是 MyCrew 立项助手的合规门。判断用户消息属于哪一类，**只输出一个标签**：
+_GATE_SYSTEM_PROMPT = """你是 MyCrew 立项助手的合规门。判断用户消息属于哪一类：
 
-ALLOW              — 正常的项目设计 / 修改 / 提问 / 闲聊式咨询（默认）
-CARE               — 用户**自身**表达自杀、自残、犯罪意图，或强烈负面情绪求助
-HARMONIOUS_BLOCK   — 请求生成涉嫌违法 / 政治敏感 / 色情 / 极端暴力 的内容
+ALLOW    — 项目设计 / 修改 / 提问 / 软件咨询
+CARE     — 用户**自身**自杀、自残、犯罪、强烈负面情绪求助
+HARMONIOUS_BLOCK — 请求生成违法 / 政治 / 色情 / 极端暴力 的实际内容
 
-重要：
-- 游戏里的暴力机制（"boss 战斗"、"死亡掉血"等）不算 HARMONIOUS_BLOCK
-- 用户讨论游戏角色的"自杀"剧情不算 CARE
-- 仅当用户**自己**表达负面状态时才用 CARE
-- 不确定就给 ALLOW
+**只输出标签**（不解释、不换行）。CARE 优先级最高。
 
-只输出 ALLOW / CARE / HARMONIOUS_BLOCK 三个词之一，不要解释。"""
+# 示例
+
+用户: 做一个 Tetris 复刻
+→ ALLOW
+
+用户: 我想跳楼了不想活了
+→ CARE
+
+用户: 画一幅 NSFW 的图
+→ HARMONIOUS_BLOCK
+
+用户: 设计一个 boss 战，玩家死了就 game over
+→ ALLOW （游戏机制描述，不是真实暴力）
+
+用户: 怎么用 MyCrew 暂停项目？
+→ ALLOW （软件使用咨询）
+
+用户: 我撑不下去了。能帮我设计一个游戏吗？
+→ CARE （混合情况，care 优先）"""
 
 
 async def check_compliance(
@@ -58,14 +81,18 @@ async def check_compliance(
 ) -> ComplianceVerdict:
     """Run the gate. Returns ComplianceVerdict.
 
-    Picks the LLM from session.llm_id, falling back to default_inception_model.
+    Resolves the LLM via the 3-tier picker — prefers app_settings.cheap_llm
+    (per DEFAULT_PARAMS); falls back to session.llm_id / first provider.
     """
-    provider_id, model_name = await _resolve_session_llm(session)
-    provider = await crud.get_by_id("llm_providers", provider_id)
-    if not provider:
-        log.warning("compliance_gate.no_provider_default_allow",
-                    provider_id=provider_id)
-        return ComplianceVerdict(kind="ALLOW", reason="no_provider")
+    from agents._llm_picker import pick_llm
+
+    try:
+        provider, model_name = await pick_llm(
+            session, DEFAULT_PARAMS["llm_preference"],
+        )
+    except (ValueError, KeyError) as exc:
+        log.warning("compliance_gate.no_llm_default_allow", error=str(exc))
+        return ComplianceVerdict(kind="ALLOW", reason="no_llm")
 
     messages = [
         LlmMessage(role="system", content=_GATE_SYSTEM_PROMPT),
@@ -74,12 +101,12 @@ async def check_compliance(
 
     try:
         resp = await llm_gateway.chat(
-            provider_id, model_name, messages,
-            max_tokens=10,
+            provider["id"], model_name, messages,
+            max_tokens=DEFAULT_PARAMS["max_tokens"],
         )
     except Exception as exc:  # noqa: BLE001
         log.warning("compliance_gate.llm_call_failed",
-                    error=str(exc), provider_id=provider_id)
+                    error=str(exc), provider_id=provider["id"])
         # Fail open — let the user through rather than blocking on infra error
         return ComplianceVerdict(kind="ALLOW", reason="llm_error")
 

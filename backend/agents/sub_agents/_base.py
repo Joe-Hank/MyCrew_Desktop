@@ -37,17 +37,21 @@ def empty_result(reply_text: str = "") -> SubAgentResult:
 async def resolve_session_llm_with_provider(session: dict) -> tuple[dict, str]:
     """Resolve session.llm_id → (provider_row, model_name).
 
-    Sub-agents that run CrewAI need the full provider row (for api_key,
-    base_url, type). Raises ValueError if no LLM is configured.
+    Legacy helper. New code should use `resolve_llm(session, preference)`
+    so the 3-tier picker (cheap/default/pro) takes effect.
     """
-    from agents.compliance_gate import _resolve_session_llm
-    from infra.repo import crud
+    from agents._llm_picker import pick_llm
+    return await pick_llm(session, "default")
 
-    provider_id, model_name = await _resolve_session_llm(session)
-    provider = await crud.get_by_id("llm_providers", provider_id)
-    if not provider:
-        raise ValueError(f"llm provider {provider_id} not found")
-    return provider, model_name
+
+async def resolve_llm(
+    session: dict,
+    preference: str = "default",
+) -> tuple[dict, str]:
+    """Sub-agent entry point. Routes to `_llm_picker.pick_llm` with the
+    sub-agent's DEFAULT_PARAMS['llm_preference']."""
+    from agents._llm_picker import pick_llm
+    return await pick_llm(session, preference)  # type: ignore[arg-type]
 
 
 async def run_crewai_agent(
@@ -62,11 +66,16 @@ async def run_crewai_agent(
     provider: dict,
     model_name: str,
     max_iter: int,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
 ) -> str:
     """Standardised CrewAI invocation. Wraps:
       - LLM construction via crewai_runner._build_crewai_llm
       - step_callback → WS broadcast (inception.probe / inception.delta)
       - asyncio.to_thread(crew.kickoff)
+
+    `temperature` and `max_tokens` are passed to the LLM construction
+    when set, letting per-intent sub-agents tune output style.
 
     Returns the final assistant text. Errors bubble up.
     """
@@ -75,7 +84,10 @@ async def run_crewai_agent(
     from services.crewai_runner import _build_crewai_llm
     from api.ws import manager
 
-    llm = _build_crewai_llm(provider, model_name)
+    llm = _build_crewai_llm(
+        provider, model_name,
+        temperature=temperature, max_tokens=max_tokens,
+    )
     agent = Agent(
         role=role, goal=goal, backstory=backstory, llm=llm,
         tools=tools or None,
