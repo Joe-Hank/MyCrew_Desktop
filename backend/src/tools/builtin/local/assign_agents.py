@@ -42,14 +42,29 @@ log = structlog.get_logger()
 _UNIVERSAL_TOOLS = ["emit_output", "write_file", "mkdir", "read_file_local", "list_directory_local"]
 
 _ROLE_TOOL_RULES: list[tuple[tuple[str, ...], list[str]]] = [
-    # Unity programming roles — add git for VCS workflow
+    # Unity programming roles — full MCP for Unity toolkit + git for VCS workflow.
+    # Tool names match src/tools/builtin/unity/__init__.TOOL_MAP keys.
     (("unity developer", "unity programmer", "client engineer", "技术美术",
       "technical artist", "unity 客户端", "gameplay"),
-     ["unity_read_file", "unity_write_file", "unity_delete_file",
-      "unity_list_files",
+     [
+      # Scripts (read / write / patch / validate Unity C#)
+      "create_script", "script_apply_edits", "apply_text_edits",
+      "validate_script", "delete_script", "find_in_file",
+      # Scene + GameObject + Components
+      "manage_scene", "find_gameobjects", "manage_gameobject", "manage_components",
+      # Asset + Prefab + UI
+      "manage_asset", "manage_prefabs", "manage_ui",
+      # Editor control + console
+      "manage_editor", "execute_menu_item", "read_console", "refresh_unity",
+      # Material / Texture for non-art programmers (e.g. shader tweaks)
+      "manage_material", "manage_texture",
+      # Docs (look up Unity API signatures before writing code)
+      "unity_docs", "unity_reflect",
+      # Git VCS
       "git_status", "git_log", "git_diff_unstaged",
       "git_add", "git_commit",
-      "tavily_search"]),
+      "tavily_search",
+     ]),
     # Blender / 3D / animation — full Blender toolset
     (("3d modeler", "modeller", "animator", "vfx artist",
       "blender", "rigger"),

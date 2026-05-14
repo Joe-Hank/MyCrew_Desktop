@@ -131,6 +131,8 @@ def _load_builtin_tools(tool_names: list[str], ctx: dict | None = None) -> list:
         from src.tools.builtin.local.workspace import make_workspace_tools
         from src.tools.builtin.local.emit_output import make_emit_output_tool
         from src.tools.builtin.mcp_git.tools import make_git_tools
+        # Unity MCP — pre-instantiated CrewStructuredTool instances
+        from src.tools.builtin.unity import TOOL_MAP as UNITY_TOOL_MAP
     except Exception as exc:
         log.warning("crewai_runner.tool_import_failed", error=str(exc))
         return instances
@@ -224,13 +226,18 @@ def _load_builtin_tools(tool_names: list[str], ctx: dict | None = None) -> list:
                 instances.append(static_registry[n]())
             elif n in bound_registry:
                 instances.append(bound_registry[n]())
+            elif n in UNITY_TOOL_MAP:
+                # Unity MCP tools are pre-instantiated singletons (stateless
+                # bridge wrappers — safe to share across agents).
+                instances.append(UNITY_TOOL_MAP[n])
             else:
                 log.info("crewai_runner.tool_skipped", tool=n, reason="no_builtin")
         except Exception as exc:
             log.warning("crewai_runner.tool_init_failed", tool=n, error=str(exc))
 
     # Unknown tools that user has in DB but no implementation: warn once
-    known = set(static_registry.keys()) | set(bound_registry.keys()) | SPECIAL_TOOLS
+    known = (set(static_registry.keys()) | set(bound_registry.keys())
+             | set(UNITY_TOOL_MAP.keys()) | SPECIAL_TOOLS)
     unknown = name_set - known
     if unknown:
         log.info("crewai_runner.unknown_tools", names=list(unknown))
