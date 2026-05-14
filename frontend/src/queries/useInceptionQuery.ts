@@ -73,6 +73,7 @@ export function useCreateInceptionSession() {
       thinking_mode?: boolean;
       mode?: "create" | "iterate";
       parent_project_id?: string;
+      template_id?: string;
     }) =>
       apiFetch("/inceptions/sessions", { method: "POST", body: JSON.stringify(data) }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["inception"] }),

@@ -47,6 +47,7 @@ const stateLabels: Record<string, string> = {
   ready: "未启动",
   running: "运行中",
   paused: "已暂停",
+  stalled: "卡死(自动暂停)",
   completed: "已完成",
   completed_with_warnings: "完成(警告)",
   completed_with_issues: "完成(问题)",

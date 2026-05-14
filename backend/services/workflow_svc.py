@@ -201,9 +201,21 @@ class WorkflowService:
                 self._outputs[project_id][task_id] = output.structured
 
                 await self._save_task_output(project_id, task_id, output)
+                # Clear any stale validation_errors from a prior failed
+                # run (retry path) so the UI doesn't show old red noise.
+                await crud.update_by_id("tasks", task_id, {
+                    "validation_errors": None,
+                })
                 events = harness.complete_task(task_id)
             else:
-                events = harness.validation_fail_task(task_id, output.validation_errors or [])
+                # Persist the error list so the UI / retry path / QA agent
+                # can show *why* the task failed validation — previously
+                # this info evaporated with the WS event.
+                err_list = output.validation_errors or []
+                await crud.update_by_id("tasks", task_id, {
+                    "validation_errors": json.dumps(err_list, ensure_ascii=False),
+                })
+                events = harness.validation_fail_task(task_id, err_list)
 
             await self._persist_task_state(project_id, task_id, harness)
             await self._persist_project_state(project_id, harness)

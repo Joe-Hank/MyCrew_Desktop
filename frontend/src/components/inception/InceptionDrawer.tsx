@@ -20,6 +20,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import TaskBlueprintEditor from "./TaskBlueprintEditor";
 import ChoicePanel, { type ChoiceOption } from "./ChoicePanel";
 import PathInputPanel from "./PathInputPanel";
+import { useTemplates } from "../../queries/useTemplatesQuery";
 
 function InceptionDrawer() {
   const navigate = useNavigate();
@@ -68,6 +69,16 @@ function InceptionDrawer() {
     prompt: string;
     context: string;
   } | null>(null);
+  // Confirmed picks for read-only history bubbles — once user confirms,
+  // the live panel disappears and a compact summary stays visible above
+  // the chat so they can see what they chose without scrolling.
+  const [confirmedHistory, setConfirmedHistory] = useState<
+    Array<
+      | { kind: "template"; prompt: string; value: string; label: string }
+      | { kind: "mode"; prompt: string; value: string; label: string }
+      | { kind: "path"; prompt: string; value: string }
+    >
+  >([]);
   // When a round finishes we snapshot it so the chat can render a collapsed
   // "已思考 Ns" badge + a short summary bubble in place of the verbose
   // assistant message that's about to land via session refetch.
@@ -204,6 +215,9 @@ function InceptionDrawer() {
   useEvent("inception.input_path", handleInputPath);
 
   // Confirm choice → POST /sessions/{id}/choices → clear pending panel
+  // and snapshot the pick into confirmedHistory so a compact summary
+  // bubble stays visible above the chat (the user shouldn't have to
+  // scroll back to remember which template they picked).
   async function submitChoice(payload: {
     template_id?: string; root_path?: string; mode?: string;
   }) {
@@ -215,8 +229,33 @@ function InceptionDrawer() {
         body: JSON.stringify(payload),
       });
     } finally {
-      if (payload.template_id || payload.mode) setPendingChoice(null);
-      if (payload.root_path) setPendingPath(null);
+      if (payload.template_id && pendingChoice) {
+        const opt = pendingChoice.options.find((o) => o.value === payload.template_id);
+        setConfirmedHistory((h) => [...h, {
+          kind: "template",
+          prompt: pendingChoice.prompt,
+          value: payload.template_id!,
+          label: opt?.label ?? payload.template_id!,
+        }]);
+        setPendingChoice(null);
+      } else if (payload.mode && pendingChoice) {
+        const opt = pendingChoice.options.find((o) => o.value === payload.mode);
+        setConfirmedHistory((h) => [...h, {
+          kind: "mode",
+          prompt: pendingChoice.prompt,
+          value: payload.mode!,
+          label: opt?.label ?? payload.mode!,
+        }]);
+        setPendingChoice(null);
+      }
+      if (payload.root_path && pendingPath) {
+        setConfirmedHistory((h) => [...h, {
+          kind: "path",
+          prompt: pendingPath.prompt,
+          value: payload.root_path!,
+        }]);
+        setPendingPath(null);
+      }
     }
   }
 
@@ -569,12 +608,45 @@ function InceptionDrawer() {
                 && chat.pending.length === 0
                 && !chat.thinking
                 && !completedRound ? (
-                <div
-                  className="flex h-full items-center justify-center text-sm"
-                  style={{ color: "var(--color-ink-ghost)" }}
-                >
-                  {selectedLlm ? "描述你的项目想法，AI 会帮你拆解任务..." : "请先在上方选择 LLM"}
-                </div>
+                !selectedLlm ? (
+                  <div
+                    className="flex h-full items-center justify-center text-sm"
+                    style={{ color: "var(--color-ink-ghost)" }}
+                  >
+                    请先在上方选择 LLM
+                  </div>
+                ) : !activeSessionId ? (
+                  // Pre-session template picker — user hasn't even created
+                  // an inception session yet. Show template cards directly
+                  // so the user doesn't have to type a dummy message just
+                  // to trigger the choice flow. On confirm we create the
+                  // session with template_id pre-baked.
+                  <InitialTemplateChoice
+                    onConfirm={async (templateId) => {
+                      if (!selectedLlm) return;
+                      const fullLlmId = selectedModel
+                        ? `${selectedLlm}:${selectedModel}`
+                        : selectedLlm;
+                      const res = await createSession.mutateAsync({
+                        llm_id: fullLlmId,
+                        thinking_mode: thinking,
+                        mode: "create",
+                        template_id: templateId,
+                      });
+                      if (res.ok && res.data) {
+                        const id = (res.data as { id: string }).id;
+                        setActiveSession(id);
+                      }
+                    }}
+                  />
+                ) : (
+                  <div
+                    className="flex h-full items-center justify-center text-sm"
+                    style={{ color: "var(--color-ink-ghost)" }}
+                  >
+                    描述你的项目想法，AI 会帮你拆解任务...
+                  </div>
+                )
               ) : (
                 <>
                   {visibleMessages.map((msg) => (
@@ -702,6 +774,35 @@ function InceptionDrawer() {
                 </>
               )}
             </div>
+
+            {/* Read-only history of confirmed picks — one compact bubble
+                per template / mode / path choice. Stays visible above the
+                textarea so the user never has to scroll back to see what
+                they picked. */}
+            {confirmedHistory.length > 0 && (
+              <div className="space-y-1 px-4 pt-2">
+                {confirmedHistory.map((h, i) => (
+                  h.kind === "path" ? (
+                    <PathInputPanel
+                      key={i}
+                      prompt={h.prompt}
+                      onConfirm={() => undefined}
+                      readOnly
+                      confirmedPath={h.value}
+                    />
+                  ) : (
+                    <ChoicePanel
+                      key={i}
+                      prompt={h.prompt}
+                      options={[{ value: h.value, label: h.label }]}
+                      onConfirm={() => undefined}
+                      readOnly
+                      confirmedValue={h.value}
+                    />
+                  )
+                ))}
+              </div>
+            )}
 
             {/* Pending structured pick (template) or path-input prompt.
                 Renders above the textarea; user confirms to unlock chat. */}
@@ -949,6 +1050,44 @@ function HistoryDropdown({
           </button>
         ))
       )}
+    </div>
+  );
+}
+
+/** Pre-session template picker — shown when the drawer is open but no
+ *  inception session exists yet (the "新建项目" flow's very first screen).
+ *  Skips the "type a message → backend emits choices" round-trip so the
+ *  user lands on something immediately. */
+function InitialTemplateChoice({
+  onConfirm,
+}: {
+  onConfirm: (templateId: string) => void;
+}) {
+  const { data: templates, isLoading } = useTemplates();
+  if (isLoading || !templates) {
+    return (
+      <div
+        className="flex h-full items-center justify-center text-sm"
+        style={{ color: "var(--color-ink-ghost)" }}
+      >
+        加载模板中…
+      </div>
+    );
+  }
+  const options: ChoiceOption[] = templates.map((t) => ({
+    value: t.id,
+    label: t.label,
+    description: t.description,
+  }));
+  return (
+    <div className="flex h-full items-start justify-center p-2">
+      <div className="w-full max-w-2xl">
+        <ChoicePanel
+          prompt="你想做什么类型的 Unity 游戏？选一个模板，我会基于它的目录结构来设计任务。"
+          options={options}
+          onConfirm={onConfirm}
+        />
+      </div>
     </div>
   );
 }

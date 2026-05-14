@@ -14,6 +14,10 @@ class SessionCreate(BaseModel):
     # 自动继承到新项目行）
     mode: str = "create"
     parent_project_id: str | None = None
+    # Optional: frontend can pre-bake the template pick (drawer-initial
+    # ChoicePanel resolves before session create) so the user doesn't
+    # have to confirm a template a second time.
+    template_id: str | None = None
 
 
 class SendMessage(BaseModel):
@@ -51,6 +55,7 @@ async def create_session(body: SessionCreate):
     data = await inception_svc.create_session(
         body.llm_id, body.thinking_mode,
         mode=body.mode, parent_project_id=body.parent_project_id,
+        template_id=body.template_id,
     )
     return {"ok": True, "data": data}
 

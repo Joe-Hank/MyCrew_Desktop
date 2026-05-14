@@ -50,10 +50,41 @@ class CreateWorkflowArgs(BaseModel):
     tasks: list[TaskSpec] = Field(..., description="Ordered task list")
 
 
+# Canonical QA detail — injected into every final_qa task (overwrites any
+# detail Plan Maker may have written) so QA always knows to read .mycrew/
+# and verify each upstream task's claimed file_path actually exists.
+# Centralised here so Plan Maker's prompt changes don't leak through.
+QA_TASK_DETAIL = """对整个项目进行最终质量审查 — 必须基于真实落盘文件，不要相信上游的描述。
+
+执行步骤：
+1. 调 `list_directory_local` 列出 `.mycrew/tasks/` 下的所有任务说明
+2. 对每个上游任务：
+   - 调 `read_file_local` 读 `.mycrew/tasks/task_NN_*.md` 了解 acceptance_notes（验收要点）
+   - 对该任务输出的每个 `file_path`，调 `read_file_local` 验证文件**确实存在**
+   - 若存在，抽样读 100~300 行检查内容是否契合 acceptance_notes
+3. 把任何"声称已写但磁盘上找不到"的文件列入 issues，verdict 至少 warn；
+   有缺失关键交付物时 verdict=fail
+4. summary 中明确说明：检查了多少文件、有多少缺失、有多少内容不达标
+
+调 `emit_output` 提交 {verdict, overall_score, issues, summary}。"""
+
+
 def _normalize_tasks(tasks: list[dict]) -> list[dict]:
-    """Ensure a final_qa task exists; auto-append one depending on all terminal nodes."""
+    """Ensure a final_qa task exists; auto-append one depending on all terminal nodes.
+
+    Also forces the canonical QA detail onto whichever task is final_qa —
+    Plan Maker tends to write vague verification instructions that miss
+    the .mycrew/ + file-existence check. Centralizing here means the QA
+    contract is enforced regardless of what Plan Maker wrote.
+    """
     out = [dict(t) for t in tasks]
-    if any(t.get("kind") == "final_qa" for t in out):
+
+    qa_idx = next(
+        (i for i, t in enumerate(out) if t.get("kind") == "final_qa"),
+        None,
+    )
+    if qa_idx is not None:
+        out[qa_idx]["detail"] = QA_TASK_DETAIL
         return out
 
     terminal = [
@@ -62,7 +93,7 @@ def _normalize_tasks(tasks: list[dict]) -> list[dict]:
     ]
     out.append({
         "title": "质量检查",
-        "detail": "对整个项目进行最终质量审查",
+        "detail": QA_TASK_DETAIL,
         "deps": terminal,
         "kind": "final_qa",
         "output_schema": {

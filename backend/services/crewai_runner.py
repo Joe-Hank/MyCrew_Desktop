@@ -183,6 +183,7 @@ def _load_builtin_tools(tool_names: list[str], ctx: dict | None = None) -> list:
         "emit_output": lambda: make_emit_output_tool(
             ctx.get("task_id") or "",
             ctx.get("output_schema") or {},
+            ctx.get("project_root"),
         ),
         # git
         "git_status": lambda: _get_git()["git_status"],

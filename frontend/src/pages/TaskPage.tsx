@@ -196,13 +196,13 @@ function TaskPage() {
         )}
 
         {drawer?.kind === "view_io" && (
-          <div className="w-[340px]">
-            <IoViewerDrawer
-              task={drawer.task}
-              initialDirection={drawer.direction}
-              onClose={() => setDrawer(null)}
-            />
-          </div>
+          // No wrapper width — IoViewerDrawer manages its own width via
+          // usePrefsStore so the user-dragged size sticks across opens.
+          <IoViewerDrawer
+            task={drawer.task}
+            initialDirection={drawer.direction}
+            onClose={() => setDrawer(null)}
+          />
         )}
       </div>
 

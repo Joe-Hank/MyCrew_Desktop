@@ -311,6 +311,18 @@ async def _render_mode_context(session: dict) -> str:
             "**复用原则**: 默认引用现有 Assets/Scripts、Prefabs、Scenes、",
             "ScriptableObjects 等已有资产，仅在必须时新建。设计任务时优先",
             "考虑'扩展/修订'而非'从零重写'。",
+            "",
+            "**你已获得读文件工具** (仅迭代模式启用):",
+            "- `list_directory_local(path)` — 列项目下任意目录的子项 (path='.' 看根)",
+            "- `read_file_local(path)` — 读单个文件内容（含截断）",
+            "",
+            "**强烈建议先扫一遍再设计**：典型路径",
+            "  1. list_directory_local('.') → 看顶层有什么",
+            "  2. list_directory_local('Assets/Scripts') → 看现有脚本架构",
+            "  3. 对关键脚本调 read_file_local 看接口签名/数据结构",
+            "  4. 再设计任务，task detail 里点名现有文件 → 让执行 Agent 在此",
+            "     基础上 modify 或新增",
+            "扫描预算：list 最多 5 次、read 最多 8 次，避免 context 爆。",
         ]
         return "\n".join(lines)
 

@@ -32,6 +32,10 @@ interface PrefsState {
   // mid-session and across an app restart).
   lastProjectId: string | null;
 
+  // Width (px) of the IO viewer side drawer on the task page. Persisted
+  // so the user's preferred reading width survives the session.
+  ioViewerWidth: number;
+
   // Setters
   setInceptionLlm: (v: string | null) => void;
   setInceptionModel: (v: string | null) => void;
@@ -41,6 +45,7 @@ interface PrefsState {
   setTeamActiveTab: (v: TeamTab) => void;
   setSettingsActiveTab: (v: SettingsTab) => void;
   setLastProjectId: (v: string | null) => void;
+  setIoViewerWidth: (v: number) => void;
 }
 
 export const usePrefsStore = create<PrefsState>()(
@@ -54,6 +59,7 @@ export const usePrefsStore = create<PrefsState>()(
       teamActiveTab: "agents",
       settingsActiveTab: "llm",
       lastProjectId: null,
+      ioViewerWidth: 380,
 
       setInceptionLlm: (v) => set({ inceptionLlm: v }),
       setInceptionModel: (v) => set({ inceptionModel: v }),
@@ -63,6 +69,11 @@ export const usePrefsStore = create<PrefsState>()(
       setTeamActiveTab: (v) => set({ teamActiveTab: v }),
       setSettingsActiveTab: (v) => set({ settingsActiveTab: v }),
       setLastProjectId: (v) => set({ lastProjectId: v }),
+      // Clamp 280-1200 — below 280 the JSON tree becomes unreadable;
+      // above 1200 the canvas behind gets squeezed off-screen.
+      setIoViewerWidth: (v) => set({
+        ioViewerWidth: Math.min(1200, Math.max(280, Math.round(v))),
+      }),
     }),
     { name: "mycrew-prefs", version: 1 },
   ),

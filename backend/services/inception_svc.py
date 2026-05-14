@@ -82,6 +82,7 @@ class InceptionService:
         *,
         mode: str = "create",
         parent_project_id: str | None = None,
+        template_id: str | None = None,
     ) -> dict:
         """Create an inception session.
 
@@ -97,6 +98,13 @@ class InceptionService:
             "indexed_paths": "[]",
             "mode": mode,
         }
+        # Frontend may pre-bake the template pick (drawer-initial choice
+        # panel) so Plan Maker can run on the very first user message
+        # without re-asking. Validate against the catalog before storing.
+        if template_id:
+            from data.unity_templates import get_template
+            if get_template(template_id):
+                session_data["template_id"] = template_id
 
         # Iteration entry — create the new project row up front, inheriting
         # root_path / template_id / name (with iteration suffix) from parent.
@@ -551,6 +559,7 @@ class InceptionService:
         from src.tools.builtin.local.create_workflow import make_create_workflow_tool
         from src.tools.builtin.local.assign_agents import make_assign_agents_tool
         from src.tools.builtin.local.write_blueprint import make_write_blueprint_tool
+        from src.tools.builtin.local.workspace import make_workspace_tools
         from bootstrap.seed_plan_maker import render_plan_maker_backstory
 
         await self._probe(session_id, "enter")
@@ -605,6 +614,26 @@ class InceptionService:
         configured_max = int(plan_maker.get("max_retry") or 0)
         max_iter = max(5, configured_max)
 
+        # Iteration mode: give Plan Maker read access to the existing
+        # project workspace so it can actually plan around existing assets
+        # ("默认复用" requires knowing what's there). Bound to the child
+        # iteration project's root_path (inherited from parent on session
+        # create). Creation mode gets neither — no root_path exists yet.
+        extra_tools: list = []
+        if (session.get("mode") or "").lower() in ("iterate", "iterate_external"):
+            project_id = session.get("project_id")
+            if project_id:
+                project_row = await crud.get_by_id("projects", project_id)
+                root = project_row.get("root_path") if project_row else None
+                if root:
+                    ws = make_workspace_tools(root)
+                    extra_tools.extend([
+                        ws["read_file_local"],
+                        ws["list_directory_local"],
+                    ])
+                    await self._probe(session_id, "iterate_workspace_tools_bound",
+                                      root=root)
+
         agent = Agent(
             role=plan_maker.get("role", "Plan Maker"),
             goal=plan_maker.get("goal", ""),
@@ -614,6 +643,7 @@ class InceptionService:
                 make_create_workflow_tool(session_id),
                 make_assign_agents_tool(session_id),
                 make_write_blueprint_tool(session_id),
+                *extra_tools,
             ],
             max_iter=max_iter,
             verbose=False,

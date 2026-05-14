@@ -1,6 +1,5 @@
 import { useState } from "react";
-// TODO: install @tauri-apps/plugin-dialog (Cargo.toml + tauri.conf.json + main.rs)
-// to enable a native folder-picker. For now we offer a text-input only.
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
 interface Props {
   prompt: string;
@@ -17,6 +16,19 @@ function PathInputPanel({
   prompt, onConfirm, readOnly = false, confirmedPath,
 }: Props) {
   const [path, setPath] = useState(confirmedPath ?? "");
+
+  async function pickFolder() {
+    try {
+      const result = await openDialog({
+        directory: true,
+        multiple: false,
+        title: "选择 Unity 项目根目录",
+      });
+      if (typeof result === "string") setPath(result);
+    } catch {
+      /* user cancelled or dialog plugin not loaded — fall through */
+    }
+  }
 
   if (readOnly) {
     return (
@@ -66,12 +78,17 @@ function PathInputPanel({
             color: "var(--color-ink)",
           }}
         />
-      </div>
-      <div
-        className="mt-2 text-[11px]"
-        style={{ color: "var(--color-ink-faint)" }}
-      >
-        粘贴或输入项目根目录绝对路径（暂无文件选择器，下个版本接入）。
+        <button
+          onClick={pickFolder}
+          className="rounded-md px-3 py-1.5 text-xs"
+          style={{
+            backgroundColor: "var(--color-card-alt)",
+            border: "1px solid var(--color-border-soft)",
+            color: "var(--color-ink-label)",
+          }}
+        >
+          浏览…
+        </button>
       </div>
 
       {path.trim() && (
