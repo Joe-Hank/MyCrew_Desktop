@@ -1,12 +1,20 @@
 import { useCrews, useDeleteCrew, useAgents, type Crew } from "../../queries/useTeamQuery";
 import RowActionsMenu from "../common/RowActionsMenu";
 
-// Tuned column ratios: name + members are the only variable cols and
-// share ~3/5 of the row each; the toggle column hugs its 60-px chip
-// (80px gives ~10px breathing room on each side) and actions is just
-// the ⋯ icon (40px is plenty). Old 1.4fr+2fr starved the right side and
-// floated 过程控制 + 操作 to the far edge of the table.
-const GRID = "grid-cols-[1fr_1.5fr_80px_40px]";
+// NO fr-stretching — fr columns would soak up free space and float the
+// process toggle to the far edge again. Instead bound name/members with
+// max-width and let the row leave whitespace on the right so the toggle
+// sits visually close to the members column.
+//
+//   name:    140-220px (member-name-ish)
+//   members: 180-380px (caps before it could push toggle off-center)
+//   process: 80px      (snug to the toggle chip)
+//   actions: 40px      (⋯ icon only)
+//
+// Max total ≈ 720px + 24px gaps. On a 1000px-wide panel that leaves
+// ~250px right-side whitespace — intentional, so the toggle reads as
+// "with the data" not "isolated at the edge".
+const GRID = "grid-cols-[minmax(140px,220px)_minmax(180px,380px)_80px_40px]";
 
 function CrewsTable({ onEdit }: { onEdit: (c: Crew) => void }) {
   const { data: crews, isLoading } = useCrews();
