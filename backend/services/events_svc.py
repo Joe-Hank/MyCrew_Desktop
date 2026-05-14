@@ -36,6 +36,32 @@ EVENT_PER_PROJECT_CAP = 10_000
 JANITOR_INTERVAL_SECONDS = 6 * 60 * 60   # 6h
 
 
+# Event types we deliberately DON'T persist — they're either pure UI
+# streaming with no archival value (the canonical form is already
+# persisted elsewhere) or high-frequency probes that would dominate the
+# table. Storage audit (2026-05-14) found these three were responsible
+# for the bulk of growth without contributing to "what happened" reads.
+#
+#   inception.delta      — per-token LLM streaming chunks. The full
+#                          assistant message is persisted via
+#                          inception.message at end of round.
+#   inception.probe      — debug-level checkpoints for the LogDrawer
+#                          subwindow only.
+#   llm.quota_changed    — periodic poll output; full quota always
+#                          available via GET /llm/quota.
+#   agent.output         — per-step extracted text; the final output
+#                          payload is captured by emit_output + saved
+#                          to output/<task>/out.json. Keeping the live
+#                          step trail visible in the LogDrawer is
+#                          enough.
+SKIP_PERSIST_EVENT_TYPES = frozenset({
+    "inception.delta",
+    "inception.probe",
+    "llm.quota_changed",
+    "agent.output",
+})
+
+
 async def record_event(
     event_type: str,
     payload: dict[str, Any] | None = None,
@@ -43,7 +69,13 @@ async def record_event(
     actor: str | None = None,
 ) -> None:
     """Insert one event row. Cheap and fire-and-forget; callers should
-    never await something else just to wait on this."""
+    never await something else just to wait on this.
+
+    Events listed in SKIP_PERSIST_EVENT_TYPES are dropped silently — they
+    still broadcast over WS for live UI, but never hit disk.
+    """
+    if event_type in SKIP_PERSIST_EVENT_TYPES:
+        return
     payload = payload or {}
     project_id = (
         payload.get("project_id") if isinstance(payload, dict) else None

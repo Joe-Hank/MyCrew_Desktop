@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useLlmProviders, type LlmProvider } from "../queries/useLlmQuery";
 import { useMcpServers } from "../queries/useMcpQuery";
+import { useStorageUsage, formatBytes } from "../queries/useStorageQuery";
 import { usePrefsStore, type SettingsTab } from "../stores/usePrefsStore";
 import PillTabs from "../components/common/PillTabs";
 import LlmTable from "../components/settings/LlmTable";
@@ -64,8 +65,44 @@ function SettingsPage() {
         {activeTab === "permission" && <PermissionTable />}
       </div>
 
+      {/* Footer: non-system storage usage stats */}
+      <StorageFooter />
+
       {/* Editor drawer */}
       <SettingsEditorDrawer target={editor} onClose={() => setEditor(null)} />
+    </div>
+  );
+}
+
+/** Subtle gray footer showing how much non-system data is on disk —
+ *  project rows + tasks + inception history + events log + output files.
+ *  System config (LLM keys, MCP setup, etc.) is intentionally excluded
+ *  per spec. */
+function StorageFooter() {
+  const { data, isLoading } = useStorageUsage();
+  if (isLoading || !data) {
+    return (
+      <div
+        className="pt-2 text-center"
+        style={{ color: "#999", fontSize: "small" }}
+      >
+        数据占用：计算中…
+      </div>
+    );
+  }
+  const b = data.breakdown;
+  return (
+    <div
+      className="pt-2 text-center"
+      style={{ color: "#999", fontSize: "small" }}
+      title={data.notes}
+    >
+      数据占用：{formatBytes(data.non_system_total_bytes)}
+      {" · "}
+      项目 {formatBytes(b.projects_and_tasks.bytes)}
+      {" / 立项 "}{formatBytes(b.inception_history.bytes)}
+      {" / 日志 "}{formatBytes(b.events_log.bytes)}
+      {" / 输出 "}{formatBytes(b.output_files.bytes)}
     </div>
   );
 }
