@@ -1,17 +1,19 @@
 """Idempotent Plan Maker agent prompt seeding.
 
-Plan Maker is the special CrewAI agent that turns a user's project idea
-into a concrete workflow (Project + Tasks). It needs a clear, MCP-aware
-prompt and access to the `create_workflow` tool.
+**DEPRECATED**: This module's PROMPT TEMPLATE is no longer used at
+runtime. Plan Maker 2.0 lives in `backend/agents/` (Dify-style intent
+router + 5 specialised sub-agents, each with its own minimal prompt).
 
-This module:
-  1. Ensures a row exists in `agents` with role='Plan Maker'.
-  2. Computes a hash of the current prompt template + sets it on the
-     row only if the hash differs from `app_settings.plan_maker_prompt_version`.
-     This makes the seeder safe to run on every startup without
-     clobbering rows that are already up-to-date.
-  3. Ensures the row's `tool_ids` JSON array contains the
-     `create_workflow` tool id.
+We still seed the `agents` row so:
+  - older inception_sessions that reference Plan Maker as their
+    "current agent" don't break
+  - the team page still shows Plan Maker as a known agent
+  - the `_render_mode_context` / `_filter_agents_for_prompt` /
+    `_TEMPLATE_AGENT_KEYWORDS` helpers are imported by the new
+    sub-agents (create_new, iterate_existing)
+
+When changing Plan Maker behavior, prefer editing files under
+`backend/agents/` over this module.
 """
 from __future__ import annotations
 

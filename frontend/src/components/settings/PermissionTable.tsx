@@ -1,4 +1,9 @@
 import { usePermissions, useUpdatePermissions } from "../../queries/useConfigQuery";
+import {
+  useComplianceMode,
+  useSetComplianceMode,
+  type ComplianceMode,
+} from "../../queries/useSettingsQuery";
 import QueryErrorState from "../common/QueryErrorState";
 
 const PERMISSION_INFO: Record<string, { label: string; desc: string }> = {
@@ -38,6 +43,10 @@ function PermissionTable() {
 
   return (
     <div className="space-y-3">
+      {/* Compliance mode toggle — gates whether Plan Maker refuses
+          potentially-violating content. Default 自由（free）。 */}
+      <ComplianceModeRow />
+
       <div
         className="space-y-1.5 rounded-lg px-4 py-2.5 text-xs leading-relaxed"
         style={{
@@ -98,6 +107,83 @@ function PermissionTable() {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+/** Compliance mode row — pill segmented control matching ProcessToggle
+ *  pattern (sliding white indicator + dimmed inactive label). 自由 is the
+ *  default; 和谐 makes Plan Maker refuse violating content. */
+function ComplianceModeRow() {
+  const { data: mode = "free" } = useComplianceMode();
+  const setMut = useSetComplianceMode();
+  const isHarmonious = mode === "harmonious";
+  const SEG_W = 56;
+
+  function pick(target: ComplianceMode) {
+    if (target !== mode) setMut.mutate(target);
+  }
+
+  return (
+    <div
+      className="flex items-center justify-between rounded-lg px-4 py-3"
+      style={{
+        backgroundColor: "var(--color-card)",
+        border: "1px solid var(--color-border-soft)",
+      }}
+    >
+      <div className="flex-1">
+        <div
+          className="text-sm font-medium"
+          style={{ color: "var(--color-ink-soft)" }}
+        >
+          合规模式
+        </div>
+        <div className="text-[11px]" style={{ color: "var(--color-ink-faint)" }}>
+          自由：允许任意创作；和谐：拦截涉嫌违法/政治/色情/暴力的请求
+        </div>
+      </div>
+      <span
+        role="radiogroup"
+        className="relative inline-flex items-center rounded-full p-0.5"
+        style={{
+          width: SEG_W * 2 + 4,
+          height: 26,
+          backgroundColor: "var(--color-surface-alt)",
+          opacity: setMut.isPending ? 0.6 : 1,
+        }}
+      >
+        <span
+          className="absolute top-0.5 left-0.5 rounded-full bg-white shadow-sm transition-transform duration-200"
+          style={{
+            width: SEG_W,
+            height: 22,
+            transform: isHarmonious ? `translateX(${SEG_W}px)` : "translateX(0)",
+          }}
+        />
+        <button
+          onClick={() => pick("free")}
+          disabled={setMut.isPending}
+          className="relative z-10 flex items-center justify-center text-xs font-medium transition-colors"
+          style={{
+            width: SEG_W,
+            color: isHarmonious ? "var(--color-ink-disabled)" : "var(--color-ink)",
+          }}
+        >
+          自由
+        </button>
+        <button
+          onClick={() => pick("harmonious")}
+          disabled={setMut.isPending}
+          className="relative z-10 flex items-center justify-center text-xs font-medium transition-colors"
+          style={{
+            width: SEG_W,
+            color: isHarmonious ? "var(--color-ink)" : "var(--color-ink-disabled)",
+          }}
+        >
+          和谐
+        </button>
+      </span>
     </div>
   );
 }

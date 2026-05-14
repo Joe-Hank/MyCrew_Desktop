@@ -385,10 +385,15 @@ class InceptionService:
         if guard is not None:
             return guard
 
-        # 2. Plan Maker path (preferred)
-        plan_maker = await self._get_plan_maker_agent()
-        if plan_maker is not None:
-            return await self._run_plan_maker(session_id, session, content, plan_maker)
+        # 2. Plan Maker 2.0 — Dify-style router (compliance gate +
+        # intent classifier + 5 sub-agents). The old monolithic Plan
+        # Maker agent row is kept in DB for back-compat but no longer
+        # executed; `_run_plan_maker` is dead code (kept for reference).
+        try:
+            return await self._route_via_new_router(session_id, session, content)
+        except Exception as exc:  # noqa: BLE001 — fall back to legacy on infra failure
+            log.warning("inception.router_failed_using_legacy",
+                        session_id=session_id, error=str(exc))
 
         # 3. Legacy fallback — direct LLM streaming
         log.warning("inception.plan_maker_missing_using_legacy",
@@ -545,6 +550,50 @@ class InceptionService:
         await self._probe(session_id, "early_exit_workflow_already_created",
                           reason=reason)
         return {"ai_text": confirmation, "project_id": bound["project_id"]}
+
+    async def _route_via_new_router(
+        self, session_id: str, session: dict, content: str,
+    ) -> dict:
+        """Dispatch via agents/router.py (Plan Maker 2.0) + persist
+        assistant reply + broadcast. Used for all non-legacy sessions."""
+        from agents.router import dispatch
+
+        await self._probe(session_id, "router_enter",
+                          content_chars=len(content))
+        result = await dispatch(content, session)
+        await self._probe(
+            session_id, "router_result",
+            decision=result.decision,
+            intent=result.intent or "—",
+        )
+
+        reply = (result.reply_text or "").strip() or "（无回复）"
+
+        # Persist assistant message + broadcast
+        await crud.insert("inception_messages", {
+            "session_id": session_id,
+            "role": "assistant",
+            "content": reply,
+        }, id_prefix="msg_")
+        await manager.broadcast("inception.message", {
+            "session_id": session_id,
+            "role": "assistant",
+            "content": reply,
+        })
+
+        # If router cleared the session (abort_or_restart), broadcast a
+        # session-state event so the frontend re-shows InitialTemplateChoice.
+        if (result.metadata or {}).get("sub_agent") == "abort_or_restart":
+            await manager.broadcast("inception.session_reset", {
+                "session_id": session_id,
+            })
+
+        return {
+            "ai_text": reply,
+            "decision": result.decision,
+            "intent": result.intent,
+            "project_id": result.project_id,
+        }
 
     async def _enforce_choice_flow(
         self, session_id: str, session: dict,
