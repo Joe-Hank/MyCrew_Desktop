@@ -112,8 +112,14 @@ function ProjectCard({ project }: { project: Project }) {
 
   const cardState = computeCardState(project);
   const progress = project.progress_pct ?? 0;
-  const isRunning = project.state === "running";
-  const isStalled = project.state === "stalled";
+  // "Truly running" requires BOTH the state string AND is_running=true.
+  // If is_running is false while state is still "running", the project
+  // is between the orphan-reconcile sweeps — treat as stalled visually.
+  const isRunning =
+    project.state === "running" && !!project.is_running;
+  const isStalled =
+    project.state === "stalled" ||
+    (project.state === "running" && !project.is_running);
   // "Loaded" = user has opened this project's task page during the
   // current session. Persisted via usePrefsStore.lastProjectId.
   const lastProjectId = usePrefsStore((s) => s.lastProjectId);

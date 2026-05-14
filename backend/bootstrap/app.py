@@ -77,8 +77,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         })
     clear_last_state()
 
-    # STEP 6: start stall-detection watchdog
-    from services.watchdog_svc import run_watchdog
+    # STEP 6: start stall-detection watchdog + reconcile orphan-running
+    # projects from previous run (state=running but no live harness now).
+    # Without this, a project that crashed mid-run during a previous
+    # session shows blue "in progress" forever.
+    from services.watchdog_svc import run_watchdog, reconcile_all_orphans_on_startup
+    await reconcile_all_orphans_on_startup()
     watchdog_task = asyncio.create_task(run_watchdog())
     log.info("startup.watchdog_started")
 

@@ -80,14 +80,36 @@ class WorkflowService:
         log.info("workflow.started", project_id=project_id)
 
     async def pause(self, project_id: str) -> None:
-        harness = self._get_harness(project_id)
-        events = harness.pause()
+        # Live-harness path — normal in-session pause
+        harness = self._active.get(project_id)
+        if harness is not None:
+            events = harness.pause()
+            await self._persist_project_state(project_id, harness)
+            await self._persist_all_task_states(project_id, harness)
+            await event_bus.publish_all(events)
+            log.info("workflow.paused", project_id=project_id)
+            return
 
-        await self._persist_project_state(project_id, harness)
-        await self._persist_all_task_states(project_id, harness)
-        await event_bus.publish_all(events)
-
-        log.info("workflow.paused", project_id=project_id)
+        # Orphan path — project was running before backend restart, so
+        # there's no harness in memory. Reconcile directly: stop scheduling,
+        # flip state to paused. Without this fallback the pause button
+        # silently 404s on any project that survived a backend restart.
+        from infra.repo import crud
+        project = await crud.get_by_id("projects", project_id)
+        if not project:
+            raise KeyError(project_id)
+        # Mark any still-running task rows as paused so the UI matches
+        running_tasks = await crud.get_all(
+            "tasks", "project_id = ? AND status = ?", (project_id, "running"),
+        )
+        for t in running_tasks:
+            await crud.update_by_id("tasks", t["id"], {"status": "paused"})
+        await crud.update_by_id("projects", project_id, {
+            "state": "paused",
+            "is_running": 0,
+        })
+        log.info("workflow.paused_orphan",
+                 project_id=project_id, tasks_flipped=len(running_tasks))
 
     async def resume(self, project_id: str) -> None:
         harness = self._get_harness(project_id)
@@ -103,15 +125,39 @@ class WorkflowService:
         log.info("workflow.resumed", project_id=project_id)
 
     async def abort(self, project_id: str, reason: str = "") -> None:
-        harness = self._get_harness(project_id)
-        events = harness.abort(reason)
+        # Live-harness path
+        harness = self._active.get(project_id)
+        if harness is not None:
+            events = harness.abort(reason)
+            await self._persist_project_state(project_id, harness)
+            await self._persist_all_task_states(project_id, harness)
+            await event_bus.publish_all(events)
+            self._cleanup_project(project_id)
+            log.info("workflow.aborted",
+                     project_id=project_id, reason=reason)
+            return
 
-        await self._persist_project_state(project_id, harness)
-        await self._persist_all_task_states(project_id, harness)
-        await event_bus.publish_all(events)
-
-        self._cleanup_project(project_id)
-        log.info("workflow.aborted", project_id=project_id, reason=reason)
+        # Orphan path — same idea as pause(): user wants to give up on a
+        # project that survived a backend restart. Without this fallback
+        # the abort button 404s and the project stays "stuck" forever.
+        from infra.repo import crud
+        project = await crud.get_by_id("projects", project_id)
+        if not project:
+            raise KeyError(project_id)
+        non_terminal = await crud.get_all(
+            "tasks",
+            "project_id = ? AND status NOT IN ('done','failed','aborted','validation_failed')",
+            (project_id,),
+        )
+        for t in non_terminal:
+            await crud.update_by_id("tasks", t["id"], {"status": "aborted"})
+        await crud.update_by_id("projects", project_id, {
+            "state": "aborted",
+            "is_running": 0,
+        })
+        log.info("workflow.aborted_orphan",
+                 project_id=project_id, tasks_aborted=len(non_terminal),
+                 reason=reason)
 
     async def retry_task(self, project_id: str, task_id: str) -> None:
         harness = self._get_harness(project_id)

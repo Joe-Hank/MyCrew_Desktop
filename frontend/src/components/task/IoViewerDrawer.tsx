@@ -161,11 +161,16 @@ function IoViewerDrawer({
               结构化数据
             </h4>
             <pre
-              className="overflow-x-auto rounded p-3 text-[12px] leading-relaxed"
+              className="rounded p-3 text-[12px] leading-relaxed"
               style={{
                 backgroundColor: "var(--color-card-alt)",
                 color: "var(--color-ink)",
                 border: "1px solid var(--color-border-soft)",
+                // Wrap long lines to the drawer's current width — avoids
+                // horizontal scrolling and tracks the user-dragged width.
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+                overflowWrap: "anywhere",
               }}
             >
               {JSON.stringify(io.structured, null, 2)}
@@ -182,11 +187,14 @@ function IoViewerDrawer({
               原始输出
             </h4>
             <pre
-              className="whitespace-pre-wrap break-words rounded p-3 text-[12px] leading-relaxed"
+              className="rounded p-3 text-[12px] leading-relaxed"
               style={{
                 backgroundColor: "var(--color-card-alt)",
                 color: "var(--color-ink)",
                 border: "1px solid var(--color-border-soft)",
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+                overflowWrap: "anywhere",
               }}
             >
               {io.raw}

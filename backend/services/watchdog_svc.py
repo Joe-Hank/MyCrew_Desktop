@@ -58,18 +58,31 @@ def _parse_iso(s: str | None) -> datetime | None:
 
 
 async def _check_one_project(project_id: str, stall_seconds: int) -> None:
-    """Scan a single project's running tasks; stall any that are over budget."""
+    """Scan a single project's running tasks; stall any that are over budget.
+
+    Also detects "orphan-running" — project row says state=running but
+    NO task is actually in RUNNING state (typically because an older
+    harness bug left the project hanging after the last task failed).
+    These get auto-marked STALLED so the UI shows red instead of a
+    forever-pulsing blue card.
+    """
     # Lazy-import workflow_svc to avoid circular at module load
     from services.workflow_svc import workflow_svc
 
     harness = workflow_svc._active.get(project_id)
+
+    # Orphan-running detection: no live harness in memory but DB says
+    # is_running=1. Means backend was restarted mid-run OR the project
+    # was finalized incorrectly. Run a fresh scan and reconcile.
     if harness is None:
-        # Project was completed/aborted since the last scan — nothing to do.
+        await _reconcile_orphan_project(project_id)
         return
 
     tasks = await crud.get_all("tasks", "project_id = ? AND status = ?",
                                 (project_id, "running"))
     if not tasks:
+        # No RUNNING task but harness exists — probably mid-transition
+        # or a race; let it self-heal next tick.
         return
 
     now = datetime.now(timezone.utc)
@@ -105,6 +118,90 @@ async def _check_one_project(project_id: str, stall_seconds: int) -> None:
             fut = workflow_svc._run_tasks.get(key)
             if fut and not fut.done():
                 fut.cancel()
+
+
+async def _reconcile_orphan_project(project_id: str) -> None:
+    """A project flagged is_running=1 but with no live harness — figure
+    out what really happened from task states and update the project row.
+
+    Logic:
+      - all tasks terminal      → run finalize (sets COMPLETED* / etc.)
+      - some tasks terminal-fail (failed/validation_failed/aborted) but
+        none currently RUNNING → STALLED (auto-pause for user attention)
+      - some tasks PENDING / BLOCKED, no failures → leave PAUSED so the
+        user can manually resume
+    """
+    tasks = await crud.get_all("tasks", "project_id = ?", (project_id,))
+    if not tasks:
+        return
+
+    statuses = [t.get("status") for t in tasks]
+    terminal_states = {"done", "failed", "aborted", "validation_failed"}
+    fail_states = {"failed", "validation_failed", "aborted"}
+
+    all_terminal = all(s in terminal_states for s in statuses)
+    any_failed = any(s in fail_states for s in statuses)
+    any_running = any(s == "running" for s in statuses)
+
+    if any_running:
+        return  # not actually orphan — tasks claim to still be running
+
+    if all_terminal:
+        # Compute a verdict like _finalize_project would
+        from domain.harness.states import ProjectState
+        final_qa = next((t for t in tasks if t.get("kind") == "final_qa"), None)
+        if final_qa:
+            new_state = (
+                ProjectState.COMPLETED if final_qa.get("status") == "done"
+                else ProjectState.COMPLETED_WITH_ISSUES
+            )
+        else:
+            new_state = (
+                ProjectState.COMPLETED_WITH_ISSUES if any_failed
+                else ProjectState.COMPLETED
+            )
+        done_count = sum(1 for s in statuses if s == "done")
+        progress = round(done_count / len(tasks) * 100, 1)
+        await crud.update_by_id("projects", project_id, {
+            "state": new_state,
+            "is_running": 0,
+            "progress_pct": progress,
+        })
+        log.info("watchdog.orphan_finalized",
+                 project_id=project_id, state=new_state, progress=progress)
+        return
+
+    if any_failed:
+        await crud.update_by_id("projects", project_id, {
+            "state": "stalled",
+            "is_running": 0,
+        })
+        log.warning("watchdog.orphan_stalled", project_id=project_id)
+        return
+
+    # Pending tasks but no failures + no live harness — user paused mid-run
+    # via backend restart. Move to paused so the UI offers a "resume" path.
+    await crud.update_by_id("projects", project_id, {
+        "state": "paused",
+        "is_running": 0,
+    })
+    log.info("watchdog.orphan_paused", project_id=project_id)
+
+
+async def reconcile_all_orphans_on_startup() -> None:
+    """Called once from app lifespan after DB init. Sweeps every project
+    flagged is_running=1 — they're all orphans by definition because the
+    process just started and no harness exists yet."""
+    projects = await crud.get_all("projects", "is_running = ?", (1,))
+    if not projects:
+        return
+    log.info("watchdog.startup_reconcile", count=len(projects))
+    for p in projects:
+        try:
+            await _reconcile_orphan_project(p["id"])
+        except Exception as exc:
+            log.error("watchdog.startup_reconcile_failed",
+                      project_id=p["id"], error=str(exc))
 
 
 async def _scan_once() -> None:
