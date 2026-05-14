@@ -77,12 +77,21 @@ function PermissionTable() {
               <button
                 onClick={() => handleToggle(p.id as string, p.allowed as boolean)}
                 disabled={updateMutation.isPending}
-                className="relative inline-flex h-6 w-11 items-center rounded-full transition-colors"
-                style={{ backgroundColor: p.allowed ? "#10b981" : "var(--color-surface-alt)" }}
+                className="relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:opacity-60"
+                style={{
+                  // Slimmer track (20×36 vs old 24×44) + soft inner border on
+                  // OFF so the chip reads as "off" rather than "loading".
+                  // Active green gets a subtle glow for polish.
+                  backgroundColor: p.allowed ? "#10b981" : "var(--color-surface-alt)",
+                  border: p.allowed ? "none" : "1px solid var(--color-border-soft)",
+                  boxShadow: p.allowed
+                    ? "0 0 0 1px rgba(16, 185, 129, 0.15)"
+                    : "none",
+                }}
               >
                 <span
-                  className="absolute h-5 w-5 rounded-full bg-white shadow-sm transition-transform"
-                  style={{ transform: p.allowed ? "translateX(24px)" : "translateX(2px)" }}
+                  className="absolute h-4 w-4 rounded-full bg-white shadow-sm transition-transform"
+                  style={{ transform: p.allowed ? "translateX(18px)" : "translateX(2px)" }}
                 />
               </button>
             </div>
