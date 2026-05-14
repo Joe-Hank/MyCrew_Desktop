@@ -290,12 +290,35 @@ async def render_plan_maker_backstory(
     Each entry includes the `id` so Plan Maker can use it directly via
     `assign_agents.existing_agent_id`.
     """
+    # MCP listing strategy (per 2026-05-15 prompt audit discussion):
+    #   - Only include MCPs that have *successfully discovered tools at
+    #     least once* (discovered_tools non-empty) — filters out dead
+    #     servers that show enabled=1 but the process never came up
+    #   - Show each MCP's actual tool names so Plan Maker stops guessing
+    #     capabilities from server names (e.g. "blender" = ?). Cap at
+    #     10 names + show total count so big MCPs don't blow up tokens.
     mcp_rows = await crud.get_all("mcp_servers")
     enabled_mcps = [r for r in mcp_rows if r.get("enabled", 1)]
-    mcp_lines = [
-        f"- {s.get('name','')}" for s in enabled_mcps if s.get("name")
-    ]
-    mcp_block = "\n".join(mcp_lines) if mcp_lines else "（无）"
+    TOOL_CAP_PER_MCP = 10
+    mcp_lines: list[str] = []
+    for s in enabled_mcps:
+        name = s.get("name") or ""
+        if not name:
+            continue
+        raw = s.get("discovered_tools") or "[]"
+        try:
+            tools = json.loads(raw) if isinstance(raw, str) else (raw or [])
+        except (json.JSONDecodeError, TypeError):
+            tools = []
+        tool_names = [t.get("name") for t in tools
+                       if isinstance(t, dict) and t.get("name")]
+        if not tool_names:
+            continue  # skip dead / never-connected MCPs
+        shown = tool_names[:TOOL_CAP_PER_MCP]
+        extra = len(tool_names) - len(shown)
+        suffix = f" …+{extra}" if extra > 0 else ""
+        mcp_lines.append(f"- {name}: {' / '.join(shown)}{suffix}")
+    mcp_block = "\n".join(mcp_lines) if mcp_lines else "（无连通的 MCP）"
 
     agent_rows = await crud.get_all("agents")
     other_agents = [a for a in agent_rows if a.get("role") != "Plan Maker"]
