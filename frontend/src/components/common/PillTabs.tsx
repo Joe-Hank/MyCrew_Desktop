@@ -27,7 +27,12 @@ function PillTabs<K extends string>({
             onClick={() => onChange(t.key)}
             className="rounded-full px-4 py-1.5 text-sm font-medium transition-all"
             style={{
-              backgroundColor: isActive ? "white" : "transparent",
+              // Was hardcoded "white" — looked jarring in dark mode because
+              // the slider stayed pure white against the dark page chrome.
+              // var(--color-card) is theme-aware (white in light mode,
+              // proper dark surface in dark mode), matching the card +
+              // modal surfaces.
+              backgroundColor: isActive ? "var(--color-card)" : "transparent",
               color: isActive ? "var(--color-brand-500)" : "var(--color-ink-muted)",
               boxShadow: isActive ? "0 1px 2px rgba(0, 0, 0, 0.06)" : "none",
             }}
