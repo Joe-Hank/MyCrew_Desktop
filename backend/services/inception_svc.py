@@ -728,8 +728,8 @@ class InceptionService:
         task = Task(
             description=description,
             expected_output=(
-                "依次调用 create_workflow + assign_agents 两个工具，然后用一句"
-                "中文确认作为最终回复。"
+                "依次调 create_workflow + assign_agents + write_blueprint 三个工具，"
+                "然后用一句中文确认收尾。"
             ),
             agent=agent,
         )
@@ -854,21 +854,42 @@ class InceptionService:
         return rows[0] if rows else None
 
     async def _format_history_for_task(self, session_id: str) -> str:
-        """Flatten message history to a compact transcript for the task description."""
+        """Flatten message history to a compact transcript for the task
+        description. Strategy: ALWAYS keep the first user message (it
+        carries the original project intent that the model otherwise
+        forgets after several turns) + the last 4 messages (recent
+        context). Anything in the middle is collapsed into a one-line
+        gap marker so the model knows there's been omitted dialogue
+        without paying the token cost.
+
+        Previously kept last 8 messages flat — long sessions accumulated
+        2k+ tokens of history every round.
+        """
         rows = await crud.get_all(
             "inception_messages", "session_id = ?", (session_id,)
         )
         if not rows:
             return "（无历史）"
-        lines = []
-        # Keep only the last ~8 messages — Plan Maker doesn't need deep history
-        # and shorter context = faster LLM rounds (the user's complaint).
-        for m in rows[-8:]:
+
+        FIRST_KEEP = 1   # original project intent
+        TAIL_KEEP = 4    # recent turns
+
+        def fmt(m: dict) -> str:
             role = "用户" if m.get("role") == "user" else "Plan Maker"
             content = (m.get("content") or "").strip()
-            if content:
-                lines.append(f"[{role}] {content}")
-        return "\n".join(lines) or "（无历史）"
+            return f"[{role}] {content}" if content else ""
+
+        if len(rows) <= FIRST_KEEP + TAIL_KEEP:
+            # Short session — keep all
+            lines = [s for m in rows if (s := fmt(m))]
+            return "\n".join(lines) or "（无历史）"
+
+        first = [s for m in rows[:FIRST_KEEP] if (s := fmt(m))]
+        tail = [s for m in rows[-TAIL_KEEP:] if (s := fmt(m))]
+        omitted = len(rows) - FIRST_KEEP - TAIL_KEEP
+        gap = f"…（中间 {omitted} 条消息已省略）…" if omitted > 0 else ""
+        parts = first + ([gap] if gap else []) + tail
+        return "\n".join(parts) or "（无历史）"
 
     @staticmethod
     def _extract_text_from_step(step: object) -> str:

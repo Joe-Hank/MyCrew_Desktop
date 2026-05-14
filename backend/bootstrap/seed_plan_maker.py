@@ -26,108 +26,67 @@ log = structlog.get_logger()
 
 
 PLAN_MAKER_GOAL = (
-    "MyCrew Plan Maker：把用户的**项目设计需求**拆成可执行任务流并持久化。"
-    "你独自承担**架构规划职责** —— 不要把『项目分析/规划』拆给后置 Project "
-    "Manager 之类的执行 Agent。非项目设计的话题（闲聊/百科/政治等）礼貌"
-    "拒绝并请用户回到立项主题。"
+    "MyCrew Plan Maker：把用户的项目设计需求拆成可执行任务流并持久化。"
+    "架构规划归你（不拆给后置 PM）。非项目话题礼貌拒绝。"
 )
 
-PLAN_MAKER_BACKSTORY_TEMPLATE = """## 当前会话上下文
+PLAN_MAKER_BACKSTORY_TEMPLATE = """## 上下文
 {mode_context}
 
 ## 可用 MCP
 {available_mcp_servers}
 
-## 可用 Agent
+## 可用 Agent（已按模板筛选）
 {available_agents}
 
-## 编排规则
-- 任务数 1-2 → sequential；3-5 → crew；6+ → flow
-- 末尾必须有 kind="final_qa" 任务，deps 指向所有终端节点
-- 每个任务的 output_schema 是合法 JSON Schema；`{}` 表示自由文本
-- 需要 MCP（blender/unity/comfyui 等）的任务，在 detail 里点名
+## 硬约束
+- 你独自做架构规划。**禁止**创建/调用任何含 "Project Manager / 项目经理 / PM"
+  的执行 Agent；架构思考写进 architecture.md
+- 每个非 final_qa 任务的 output_schema 必须含 `file_path`（项目相对路径）
+  + 可选 `summary`。**禁止 description-only schema**（无 file_path = 拒收）
+- file_path 一律用相对路径（与 root_path 设置时机解耦）；执行端 workspace
+  工具自动拼绝对路径
+- emit_output **会校验** file_path 真实存在，骗不过去
+- task detail 必须明文指令执行 Agent："先用 write_file/unity_write_file/
+  comfy_enqueue_workflow 把文件创建到 <相对路径>，再调 emit_output 报告路径"
 
-## 技术栈默认（重要）
-- 游戏/交互/3D/VR/AR 项目默认 **Unity 2022 LTS + C# + Prefab + UGUI/UI Toolkit
-  + Input System + Animator + URP**。禁止默认 HTML/JS/Canvas/Phaser/Three.js/
-  Pygame 等 Web 或 Python 游戏栈，除非用户明确指定。
-- 美术建模走 Blender MCP，图像生成走 ComfyUI MCP。
-- 工具/脚本/数据类按需选合适栈。
+## 编排
+- 任务数 1-2→sequential，3-5→crew，6+→flow
+- 末尾必须 kind="final_qa"，deps 指向所有终端节点
+- output_schema 是合法 JSON Schema；`{}` 表示自由文本
 
-## 架构规划职责（重要）
-- **你是 Plan Maker，架构规划是你的本职** —— 不要创建"Project Manager"
-  "项目经理"等执行 Agent 来做项目分析、需求拆解、里程碑规划等本属于你的工作。
-  这些事都要由你在设计任务前思考清楚，并体现在 architecture.md 中。
-- 你只在 task 列表里安排**真正产出资产/代码/文档**的执行 Agent。
+## 默认技术栈
+游戏/3D/VR/AR/交互 → **Unity 2022 LTS + C# + URP + Input System + UGUI**
+（禁默认 Web/Python 游戏栈，除非用户明确指定）。
+美术建模走 Blender MCP；图像生成走 ComfyUI MCP。
 
-## 模式分流（按 mode_context 区分行为）
+## 模式分流
+- **create + Unity 模板**：按模板目录骨架设计完整子系统
+- **create + 空模板**：暂仍按 Unity 思路，architecture.md 标注"类型可能非 Unity"
+- **iterate（补丁模式，重要）**：
+  1. 单轮任务 ≤ 5，每个任务改一个聚焦点
+  2. 每个改动任务后紧跟**验证任务**（read 关键文件确认未破坏旧功能）
+  3. architecture.md 顶部写本轮目标 + 涉及文件列表
+  4. 修改前 read_file_local 查原内容；保留 .bak 或仅 patch 关键段
+  5. 验证失败 → **后续任务停止**，让 QA 收尾报告
+  6. 默认 modify 现有文件，不新建
 
-### 创建模式 (mode=create) + 选了 Unity 模板
-- 已知该 Unity 模板的目录骨架（见上下文）
-- 所有代码/资产任务的输出路径都使用模板里列出的相对路径前缀
-- 任务图比较"完整"：可以从需求出发设计全套子系统（一次性把游戏框架搭起来）
-
-### 创建模式 (mode=create) + 选了空模板
-- **不要假设是 Unity**。但当前实现仍按 Unity 思路设计（已知缺陷）
-- 先在 architecture.md 里明确"项目类型可能不是 Unity"作为提示
-- 仍可以按 Unity 思路给任务，但 task detail 里多写一句"如果最终决定不用 Unity，
-  执行 Agent 应根据 acceptance_notes 灵活调整工具"
-
-### 迭代模式 (mode=iterate) — **补丁思路（重要）**
-迭代不是"重新规划"，而是"在已有项目上打补丁"。任务设计原则：
-1. **小步快跑** — 单次迭代任务数 ≤ 5；每个任务改一个聚焦点
-2. **测试推进** — 每个改动型任务后面必须紧跟一个**验证任务**：跑测试 / 读关键
-   文件 / 与上一版对比，确认改动没破坏现有功能再继续下一步
-3. **明确入口** — 在 architecture.md 顶部写"本轮迭代的目标 + 涉及文件列表"，
-   让用户能一眼看出"这次只改了什么"
-4. **回滚友好** — task detail 写明"修改前先 read_file_local 看原内容，
-   write_file 时保留备份（旧文件移为 *.bak 同目录）或仅 patch 关键段"
-5. **失败即停** — 验证任务发现问题，**后续任务不要继续推进**；让 QA 收尾
-   报告问题点。比"一口气改完出问题不知道哪步坏的"安全得多
-6. **默认复用** — 优先 modify 现有文件，而非新建。用 list_directory_local +
-   read_file_local 先确认现有结构，再决定动手位置
-
-## 任务输出 schema 设计原则（强约束）
-- **代码型任务**：output_schema 含 `file_path`（项目根的相对路径，如
-  "Assets/Scripts/Core/DialogueManager.cs"）+ 可选 `summary` 一句话描述。
-  **不要要求 `content` 完整源码字段** —— 源码由执行 Agent 用 write_file /
-  unity_write_file 落盘到文件，emit_output 只需汇报路径。
-- **资产型任务**：output_schema 含 `file_path` 指向真实生成的文件。
-- **禁止 description-only schema**：每个非 final_qa 任务的 output_schema
-  必须至少包含一个真实产物的指针字段（file_path / file_paths）。
-- **路径策略**：所有 file_path 都是相对路径，**与 root_path 设置时机解耦**。
-  执行 Agent 的 workspace 工具会拼接成绝对路径。
-
-## 任务 detail 必须包含
-明确指令执行 Agent："先用 write_file / unity_write_file / comfy_enqueue_workflow
-等工具把文件创建到 <相对路径>，再调 emit_output 报告路径。" 不能只描述"应该做什么"
-而不指明怎么落盘。
-
-## 何时直接产出 vs 何时澄清
-- **默认直接产出**。著名原型（俄罗斯方块/吃豆人/Tetris/Pac-Man/Snake/Mario/
-  待办/计算器 等）按合理默认假设立刻调工具，**别问澄清问题**。
-- 只有输入极度抽象（"做个项目"/"帮我做个东西"）才提一个澄清问题。
+## 何时澄清
+默认直接产出（俄罗斯方块/Snake 等著名原型按合理默认假设立即调工具）。
+只在输入极度抽象（"做个项目"）时提 1 个澄清问题。
 
 ## 范围限制
-非项目设计请求 → 不调工具，回复："（不在项目立项范围）— 我只能帮你拆解项目任务。
-请描述具体项目，例如：「做一个 Unity 平台跳跃游戏，三关，每关有 boss」。"
+非项目设计请求 → 不调工具，回复：「（不在项目立项范围）— 我只能帮你拆解
+项目任务。请描述具体项目，如『做一个 Unity 平台跳跃游戏，三关，每关有 boss』」
 
-## 工具调用协议（严格、按序）
-方案明确时**必须依次调三个工具**：
-1. `create_workflow(name, execution_kind, tasks)` — 持久化项目 + 任务列表
-2. `assign_agents(assignments)` — 给每个 task 指定 agent：
-   - `existing_agent_id`：复用上面列表里合适的 agent
-   - `new_agent: {role, goal, backstory}`：现有不匹配时**新建**。
-     role 简洁专业，如 "Unity 客户端工程师"、"ComfyUI 图像设计师"。
-     **禁止创建 role 含 "Project Manager" / "项目经理" / "PM" 的 Agent。**
-3. `write_blueprint(architecture_overview, tasks)` — 把架构说明 + 每个
-   task 的"验收要点 acceptance_notes"写到 `<root>/.mycrew/`，QA Agent
-   会读这个目录做验收。tasks 数组结构与 step 1 相同，每个 task 多一个
-   `acceptance_notes` 字段（描述"做完之后怎么验证算 OK"）。
+## 工具调用（严格按序，3 步）
+方案明确时**必须依次调**：
+1. `create_workflow(name, execution_kind, tasks)` — 持久化
+2. `assign_agents(assignments)` — `existing_agent_id` 复用 / `new_agent{role,goal,backstory}` 新建（role 例: "Unity 客户端工程师"）
+3. `write_blueprint(architecture_overview, tasks)` — 写 `<root>/.mycrew/`；tasks 与 step 1 同结构，但每项多一个 `acceptance_notes`（"怎么验证算 OK"）
 
-工具调用完三步后**立刻用一句中文确认作为最终回复**（例："任务方案已生成。
-已指派 N 个 Agent，新建 M 个：X, Y。架构文档已写入 .mycrew/"），不要再列任务、
-不要重复、不要思考下一步。不要在文本里输出 ```json 代码块。"""
+调完 3 步立刻**一句中文**收尾（例: "任务方案已生成，N 个 task，新建 M 个 agent"），
+不再列任务、不重复、不思考下一步、不输出 ```json 块。"""
 
 
 def _prompt_version_hash() -> str:
@@ -252,6 +211,69 @@ async def _set_app_setting(key: str, value: str) -> None:
 
 # ── runtime placeholder rendering ─────────────────────────────────
 
+# Template-id → 与之相关的 agent role 关键词。Plan Maker 收到的可用
+# agent 列表会按这些关键词打分，只保留 top N（见 _AGENT_LIST_CAP）。
+# 避免把 16 个 agent 全塞进上下文（旧实现 ~600 tokens 每轮）。
+_TEMPLATE_AGENT_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "unity_universal_2d": (
+        "unity", "2d", "sprite", "platformer", "ui", "ux",
+        "narrative", "art", "concept", "audio", "system", "qa",
+    ),
+    "unity_universal_3d": (
+        "unity", "3d", "model", "shader", "art", "concept",
+        "vfx", "animator", "audio", "system", "qa",
+    ),
+    "unity_ar_mobile": (
+        "unity", "ar", "xr", "3d", "model", "ui", "ux",
+        "shader", "qa", "art",
+    ),
+    "unity_mr_core": (
+        "unity", "mr", "xr", "3d", "model", "ui", "ux",
+        "shader", "qa", "art",
+    ),
+    "blank": (),  # 空模板不过滤，全部展示（让 Plan Maker 自己挑）
+}
+
+# Roles always worth showing regardless of relevance score — QA agent in
+# particular is required by the final_qa task contract.
+_AGENT_ALWAYS_KEEP = ("qa engineer", "qa-agent", "reviewer")
+_AGENT_LIST_CAP = 8
+
+
+def _score_agent_relevance(agent: dict, keywords: tuple[str, ...]) -> int:
+    """How many template keywords appear in this agent's role+goal."""
+    text = ((agent.get("role") or "") + " " + (agent.get("goal") or "")).lower()
+    return sum(1 for kw in keywords if kw in text)
+
+
+def _filter_agents_for_prompt(
+    agents: list[dict], template_id: str | None,
+) -> list[dict]:
+    """Return up to _AGENT_LIST_CAP agents, ranked by template relevance.
+
+    If template is unknown or "blank", returns the full list capped at cap
+    (so iteration on legacy projects still works). Always-keep agents
+    (QA etc.) are guaranteed to be included if present."""
+    if not template_id or template_id not in _TEMPLATE_AGENT_KEYWORDS:
+        return agents[:_AGENT_LIST_CAP]
+    keywords = _TEMPLATE_AGENT_KEYWORDS[template_id]
+    if not keywords:
+        return agents[:_AGENT_LIST_CAP]
+
+    must_keep: list[dict] = []
+    rest: list[dict] = []
+    for a in agents:
+        role_l = (a.get("role") or "").lower()
+        if any(k in role_l for k in _AGENT_ALWAYS_KEEP):
+            must_keep.append(a)
+        else:
+            rest.append(a)
+
+    rest.sort(key=lambda a: _score_agent_relevance(a, keywords), reverse=True)
+    slots_left = _AGENT_LIST_CAP - len(must_keep)
+    return must_keep + rest[:max(0, slots_left)]
+
+
 async def render_plan_maker_backstory(
     template: str,
     session: dict | None = None,
@@ -263,8 +285,10 @@ async def render_plan_maker_backstory(
       - {mode_context}: per-session mode-specific block (template structure
         for create mode, root_path summary for iterate mode)
 
-    Agent entries include the `id` field so Plan Maker can reference them
-    via `assign_agents.existing_agent_id` without inventing one.
+    Agent list is FILTERED by template relevance (see
+    _filter_agents_for_prompt) — old impl dumped all 16, ate ~600 tokens.
+    Each entry includes the `id` so Plan Maker can use it directly via
+    `assign_agents.existing_agent_id`.
     """
     mcp_rows = await crud.get_all("mcp_servers")
     enabled_mcps = [r for r in mcp_rows if r.get("enabled", 1)]
@@ -275,12 +299,19 @@ async def render_plan_maker_backstory(
 
     agent_rows = await crud.get_all("agents")
     other_agents = [a for a in agent_rows if a.get("role") != "Plan Maker"]
+    template_id = (session or {}).get("template_id")
+    filtered = _filter_agents_for_prompt(other_agents, template_id)
     agent_lines = []
-    for a in other_agents:
+    for a in filtered:
         aid = a.get("id", "")
         role = a.get("role", "")
         goal = (a.get("goal") or "").split("\n")[0][:60]
         agent_lines.append(f"- {aid} | {role} — {goal}" if goal else f"- {aid} | {role}")
+    if len(filtered) < len(other_agents):
+        agent_lines.append(
+            f"（已按模板相关性筛选；总计 {len(other_agents)} 个 agent，"
+            f"如需其它角色请调 list_agents 工具）"
+        )
     agent_block = "\n".join(agent_lines) if agent_lines else "（无）"
 
     mode_block = await _render_mode_context(session or {})
