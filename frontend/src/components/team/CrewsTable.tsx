@@ -90,24 +90,51 @@ function CrewsTable({ onEdit }: { onEdit: (c: Crew) => void }) {
   );
 }
 
-/** Compact 2-segment toggle: 链式 / 层式, brand-blue highlight on the
- *  active one. Read-only here (clicking does nothing); the editor drawer
- *  is where the user actually picks. Total width ≈ 60px so the grid
- *  column hugs the chip. */
+/** 链式 / 层式 toggle — visual twin of the sidebar ThemeToggle (same
+ *  pill + sliding white indicator + dimmed inactive). Read-only here;
+ *  the actual picker is in the editor drawer. */
 function ProcessToggle({ process }: { process: string }) {
   const isHier = process === "hierarchical";
-  const segStyle = (active: boolean): React.CSSProperties => ({
-    padding: "1px 6px",
-    backgroundColor: active ? "var(--color-brand-500)" : "transparent",
-    color: active ? "white" : "var(--color-ink-faint)",
-  });
+  // Slot width = SEG_W; the slider sits on top of one slot and slides
+  // SEG_W pixels to the other side when state flips.
+  const SEG_W = 34;
   return (
     <span
-      className="inline-flex overflow-hidden rounded text-[11px] font-medium"
-      style={{ border: "1px solid var(--color-border-soft)" }}
+      className="relative inline-flex items-center rounded-full p-0.5"
+      style={{
+        width: SEG_W * 2 + 4,    // 4px = p-0.5 × 2
+        height: 24,
+        backgroundColor: "var(--color-surface-alt)",
+      }}
     >
-      <span style={segStyle(!isHier)}>链式</span>
-      <span style={segStyle(isHier)}>层式</span>
+      {/* Sliding white indicator behind the labels */}
+      <span
+        className="absolute top-0.5 left-0.5 rounded-full bg-white shadow-sm transition-transform duration-200"
+        style={{
+          width: SEG_W,
+          height: 20,
+          transform: isHier ? `translateX(${SEG_W}px)` : "translateX(0)",
+        }}
+      />
+      {/* Labels float above the slider */}
+      <span
+        className="relative z-10 flex items-center justify-center text-[11px] font-medium transition-colors"
+        style={{
+          width: SEG_W,
+          color: isHier ? "var(--color-ink-disabled)" : "var(--color-ink)",
+        }}
+      >
+        链式
+      </span>
+      <span
+        className="relative z-10 flex items-center justify-center text-[11px] font-medium transition-colors"
+        style={{
+          width: SEG_W,
+          color: isHier ? "var(--color-ink)" : "var(--color-ink-disabled)",
+        }}
+      >
+        层式
+      </span>
     </span>
   );
 }
