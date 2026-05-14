@@ -1,14 +1,11 @@
 import { useCrews, useDeleteCrew, useAgents, type Crew } from "../../queries/useTeamQuery";
 import RowActionsMenu from "../common/RowActionsMenu";
 
-// Proportional 4-column fill — name on the left, actions on the right,
-// members + process share the middle. Ratios chosen so on a typical
-// 900-1100px Team panel each column gets a sensible slice:
-//   name 1.5fr (~27%) — role name + avatar dot
-//   members 2.5fr (~45%) — comma-joined agent roles, longest content
-//   process 1fr (~18%) — the toggle chip sits at the left of this cell
-//   actions 0.5fr (~9%) — ⋯ menu icon at the right
-const GRID = "grid-cols-[1.5fr_2.5fr_1fr_0.5fr]";
+// Mirror AgentsTable / ToolsTable layout: fr ratios for content cols +
+// a fixed 60px actions column. Members gets the most fr since it has
+// the longest comma-joined content; process matches Agent's toggle col
+// width (~0.8fr) so the chip lines up at consistent density across tabs.
+const GRID = "grid-cols-[1.4fr_2.5fr_0.8fr_60px]";
 
 function CrewsTable({ onEdit }: { onEdit: (c: Crew) => void }) {
   const { data: crews, isLoading } = useCrews();
@@ -31,12 +28,8 @@ function CrewsTable({ onEdit }: { onEdit: (c: Crew) => void }) {
         className={`grid ${GRID} items-center gap-2 px-5 py-3`}
         style={{ borderBottom: "1px solid var(--color-border-soft)" }}
       >
-        {["名称", "成员", "过程控制", "操作"].map((c, i) => (
-          <span
-            key={c}
-            className={`text-xs ${i === 3 ? "justify-self-end" : ""}`}
-            style={{ color: "var(--color-ink-ghost)" }}
-          >
+        {["名称", "成员", "过程控制", "操作"].map((c) => (
+          <span key={c} className="text-xs" style={{ color: "var(--color-ink-ghost)" }}>
             {c}
           </span>
         ))}
@@ -78,20 +71,18 @@ function CrewsTable({ onEdit }: { onEdit: (c: Crew) => void }) {
               {crew.agent_ids.map((id) => agentMap.get(id) ?? id).join(", ") || "无成员"}
             </span>
             <ProcessToggle process={crew.process} />
-            <div className="justify-self-end">
-              <RowActionsMenu
-                actions={[
-                  { label: "编辑", onClick: () => onEdit(crew) },
-                  {
-                    label: "删除",
-                    tone: "danger",
-                    onClick: () => {
-                      if (confirm(`删除 Crew "${crew.name}"？`)) deleteMut.mutate(crew.id);
-                    },
+            <RowActionsMenu
+              actions={[
+                { label: "编辑", onClick: () => onEdit(crew) },
+                {
+                  label: "删除",
+                  tone: "danger",
+                  onClick: () => {
+                    if (confirm(`删除 Crew "${crew.name}"？`)) deleteMut.mutate(crew.id);
                   },
-                ]}
-              />
-            </div>
+                },
+              ]}
+            />
           </div>
         ))
       )}
