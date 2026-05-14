@@ -141,8 +141,56 @@ class InceptionService:
 
         session = await crud.insert("inception_sessions", session_data,
                                      id_prefix="incep_")
+
+        # If the user picked a template at the create-drawer step, log it
+        # as a persistent chat message so the choice survives reloads and
+        # is visible in the message history (not just the floating
+        # confirmedHistory bubble). Same for iterate-mode parent binding.
+        await self._persist_initial_pick_message(
+            session["id"],
+            template_id=template_id,
+            mode=mode,
+            parent_project_id=parent_project_id,
+        )
+
         log.info("inception.session_created", id=session["id"], mode=mode)
         return session
+
+    async def _persist_initial_pick_message(
+        self,
+        session_id: str,
+        *,
+        template_id: str | None,
+        mode: str,
+        parent_project_id: str | None,
+    ) -> None:
+        """Insert a system-style "已选 X" message into the session so
+        the user's initial pick is visible in the chat history (not just
+        the floating confirmedHistory bubble in the drawer)."""
+        parts: list[str] = []
+        if mode == "iterate" and parent_project_id:
+            parent = await crud.get_by_id("projects", parent_project_id)
+            parent_name = parent.get("name") if parent else parent_project_id
+            parts.append(f"📍 迭代项目模式：基于「{parent_name}」开启新一轮")
+        if template_id:
+            from data.unity_templates import get_template
+            t = get_template(template_id)
+            label = t.get("label") if t else template_id
+            parts.append(f"✅ 已选模板：{label}")
+        if not parts:
+            return
+
+        content = "\n".join(parts)
+        await crud.insert("inception_messages", {
+            "session_id": session_id,
+            "role": "user",  # render in user-side green bubble
+            "content": content,
+        }, id_prefix="msg_")
+        await manager.broadcast("inception.message", {
+            "session_id": session_id,
+            "role": "user",
+            "content": content,
+        })
 
     async def apply_choice(
         self,
@@ -182,6 +230,34 @@ class InceptionService:
 
         if updates:
             await crud.update_by_id("inception_sessions", session_id, updates)
+
+        # Persist the pick as a chat message so it shows up in the
+        # message history (not just the floating confirmedHistory
+        # bubble on the drawer). Same path InitialTemplateChoice uses
+        # via _persist_initial_pick_message — second-turn picks deserve
+        # the same paper trail.
+        history_parts: list[str] = []
+        if template_id:
+            from data.unity_templates import get_template
+            t = get_template(template_id)
+            label = t.get("label") if t else template_id
+            history_parts.append(f"✅ 已选模板：{label}")
+        if root_path:
+            history_parts.append(f"📁 已设根目录：{root_path}")
+        if mode:
+            history_parts.append(f"🔀 已选模式：{mode}")
+        if history_parts:
+            content = "\n".join(history_parts)
+            await crud.insert("inception_messages", {
+                "session_id": session_id,
+                "role": "user",
+                "content": content,
+            }, id_prefix="msg_")
+            await manager.broadcast("inception.message", {
+                "session_id": session_id,
+                "role": "user",
+                "content": content,
+            })
 
         await manager.broadcast("inception.choice_accepted", {
             "session_id": session_id,
