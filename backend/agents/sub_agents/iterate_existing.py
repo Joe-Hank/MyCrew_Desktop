@@ -85,6 +85,11 @@ T4 (验证): read + 试存档
 T5 (final_qa): 整体回归
 ```
 
+# 项目预置环境（Unity 模板已注入）
+- **MCP for Unity 已接入**：Unity 操作类 task 的 detail 要明示用 MCP for Unity 工具
+  （读写资产 / 执行 C# / 查询场景 / 截图），而不是裸 write_file
+- `Assets/Fonts/` 已有常用中文字体：中文 TMP/UGUI 文本直接引用该目录字体，不要让 agent 重新下载/生成
+
 # 硬约束
 - 禁止创建任何含 PM / 项目经理 角色
 - 每个非 final_qa 任务的 output_schema 必须含 `file_path`

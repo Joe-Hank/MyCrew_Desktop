@@ -38,6 +38,7 @@ UNITY_TEMPLATES: list[dict[str, Any]] = [
             "Assets/Prefabs/",        # 推荐：可复用对象
             "Assets/Audio/",          # 推荐：BGM / SFX
             "Assets/ScriptableObjects/",  # 推荐：数据资产
+            "Assets/Fonts/",          # 预置：常用中文字体（中文文本直接引用）
         ],
         "default_packages": [
             "com.unity.feature.2d",
@@ -65,6 +66,7 @@ UNITY_TEMPLATES: list[dict[str, Any]] = [
             "Assets/Prefabs/",        # 推荐：可复用对象
             "Assets/Animations/",     # 推荐：Animator + Clip
             "Assets/Audio/",          # 推荐：BGM / SFX
+            "Assets/Fonts/",          # 预置：常用中文字体（中文文本直接引用）
         ],
         "default_packages": [
             "com.unity.feature.development",
@@ -100,6 +102,7 @@ UNITY_TEMPLATES: list[dict[str, Any]] = [
             # 推荐新建：
             "Assets/Scripts/",                          # 推荐：你的业务脚本
             "Assets/Prefabs/",                          # 推荐：自定义 prefab
+            "Assets/Fonts/",                            # 预置：常用中文字体（中文文本直接引用）
         ],
         "default_packages": [
             "com.unity.xr.arfoundation",
@@ -143,6 +146,7 @@ UNITY_TEMPLATES: list[dict[str, Any]] = [
             # 推荐新建：
             "Assets/Scripts/",
             "Assets/Prefabs/",
+            "Assets/Fonts/",                        # 预置：常用中文字体（中文文本直接引用，与 MRTemplateAssets/Fonts 并存）
         ],
         "default_packages": [
             "com.unity.xr.openxr",
@@ -224,4 +228,13 @@ def render_template_context(template_id: str) -> str:
     lines.append("默认包（manifest.json 已包含）:")
     for p in t["default_packages"]:
         lines.append(f"  - {p}")
+    # ── 项目级预置（所有 Unity 模板共享）─────────────────────────
+    lines.extend([
+        "",
+        "项目预置环境:",
+        "  - **MCP for Unity 已接入**：可直接调用 Unity 编辑器（读写资产 / 执行 C# / 查询场景 / 截图）。"
+        "Unity 操作类 agent 优先用 MCP for Unity 的工具，而不是裸 write_file。",
+        "  - **Assets/Fonts/ 内已预置常用中文字体**：所有需要中文显示的 TMP/UGUI 文本，"
+        "直接引用该目录下的字体即可，不需要再下载/生成。",
+    ])
     return "\n".join(lines)
