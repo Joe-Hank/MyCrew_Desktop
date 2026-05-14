@@ -247,6 +247,24 @@ function InceptionDrawer() {
   );
   useEvent("inception.probe", handleProbe);
 
+  // Plan Maker per-stage IO trace — surface the friendly per-sub-agent
+  // input/output in the live thinking subframe so the user always sees
+  // SOMETHING meaningful, even when the LLM doesn't stream tokens.
+  const handleSubAgentIo = useCallback(
+    (msg: { payload: Record<string, unknown> }) => {
+      if (msg.payload.session_id !== activeSessionId) return;
+      const sub = (msg.payload.sub_agent as string) ?? "";
+      const out = (msg.payload.output_preview as string) ?? "";
+      const label = SUB_AGENT_LABELS[sub] ?? sub;
+      const conf = msg.payload.confidence != null
+        ? `（置信 ${msg.payload.confidence}）` : "";
+      const line = `✦ ${label}${conf}：${out.slice(0, 120)}${out.length > 120 ? "…" : ""}`;
+      setStreamingText((prev) => prev + line + "\n");
+    },
+    [activeSessionId],
+  );
+  useEvent("plan_maker.sub_agent_io", handleSubAgentIo);
+
   // Plan Maker can't continue until the user provides a structured pick
   // (Unity template) or supplies the iteration root path. Backend emits
   // these events instead of running the LLM when the inception session
@@ -747,8 +765,20 @@ function InceptionDrawer() {
                         msg.role === "user" ? "ml-auto" : "mr-auto"
                       }`}
                       style={{
-                        backgroundColor: msg.role === "user" ? "#95EC69" : "#FFFFFF",
-                        color: "#1F1F1F",
+                        // Assistant bubble follows the theme's --color-card
+                        // (white in light mode, dark slate in dark mode);
+                        // pure white was too harsh against the dark
+                        // chat-column background. User bubble keeps the
+                        // fixed WeChat-style green per spec b2d0e4a.
+                        backgroundColor: msg.role === "user"
+                          ? "#95EC69"
+                          : "var(--color-card)",
+                        color: msg.role === "user"
+                          ? "#1F1F1F"
+                          : "var(--color-ink)",
+                        border: msg.role === "user"
+                          ? undefined
+                          : "1px solid var(--color-border-soft)",
                       }}
                     >
                       <div className="whitespace-pre-wrap">{msg.content}</div>
@@ -771,52 +801,42 @@ function InceptionDrawer() {
                     </div>
                   ))}
 
-                  {/* "正在思考中" — Plan Maker is between steps and no delta
-                      has arrived yet. Persists until the first token of the
-                      streaming subwindow lands. */}
-                  {chat.thinking && !streamingText && (
+                  {/* Unified thinking subframe — always opens while a round
+                      is in flight (`chat.thinking`), so the user never
+                      stares at a blank chat between sending and the first
+                      reply. Body fills with three streams interleaved:
+                        - inception.delta  (token-by-token from the LLM)
+                        - inception.probe  (lifecycle checkpoints)
+                        - plan_maker.sub_agent_io  (per-stage output)
+                      If none have arrived yet, a placeholder line keeps
+                      the panel visually anchored. Dark-mode safe via
+                      --color-card-alt / --color-ink-muted tokens. */}
+                  {(chat.thinking || streamingText) && (
                     <div
-                      className="mb-4 mr-auto flex max-w-[70%] items-center gap-2 rounded-xl px-4 py-2.5 text-sm"
-                      style={{ backgroundColor: "#FFFFFF", color: "#7A7A7A" }}
-                    >
-                      <span className="flex gap-1">
-                        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-current"
-                              style={{ animationDelay: "0ms" }} />
-                        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-current"
-                              style={{ animationDelay: "150ms" }} />
-                        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-current"
-                              style={{ animationDelay: "300ms" }} />
-                      </span>
-                      <span>Plan Maker 正在思考中...</span>
-                    </div>
-                  )}
-
-                  {/* Streaming subwindow — max 5 visible lines, internal
-                      scroll, auto-stick to bottom. Frontier-chat "thinking
-                      content" UX: shows the LLM's reasoning as it streams. */}
-                  {streamingText && (
-                    <div
-                      className="mb-4 mr-auto max-w-[85%] rounded-xl border bg-zinc-50 p-3"
-                      style={{ borderColor: "var(--color-border-soft)" }}
+                      className="mb-4 mr-auto max-w-[85%] rounded-xl border p-3"
+                      style={{
+                        backgroundColor: "var(--color-card-alt)",
+                        borderColor: "var(--color-border-soft)",
+                      }}
                     >
                       <div className="mb-1.5 flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide"
                            style={{ color: "var(--color-ink-ghost)" }}>
                         <span className="flex gap-0.5">
                           <span className="h-1 w-1 animate-bounce rounded-full"
-                                style={{ backgroundColor: "var(--color-ink-ghost)", animationDelay: "0ms" }} />
+                                style={{ backgroundColor: "var(--color-brand-500)", animationDelay: "0ms" }} />
                           <span className="h-1 w-1 animate-bounce rounded-full"
-                                style={{ backgroundColor: "var(--color-ink-ghost)", animationDelay: "150ms" }} />
+                                style={{ backgroundColor: "var(--color-brand-500)", animationDelay: "150ms" }} />
                           <span className="h-1 w-1 animate-bounce rounded-full"
-                                style={{ backgroundColor: "var(--color-ink-ghost)", animationDelay: "300ms" }} />
+                                style={{ backgroundColor: "var(--color-brand-500)", animationDelay: "300ms" }} />
                         </span>
-                        <span>思考中</span>
+                        <span>Plan Maker 思考中</span>
                       </div>
                       <div
                         ref={streamBoxRef}
-                        className="max-h-[7.5rem] overflow-y-auto whitespace-pre-wrap text-xs leading-relaxed"
+                        className="max-h-[8rem] overflow-y-auto whitespace-pre-wrap text-xs leading-relaxed"
                         style={{ color: "var(--color-ink-muted)" }}
                       >
-                        {streamingText}
+                        {streamingText || "等待 Plan Maker 响应…"}
                       </div>
                     </div>
                   )}
@@ -1046,6 +1066,19 @@ function InceptionDrawer() {
   );
 }
 
+/** Human-readable labels for Plan Maker pipeline stages — used by the
+ *  live thinking subframe to translate machine sub-agent names into
+ *  Chinese reading easy for end users. */
+const SUB_AGENT_LABELS: Record<string, string> = {
+  compliance_gate: "合规审查",
+  intent_classifier: "意图识别",
+  create_new: "拆解新项目",
+  iterate_existing: "规划迭代任务",
+  clarify_design: "回答设计问题",
+  modify_blueprint: "微调任务草稿",
+  abort_or_restart: "中断/重置流程",
+};
+
 /** Right-panel skeleton shown while the create/iterate sub-agent is
  *  drafting the task list. Renders 3 shimmering task-pill placeholders
  *  + a header explaining what's happening, so the user has immediate
@@ -1104,23 +1137,31 @@ function probeToLine(payload: Record<string, unknown>): string | null {
   if (!label) return null;
   const s = (k: string) => (payload[k] as string | undefined) ?? "";
   switch (label) {
-    case "enter": return "→ Plan Maker 已启动";
-    case "llm_resolved": return `→ 选定 LLM：${s("provider")} / ${s("model")}`;
-    case "llm_built": return "→ LLM 实例就绪";
-    case "backstory_rendered": return `→ Plan Maker 提示已渲染（${s("chars")} 字符）`;
-    case "description_built": return "→ 任务上下文已构建";
-    case "agent_and_task_built": return "→ Agent 与任务定义完成";
-    case "crew_built": return `→ 启动 Crew 推理（${s("timeout_s")}s 超时上限）`;
+    // Quiet "setup" checkpoints — they fire in <100ms and overwhelm the
+    // user with noise. Keep the dev trace in console + LogDrawer; don't
+    // render in the chat thinking subframe.
+    case "enter":
+    case "llm_resolved":
+    case "llm_built":
+    case "backstory_rendered":
+    case "description_built":
+    case "agent_and_task_built":
+      return null;
+    case "crew_built": return "▸ 开始推理";
     case "step": {
       const prev = s("preview").trim();
-      return `▸ 步骤 ${s("n")}${prev ? `: ${prev}` : ""}`;
+      const n = s("n");
+      // Skip empty step probes (they're just heartbeats with no content).
+      if (!prev) return null;
+      return `▸ 第 ${n} 步：${prev}`;
     }
-    case "kickoff_returned": return `✓ 推理完成（共 ${s("steps")} 步）`;
-    case "kickoff_timeout": return `⚠️ Plan Maker 超时（${s("timeout_s")}s）`;
-    case "kickoff_failed": return `⚠️ Plan Maker 中断：${s("error")}`;
-    case "result_unpacked": return `→ 结果解析（${s("text_chars")} 字符）`;
-    case "salvage_persisted": return `✓ 任务方案已持久化（${s("tasks")} 个任务）`;
-    case "early_exit_workflow_already_created": return `✓ 工作流已生成 (${s("reason")})`;
+    case "kickoff_returned": return `✓ 推理完成（${s("steps")} 步）`;
+    case "kickoff_timeout": return `⚠️ 超时（${s("timeout_s")}s）— 请检查 LLM 网络`;
+    case "kickoff_failed": return `⚠️ 中断：${s("error")}`;
+    case "salvage_persisted": return `✓ 已落盘 ${s("tasks")} 个任务`;
+    case "early_exit_workflow_already_created": return null;
+    // Result_unpacked is internal; sub_agent_io will surface the real output
+    case "result_unpacked": return null;
     // Suppress: lock_acquired, assistant_persisted, probe_broadcast_failed
     default: return null;
   }

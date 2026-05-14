@@ -37,6 +37,25 @@ function summarisePayload(type: string, payload: Record<string, unknown> | undef
     const text = typeof payload.text === "string" ? truncate(payload.text, 140) : "";
     return `[${role}] ${step}${text}${tid}`;
   }
+  // plan_maker.sub_agent_io — per-stage IO trace for the Plan Maker
+  // pipeline (compliance_gate / intent_classifier / create_new /
+  // iterate_existing / clarify_design / modify_blueprint /
+  // abort_or_restart). Lets the user watch exactly what each sub-agent
+  // saw + replied across a round.
+  if (type === "plan_maker.sub_agent_io") {
+    const sub = typeof payload.sub_agent === "string" ? payload.sub_agent : "?";
+    const inp = typeof payload.input_preview === "string"
+      ? truncate(payload.input_preview, 80) : "";
+    const out = typeof payload.output_preview === "string"
+      ? truncate(payload.output_preview, 120) : "";
+    const sid = typeof payload.session_id === "string"
+      ? ` · sid=${payload.session_id.slice(-6)}` : "";
+    const conf = payload.confidence != null
+      ? ` (conf=${payload.confidence})` : "";
+    const reason = typeof payload.reason === "string"
+      ? ` reason=${truncate(payload.reason, 30)}` : "";
+    return `🧠 [${sub}] ${inp ? "in=" + inp + " " : ""}→ out=${out}${conf}${reason}${sid}`;
+  }
   // tool.invoked — audit row emitted by GuardedMCPTool / GuardedLocalTool.
   // status ∈ started | completed | denied | failed. Surface tool name +
   // status + duration/error so the user can scan a tool-call trace.

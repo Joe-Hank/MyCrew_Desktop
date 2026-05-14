@@ -24,6 +24,30 @@ import structlog
 log = structlog.get_logger()
 
 
+async def _trace_io(
+    session_id: str,
+    sub_agent: str,
+    input_preview: str,
+    output: Any,
+    **extra: Any,
+) -> None:
+    """Emit a sub-agent IO trace — both to structlog (backend trace) AND
+    to the frontend LogDrawer via WS. Best-effort: never throws."""
+    payload = {
+        "session_id": session_id,
+        "sub_agent": sub_agent,
+        "input_preview": (input_preview or "")[:200],
+        "output_preview": (str(output) if not isinstance(output, str) else output)[:300],
+        **extra,
+    }
+    log.info("router.sub_agent_io", **payload)
+    try:
+        from api.ws import manager
+        await manager.broadcast("plan_maker.sub_agent_io", payload)
+    except Exception:
+        pass
+
+
 RouterDecision = Literal[
     "pre_deny",
     "compliance_care",
@@ -83,6 +107,16 @@ async def dispatch(
     """
     from agents.pre_filter import run_pre_filter, PreFilterDeny
 
+    # Log the round entry — pairs with stage-by-stage IO logs below so
+    # operators can trace exactly how a user message moved through the
+    # 5-stage pipeline (pre_filter → compliance → classifier → sub-agent).
+    log.info("router.round_start",
+             session_id=session.get("id"),
+             mode=session.get("mode"),
+             template_id=session.get("template_id"),
+             project_id=session.get("project_id"),
+             user_message_preview=user_message[:200])
+
     # Stage 0: pre-filter (rule-based, 0 LLM tokens)
     pre = run_pre_filter(user_message)
     if isinstance(pre, PreFilterDeny):
@@ -105,6 +139,10 @@ async def dispatch(
         verdict = None
     else:
         verdict = await check_compliance(masked, session)
+        await _trace_io(
+            session.get("id") or "", "compliance_gate", masked,
+            verdict.kind, reason=verdict.reason,
+        )
 
     if verdict is not None:
         if verdict.kind == "CARE":
@@ -145,6 +183,10 @@ async def dispatch(
         intent = cls_result.intent
         confidence = cls_result.confidence
         reason = cls_result.reason
+        await _trace_io(
+            session.get("id") or "", "intent_classifier", masked,
+            intent, confidence=confidence, reason=reason,
+        )
 
     log.info("router.intent_classified",
              session_id=session.get("id"), intent=intent,
@@ -152,6 +194,11 @@ async def dispatch(
 
     # Stage 3: dispatch to sub-agent
     sub_result = await _dispatch_to_sub_agent(intent, masked, session)
+    await _trace_io(
+        session.get("id") or "", intent, masked,
+        sub_result.get("reply_text") or "",
+        project_id=sub_result.get("project_id"),
+    )
     return RouterResult(
         decision="dispatched",
         intent=intent,
