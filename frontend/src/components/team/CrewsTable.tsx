@@ -1,20 +1,14 @@
 import { useCrews, useDeleteCrew, useAgents, type Crew } from "../../queries/useTeamQuery";
 import RowActionsMenu from "../common/RowActionsMenu";
 
-// NO fr-stretching — fr columns would soak up free space and float the
-// process toggle to the far edge again. Instead bound name/members with
-// max-width and let the row leave whitespace on the right so the toggle
-// sits visually close to the members column.
-//
-//   name:    140-220px (member-name-ish)
-//   members: 180-380px (caps before it could push toggle off-center)
-//   process: 80px      (snug to the toggle chip)
-//   actions: 40px      (⋯ icon only)
-//
-// Max total ≈ 720px + 24px gaps. On a 1000px-wide panel that leaves
-// ~250px right-side whitespace — intentional, so the toggle reads as
-// "with the data" not "isolated at the edge".
-const GRID = "grid-cols-[minmax(140px,220px)_minmax(180px,380px)_80px_40px]";
+// Proportional 4-column fill — name on the left, actions on the right,
+// members + process share the middle. Ratios chosen so on a typical
+// 900-1100px Team panel each column gets a sensible slice:
+//   name 1.5fr (~27%) — role name + avatar dot
+//   members 2.5fr (~45%) — comma-joined agent roles, longest content
+//   process 1fr (~18%) — the toggle chip sits at the left of this cell
+//   actions 0.5fr (~9%) — ⋯ menu icon at the right
+const GRID = "grid-cols-[1.5fr_2.5fr_1fr_0.5fr]";
 
 function CrewsTable({ onEdit }: { onEdit: (c: Crew) => void }) {
   const { data: crews, isLoading } = useCrews();
@@ -37,8 +31,12 @@ function CrewsTable({ onEdit }: { onEdit: (c: Crew) => void }) {
         className={`grid ${GRID} items-center gap-2 px-5 py-3`}
         style={{ borderBottom: "1px solid var(--color-border-soft)" }}
       >
-        {["名称", "成员", "过程控制", "操作"].map((c) => (
-          <span key={c} className="text-xs" style={{ color: "var(--color-ink-ghost)" }}>
+        {["名称", "成员", "过程控制", "操作"].map((c, i) => (
+          <span
+            key={c}
+            className={`text-xs ${i === 3 ? "justify-self-end" : ""}`}
+            style={{ color: "var(--color-ink-ghost)" }}
+          >
             {c}
           </span>
         ))}
@@ -80,18 +78,20 @@ function CrewsTable({ onEdit }: { onEdit: (c: Crew) => void }) {
               {crew.agent_ids.map((id) => agentMap.get(id) ?? id).join(", ") || "无成员"}
             </span>
             <ProcessToggle process={crew.process} />
-            <RowActionsMenu
-              actions={[
-                { label: "编辑", onClick: () => onEdit(crew) },
-                {
-                  label: "删除",
-                  tone: "danger",
-                  onClick: () => {
-                    if (confirm(`删除 Crew "${crew.name}"？`)) deleteMut.mutate(crew.id);
+            <div className="justify-self-end">
+              <RowActionsMenu
+                actions={[
+                  { label: "编辑", onClick: () => onEdit(crew) },
+                  {
+                    label: "删除",
+                    tone: "danger",
+                    onClick: () => {
+                      if (confirm(`删除 Crew "${crew.name}"？`)) deleteMut.mutate(crew.id);
+                    },
                   },
-                },
-              ]}
-            />
+                ]}
+              />
+            </div>
           </div>
         ))
       )}
