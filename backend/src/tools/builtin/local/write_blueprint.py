@@ -87,7 +87,7 @@ class WriteBlueprintTool(GuardedLocalTool):
 
         async def _do() -> str:
             from infra.repo import crud
-            from bootstrap.paths import OUTPUT_DIR
+            from services.blueprint_writer import write_blueprint_to_disk
 
             session = await crud.get_by_id("inception_sessions", session_id)
             if not session or not session.get("project_id"):
@@ -100,76 +100,12 @@ class WriteBlueprintTool(GuardedLocalTool):
             if not project:
                 return f"[Error] project {project_id} not found."
 
-            iteration_index = int(project.get("iteration_index") or 1)
-            root_path = project.get("root_path") or ""
-
-            # Pick output dir: real root_path/.mycrew/ if set, else a
-            # pending location under OUTPUT_DIR. inception_svc will
-            # migrate when the user finally sets root_path.
-            if root_path:
-                base = Path(root_path) / ".mycrew"
-                if iteration_index > 1:
-                    base = base / f"iter-{iteration_index:03d}"
-                pending = False
-            else:
-                base = Path(OUTPUT_DIR) / project_id / ".mycrew_pending"
-                pending = True
-
             try:
-                base.mkdir(parents=True, exist_ok=True)
-                (base / "tasks").mkdir(parents=True, exist_ok=True)
-            except Exception as exc:
-                return f"[Error] failed to create .mycrew dir at {base}: {exc}"
-
-            # blueprint.json — machine-readable
-            blueprint = {
-                "project_id": project_id,
-                "project_name": project.get("name"),
-                "iteration_index": iteration_index,
-                "parent_project_id": project.get("parent_project_id"),
-                "template_id": project.get("template_id"),
-                "tasks": [
-                    t.model_dump() if hasattr(t, "model_dump") else dict(t)
-                    for t in tasks
-                ],
-            }
-            (base / "blueprint.json").write_text(
-                json.dumps(blueprint, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-
-            # architecture.md — human-readable overview
-            (base / "architecture.md").write_text(
-                architecture_overview, encoding="utf-8",
-            )
-
-            # tasks/task_NN.md — one per task with detail + acceptance notes
-            task_dicts = blueprint["tasks"]
-            for i, t in enumerate(task_dicts, start=1):
-                slug = (t.get("title") or "task").replace("/", "_")[:40]
-                fname = f"task_{i:02d}_{slug}.md"
-                lines = [
-                    f"# Task {i}. {t.get('title','')}",
-                    "",
-                    "## 详细指令",
-                    t.get("detail", "(none)"),
-                    "",
-                    "## 输出 Schema",
-                    "```json",
-                    json.dumps(t.get("output_schema") or {},
-                               ensure_ascii=False, indent=2),
-                    "```",
-                    "",
-                    "## 验收要点 (QA 读这里)",
-                    t.get("acceptance_notes") or "(none)",
-                ]
-                (base / "tasks" / fname).write_text(
-                    "\n".join(lines), encoding="utf-8",
+                base, pending = write_blueprint_to_disk(
+                    project, architecture_overview, tasks,
                 )
-
-            log.info("write_blueprint.ok",
-                     project_id=project_id, dir=str(base),
-                     task_count=len(task_dicts), pending=pending)
+            except Exception as exc:
+                return f"[Error] failed to write .mycrew dir: {exc}"
 
             location_hint = (
                 f"<root_path>/.mycrew/" if not pending
@@ -177,7 +113,7 @@ class WriteBlueprintTool(GuardedLocalTool):
             )
             return (
                 f"Blueprint written to {location_hint}. "
-                f"{len(task_dicts)} task spec(s), architecture.md, blueprint.json."
+                f"{len(tasks)} task spec(s), architecture.md, blueprint.json."
             )
 
         try:

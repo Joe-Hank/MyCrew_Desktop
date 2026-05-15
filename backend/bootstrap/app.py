@@ -89,11 +89,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await init_db()
     log.info("startup.db_ready")
 
-    # STEP 2.5: seed builtin tools + Plan Maker agent (idempotent)
+    # STEP 2.5: seed builtin tools + Plan Maker agent + PM v3 helpers (idempotent)
     from bootstrap.seed_builtin_tools import ensure_builtin_tools
     from bootstrap.seed_plan_maker import ensure_plan_maker_agent
+    from bootstrap.seed_planner_agents import ensure_project_initializer_agent
     tool_ids = await ensure_builtin_tools()
     await ensure_plan_maker_agent(tool_ids)
+    await ensure_project_initializer_agent(tool_ids)
     log.info("startup.seeded")
 
     # WS connection manager — imported up front because steps 3/4/5 all use it
