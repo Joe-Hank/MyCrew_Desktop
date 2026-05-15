@@ -45,6 +45,14 @@ export interface Task {
    *  hover tooltip to render a one-line Chinese hint:
    *    quota | auth | mcp | network | validation | stalled | tool | unknown */
   last_error_kind?: string | null;
+  /** PM v4: which kind of performer this task is bound to. When 'crew',
+   *  the canvas swaps in CanvasCrewNode and the run path takes the
+   *  Crew walker (workflow_svc._run_crew). null/undefined means legacy
+   *  v3 single-agent task (uses agent_id). */
+  performer_kind?: "agent" | "crew" | null;
+  /** ID of the bound performer (agent_id or crew_id depending on
+   *  performer_kind). Mirrors agent_id when performer_kind='agent'. */
+  performer_id?: string | null;
 }
 
 export interface ProjectPage {

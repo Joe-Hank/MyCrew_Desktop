@@ -19,6 +19,13 @@ export interface Agent {
   promoted_at: string | null;
 }
 
+export interface CrewSequenceStep {
+  role: "head" | "executor" | "qa";
+  agent_id: string;
+  step_instructions: string;
+  progress_template: string;
+}
+
 export interface Crew {
   id: string;
   name: string;
@@ -26,6 +33,13 @@ export interface Crew {
   agent_ids: string[];
   is_auto_generated: boolean;
   promoted_at: string | null;
+  /** PM v4: human-readable description of when Phase 5 should pick
+   *  this Crew (e.g. "2D sprite / 概念图 / UI 图"). */
+  applicable_scenarios?: string | null;
+  /** PM v4: ordered head → executors → QA chain. Either raw JSON string
+   *  (DB shape) or parsed array (after API normalisation). The Crew
+   *  canvas node parses it via JSON.parse if needed. */
+  agent_sequence?: string | CrewSequenceStep[] | null;
 }
 
 export interface Tool {

@@ -7,7 +7,7 @@ from infra.repo import crud
 
 log = structlog.get_logger()
 
-JSON_FIELDS = ["agent_ids"]
+JSON_FIELDS = ["agent_ids", "agent_sequence"]
 
 
 class CrewService:

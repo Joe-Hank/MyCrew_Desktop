@@ -21,7 +21,9 @@ import {
 import { useThemeStore } from "../../stores/useThemeStore";
 import { buildDepMap, wouldCreateCycle } from "../../lib/depCycle";
 import CanvasTaskNode, { type CanvasTaskNodeData } from "./CanvasTaskNode";
+import CanvasCrewNode, { type CanvasCrewNodeData } from "./CanvasCrewNode";
 import type { TaskAction } from "./TaskNode";
+import type { SubStepAction } from "./SubAgentCard";
 
 // ── Auto-layout fallback for tasks with no persisted position ──────
 //
@@ -35,11 +37,11 @@ import type { TaskAction } from "./TaskNode";
 // same wave. Tuned generously (per user feedback) so cards with multi-line
 // detail text don't visually overlap and the dependency curves have room
 // to flow without crossing card bodies.
-const COL_W = 340;
-// ROW_H tuned 2026-05-15: was 330, dropped to 250 per user feedback that
-// the default vertical stride felt too loose (-80px). Cards still fit
-// agent row + status indicator + room for the amber failure badge.
-const ROW_H = 250;
+// PM v4 (2026-05-16): cards grew from 200→240px, so canvas stride bumps
+// proportionally: COL_W 340→380 (240 + 140px breathing room),
+// ROW_H 250→290 (cards' ~200px height + 90px for halo + amber badge).
+const COL_W = 380;
+const ROW_H = 290;
 
 function computeAutoLayout(tasks: Task[]): Map<string, { x: number; y: number }> {
   const placed = new Set<string>();
@@ -69,7 +71,7 @@ function computeAutoLayout(tasks: Task[]): Map<string, { x: number; y: number }>
 
 // ── Component ──────────────────────────────────────────────────────
 
-const nodeTypes = { task: CanvasTaskNode };
+const nodeTypes = { task: CanvasTaskNode, crew: CanvasCrewNode };
 
 // Module-level constants so React Flow sees identity-stable references
 // across renders. New objects per render would force `edges` to look
@@ -99,6 +101,9 @@ interface CanvasBlueprintProps {
   projectRunning: boolean;
   onSelect: (task: Task) => void;
   onAction: (action: TaskAction) => void;
+  /** PM v4: sub-card action (chat / IO viewer / Head edit / retry-from-step
+   *  / pause). Crew tasks route through this; non-Crew tasks use onAction. */
+  onSubStepAction?: (action: SubStepAction) => void;
   /** Called when the user clicks empty pane area — drops the task
    *  selection so TaskHeader switches back to project info. */
   onDeselect?: () => void;
@@ -115,6 +120,7 @@ function CanvasBlueprint({
   projectRunning,
   onSelect,
   onAction,
+  onSubStepAction,
   onDeselect,
 }: CanvasBlueprintProps) {
   const theme = useThemeStore((s) => s.theme);
@@ -132,14 +138,73 @@ function CanvasBlueprint({
     return m;
   }, [tasks]);
 
+  // Per-task width delta from CanvasCrewNode expanding. Used to push
+  // downstream nodes to the right so the expanded Crew doesn't collide
+  // with the next column (Q-design "B 自动平移下游").
+  const [expandedDeltas, setExpandedDeltas] = useState<Map<string, number>>(new Map());
+  const handleCrewWidthChange = useCallback((taskId: string, delta: number) => {
+    setExpandedDeltas((prev) => {
+      const next = new Map(prev);
+      if (delta <= 0) next.delete(taskId);
+      else next.set(taskId, delta);
+      return next;
+    });
+  }, []);
+
+  // For each task, sum the deltas of all *upstream* (transitively) Crew
+  // tasks that are currently expanded. That total is the horizontal
+  // offset added to its computed x position.
+  const offsetFor = useCallback(
+    (task: Task): number => {
+      if (expandedDeltas.size === 0) return 0;
+      const idById = new Map<string, Task>(tasks.map((t) => [t.id, t]));
+      const visited = new Set<string>();
+      let total = 0;
+      const walk = (id: string) => {
+        if (visited.has(id)) return;
+        visited.add(id);
+        const t = idById.get(id);
+        if (!t) return;
+        for (const dep of t.deps ?? []) {
+          if (expandedDeltas.has(dep)) {
+            total += expandedDeltas.get(dep) ?? 0;
+          }
+          walk(dep);
+        }
+      };
+      walk(task.id);
+      return total;
+    },
+    [tasks, expandedDeltas],
+  );
+
   // Build ReactFlow nodes from tasks. Memoised on tasks + the auxiliary
   // callbacks that the custom node needs.
   const initialNodes: Node[] = useMemo(
     () =>
       tasks.map((t) => {
         const auto = autoLayout.get(t.id) ?? { x: 40, y: 40 };
-        const x = t.position_x ?? auto.x;
+        const baseX = t.position_x ?? auto.x;
         const y = t.position_y ?? auto.y;
+        const x = baseX + offsetFor(t);
+        const isCrew = t.performer_kind === "crew";
+        if (isCrew) {
+          return {
+            id: t.id,
+            type: "crew",
+            position: { x, y },
+            data: {
+              task: t,
+              index: indexById.get(t.id) ?? 0,
+              projectRunning,
+              onSelect,
+              onAction,
+              onSubStepAction: onSubStepAction ?? (() => {}),
+              onWidthChange: handleCrewWidthChange,
+            } satisfies CanvasCrewNodeData,
+            selected: t.id === selectedTaskId,
+          };
+        }
         return {
           id: t.id,
           type: "task",
@@ -154,7 +219,11 @@ function CanvasBlueprint({
           selected: t.id === selectedTaskId,
         };
       }),
-    [tasks, autoLayout, indexById, projectRunning, onSelect, onAction, selectedTaskId],
+    [
+      tasks, autoLayout, indexById, projectRunning,
+      onSelect, onAction, onSubStepAction, selectedTaskId,
+      offsetFor, handleCrewWidthChange,
+    ],
   );
 
   // depsKey changes only when a dep is added/removed/reassigned OR when a
@@ -198,6 +267,15 @@ function CanvasBlueprint({
   // The fix is a merge: keep the existing local node (with its current
   // position) when the task still exists, update only `data` and
   // `selected`; add nodes for new tasks; drop nodes for deleted ones.
+  // When the Crew-expand state changes we WANT the merged nodes to
+  // pick up `fresh.position` so downstream tasks reflow. Otherwise we
+  // preserve existing `existing.position` (= the user's drag) so the
+  // canvas doesn't snap cards back after each WS refresh.
+  const expandedKey = useMemo(
+    () => Array.from(expandedDeltas.entries())
+      .map(([k, v]) => `${k}:${v}`).sort().join(","),
+    [expandedDeltas],
+  );
   useEffect(() => {
     setNodes((current) => {
       const currentById = new Map(current.map((n) => [n.id, n]));
@@ -207,18 +285,21 @@ function CanvasBlueprint({
         if (existing) {
           merged.push({
             ...existing,
+            position: fresh.position,  // pick up offset shifts
             data: fresh.data,
             selected: fresh.selected,
+            type: fresh.type,  // performer_kind may have flipped
           });
         } else {
-          // New task — use the server position (or the auto-layout
-          // fallback already baked into fresh.position).
           merged.push(fresh);
         }
       }
       return merged;
     });
-  }, [initialNodes, setNodes]);
+    // expandedKey forces position refresh; initialNodes already covers
+    // the regular task changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialNodes, expandedKey, setNodes]);
 
   // Edges are derived from `tasks[].deps` and have stable IDs, so a
   // straight replace is fine; ReactFlow diffs by id and skips re-renders
@@ -234,15 +315,21 @@ function CanvasBlueprint({
       if (projectRunning) return;
       for (const c of changes) {
         if (c.type === "position" && c.dragging === false && c.position) {
+          // Persist the canonical position (no Crew-expand offset).
+          // When the Crew collapses later, the stored coordinate should
+          // sit at its natural slot; the offset is purely a render-time
+          // transform.
+          const t = tasks.find((task) => task.id === c.id);
+          const off = t ? offsetFor(t) : 0;
           updateTask.mutate({
             taskId: c.id,
-            position_x: c.position.x,
+            position_x: c.position.x - off,
             position_y: c.position.y,
           });
         }
       }
     },
-    [onNodesChangeBase, projectRunning, updateTask],
+    [onNodesChangeBase, projectRunning, updateTask, tasks, offsetFor],
   );
 
   // Persist edge deletions (Del key on selected edge → onEdgesChange with

@@ -65,7 +65,9 @@ function TaskNode({
         if (e.key === "Enter" || e.key === " ") onSelect(task);
       }}
       className={
-        "relative w-[200px] cursor-pointer rounded-lg p-3 transition-shadow hover:shadow-md " +
+        // PM v4: cards bumped 200→240px (+20%) so the larger canvas
+        // (ROW_H 290 / COL_W 380) doesn't feel sparse.
+        "relative w-[240px] cursor-pointer rounded-lg p-3 transition-shadow hover:shadow-md " +
         (task.status === "running" ? "task-halo-running " : "") +
         (task.status === "stalled" ? "task-halo-stalled " : "")
       }

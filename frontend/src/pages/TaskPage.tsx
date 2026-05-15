@@ -11,12 +11,13 @@ import TaskEditModal from "../components/task/TaskEditModal";
 import AgentChatDrawer from "../components/task/AgentChatDrawer";
 import IoViewerDrawer from "../components/task/IoViewerDrawer";
 import type { TaskAction } from "../components/task/TaskNode";
+import type { SubStepAction } from "../components/task/SubAgentCard";
 
 type DrawerState =
   | null
   | { kind: "edit"; task: Task }
-  | { kind: "agent_chat"; task: Task }
-  | { kind: "view_io"; task: Task; direction: "in" | "out" };
+  | { kind: "agent_chat"; task: Task; stepIndex?: number; agentId?: string }
+  | { kind: "view_io"; task: Task; direction: "in" | "out"; stepIndex?: number };
 
 function TaskPage() {
   const { projectId } = useParams<{ projectId: string }>();
@@ -124,6 +125,43 @@ function TaskPage() {
     }
   }, []);
 
+  // PM v4: sub-card actions route through the same drawer machinery as
+  // task-level actions, but carry an extra stepIndex so the backend
+  // scopes guidance / IO viewer to a single Crew step.
+  const handleSubStepAction = useCallback((action: SubStepAction) => {
+    switch (action.kind) {
+      case "edit":
+        // Edit-from-step is a Head-only Q6 path: open the Head's spec
+        // (sub/0_head_out.json) for direct JSON editing. For now route
+        // to the same TaskEditModal — Stage G will refine.
+        setDrawer({ kind: "edit", task: action.task });
+        break;
+      case "retry":
+        setRetryConfirm(action.task);
+        break;
+      case "pause":
+        // Pause the Crew (task-level). Backend's _run_crew checks the
+        // pause flag at every step boundary.
+        break;
+      case "sub_chat":
+        setDrawer({
+          kind: "agent_chat",
+          task: action.task,
+          stepIndex: action.stepIndex,
+          agentId: action.agentId,
+        });
+        break;
+      case "sub_view_io":
+        setDrawer({
+          kind: "view_io",
+          task: action.task,
+          direction: "out",
+          stepIndex: action.stepIndex,
+        });
+        break;
+    }
+  }, []);
+
   const handleSelect = useCallback((task: Task) => {
     setSelectedTaskId(task.id);
   }, []);
@@ -197,6 +235,7 @@ function TaskPage() {
             projectRunning={projectRunning}
             onSelect={handleSelect}
             onAction={handleAction}
+            onSubStepAction={handleSubStepAction}
             onDeselect={() => setSelectedTaskId(null)}
           />
         </div>
