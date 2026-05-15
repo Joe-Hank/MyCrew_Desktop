@@ -159,6 +159,15 @@ function TaskBlueprintEditor({
                     <span className="text-sm font-medium" style={{ color: "var(--color-ink-soft)" }}>
                       Task{i + 1}. {task.title}
                     </span>
+                    {task.kind === "setup" && (
+                      <span
+                        className="rounded px-1.5 py-0.5 text-[10px]"
+                        style={{ backgroundColor: "rgba(12, 140, 233, 0.14)", color: "var(--color-brand-500)" }}
+                        title="项目初始化任务"
+                      >
+                        初始化
+                      </span>
+                    )}
                     {task.kind === "final_qa" && (
                       <span
                         className="rounded px-1.5 py-0.5 text-[10px]"

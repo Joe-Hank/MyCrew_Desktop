@@ -36,7 +36,10 @@ import type { TaskAction } from "./TaskNode";
 // detail text don't visually overlap and the dependency curves have room
 // to flow without crossing card bodies.
 const COL_W = 340;
-const ROW_H = 330;
+// ROW_H tuned 2026-05-15: was 330, dropped to 250 per user feedback that
+// the default vertical stride felt too loose (-80px). Cards still fit
+// agent row + status indicator + room for the amber failure badge.
+const ROW_H = 250;
 
 function computeAutoLayout(tasks: Task[]): Map<string, { x: number; y: number }> {
   const placed = new Set<string>();
@@ -96,6 +99,9 @@ interface CanvasBlueprintProps {
   projectRunning: boolean;
   onSelect: (task: Task) => void;
   onAction: (action: TaskAction) => void;
+  /** Called when the user clicks empty pane area — drops the task
+   *  selection so TaskHeader switches back to project info. */
+  onDeselect?: () => void;
 }
 
 type PaneMenu = { kind: "pane"; flowX: number; flowY: number; clientX: number; clientY: number };
@@ -109,6 +115,7 @@ function CanvasBlueprint({
   projectRunning,
   onSelect,
   onAction,
+  onDeselect,
 }: CanvasBlueprintProps) {
   const theme = useThemeStore((s) => s.theme);
   const updateTask = useUpdateTask();
@@ -387,7 +394,12 @@ function CanvasBlueprint({
         isValidConnection={isValidConnection}
         onPaneContextMenu={handlePaneContextMenu}
         onNodeContextMenu={handleNodeContextMenu}
-        onPaneClick={closeMenu}
+        onPaneClick={() => {
+          closeMenu();
+          // Drop the task selection so the top TaskHeader switches its
+          // focus back to project-level info.
+          onDeselect?.();
+        }}
         nodesDraggable={!projectRunning}
         nodesConnectable={!projectRunning}
         elementsSelectable

@@ -99,7 +99,9 @@ function TaskNode({
         </div>
       )}
 
-      {/* Title */}
+      {/* Title — setup task ("项目目录初始化") gets a 初始化 badge so
+          it's visually distinct from regular tasks; final_qa already has
+          a "✓ QA" treatment via TaskStatusIndicator. */}
       <div className="mb-1 flex items-center gap-1.5">
         <span
           className="inline-block h-2 w-2 shrink-0 rounded-full"
@@ -111,6 +113,30 @@ function TaskNode({
         >
           Task{index + 1}. {task.title || "未命名"}
         </h3>
+        {task.kind === "setup" && (
+          <span
+            className="shrink-0 rounded px-1.5 py-0.5 text-[9px]"
+            style={{
+              backgroundColor: "rgba(12, 140, 233, 0.14)",
+              color: "var(--color-brand-500)",
+            }}
+            title="项目初始化任务（mkdir + 检查模板骨架）"
+          >
+            初始化
+          </span>
+        )}
+        {task.kind === "final_qa" && (
+          <span
+            className="shrink-0 rounded px-1.5 py-0.5 text-[9px]"
+            style={{
+              backgroundColor: "rgba(245, 158, 11, 0.18)",
+              color: "#92400e",
+            }}
+            title="最终质检任务"
+          >
+            QA
+          </span>
+        )}
       </div>
 
       {/* Agent line */}

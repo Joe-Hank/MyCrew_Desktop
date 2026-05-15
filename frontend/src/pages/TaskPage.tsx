@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useProject, type Task } from "../queries/useProjectQuery";
 import { useRetryTask } from "../queries/useWorkflowQuery";
@@ -59,16 +59,28 @@ function TaskPage() {
     }
   }, [projectId, isLoading, project, lastProjectId, setLastProjectId]);
 
-  // Auto-select first task on project load. Reset when the project id
-  // changes (otherwise the selection from a previous project would
-  // dangle and the canvas would highlight a node that doesn't exist).
+  // Auto-select first task ONCE per project load. Without the
+  // didAutoSelect guard, clicking empty pane (which calls
+  // setSelectedTaskId(null)) would re-trigger this effect and snap the
+  // selection back to task 1 — defeating the "click blank to focus
+  // project" UX.
+  const didAutoSelect = useRef(false);
   useEffect(() => {
     setSelectedTaskId(null);
+    didAutoSelect.current = false;
   }, [projectId]);
   useEffect(() => {
-    if (project?.tasks && project.tasks.length > 0 && !selectedTaskId) {
+    if (
+      project?.tasks
+      && project.tasks.length > 0
+      && !selectedTaskId
+      && !didAutoSelect.current
+    ) {
       const first = project.tasks[0];
-      if (first) setSelectedTaskId(first.id);
+      if (first) {
+        setSelectedTaskId(first.id);
+        didAutoSelect.current = true;
+      }
     }
   }, [project, selectedTaskId]);
 
@@ -185,6 +197,7 @@ function TaskPage() {
             projectRunning={projectRunning}
             onSelect={handleSelect}
             onAction={handleAction}
+            onDeselect={() => setSelectedTaskId(null)}
           />
         </div>
 
