@@ -244,7 +244,12 @@ function TaskPage() {
             so the two LLM-chat surfaces feel like the same product. */}
         {drawer?.kind === "agent_chat" && (
           <div className="w-[400px] shrink-0">
-            <AgentChatDrawer task={drawer.task} onClose={() => setDrawer(null)} />
+            <AgentChatDrawer
+              task={drawer.task}
+              stepIndex={drawer.stepIndex}
+              agentId={drawer.agentId}
+              onClose={() => setDrawer(null)}
+            />
           </div>
         )}
 
@@ -254,6 +259,7 @@ function TaskPage() {
           <IoViewerDrawer
             task={drawer.task}
             initialDirection={drawer.direction}
+            stepIndex={drawer.stepIndex}
             onClose={() => setDrawer(null)}
           />
         )}

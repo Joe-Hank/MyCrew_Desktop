@@ -142,6 +142,27 @@ export function useTaskIO(taskId: string | null, direction: "in" | "out") {
   });
 }
 
+export interface SubIO {
+  step_index: number;
+  in: Record<string, unknown> | null;
+  out: Record<string, unknown> | null;
+  raw: string | null;
+}
+
+export function useSubIO(taskId: string | null, stepIndex: number | null) {
+  return useQuery({
+    queryKey: ["subIO", taskId, stepIndex],
+    queryFn: async () => {
+      if (!taskId || stepIndex === null || stepIndex === undefined) return null;
+      const res = await apiFetch<SubIO>(
+        `/workflow/tasks/${taskId}/sub_io?step_index=${stepIndex}`,
+      );
+      return res.data ?? null;
+    },
+    enabled: !!taskId && stepIndex !== null && stepIndex !== undefined,
+  });
+}
+
 export function useActiveProjects() {
   return useQuery({
     queryKey: ["activeProjects"],

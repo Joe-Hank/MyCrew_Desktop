@@ -22,21 +22,27 @@ interface AgentMsg {
  *  this component only owns the inner layout. */
 function AgentChatDrawer({
   task,
+  stepIndex,
+  agentId,
   onClose,
 }: {
   task: Task;
+  /** PM v4: when set, the chat is scoped to a single Crew step. */
+  stepIndex?: number;
+  /** Agent id of the step being chatted about; passed through to the
+   *  guidance helper so it can mention the agent role in its replies. */
+  agentId?: string;
   onClose: () => void;
 }) {
   const [input, setInput] = useState("");
+  const introContent = stepIndex !== undefined
+    ? `我是 MyCrew 任务诊断助手（限定到第 ${stepIndex + 1} 步）——只回答这一步的输入/输出问题。\n\n` +
+      `当前 Crew 任务：「${task.title}」，整体状态：${task.status}。问吧。`
+    : `我是 MyCrew 任务诊断助手——只解释「为什么这个任务没跑完」，` +
+      `引导你在 UI 上手动修。改任务详情 / 重试 / 改 agent 都要你自己点。\n\n` +
+      `当前任务：「${task.title}」，状态：${task.status}。问吧。`;
   const [messages, setMessages] = useState<AgentMsg[]>([
-    {
-      id: "intro",
-      role: "agent",
-      content:
-        `我是 MyCrew 任务诊断助手——只解释「为什么这个任务没跑完」，` +
-        `引导你在 UI 上手动修。改任务详情 / 重试 / 改 agent 都要你自己点。\n\n` +
-        `当前任务：「${task.title}」，状态：${task.status}。问吧。`,
-    },
+    { id: "intro", role: "agent", content: introContent },
   ]);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -55,7 +61,11 @@ function AgentChatDrawer({
           `/workflow/tasks/${task.id}/guidance`,
           {
             method: "POST",
-            body: JSON.stringify({ message: content }),
+            body: JSON.stringify({
+              message: content,
+              ...(stepIndex !== undefined ? { step_index: stepIndex } : {}),
+              ...(agentId ? { agent_id: agentId } : {}),
+            }),
             signal,
             // LLM call — opt out of the default 30s timeout.
             timeoutMs: 0,
@@ -75,7 +85,7 @@ function AgentChatDrawer({
         ]);
       }
     },
-    [task.id],
+    [task.id, stepIndex, agentId],
   );
   const chat = useChatQueue({ send: sendAgentRound });
 

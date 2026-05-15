@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { Task } from "../../queries/useProjectQuery";
-import { useTaskIO } from "../../queries/useWorkflowQuery";
+import { useTaskIO, useSubIO } from "../../queries/useWorkflowQuery";
 import { usePrefsStore } from "../../stores/usePrefsStore";
 
 /** Side drawer that shows a task's input + output payloads (structured
@@ -17,14 +17,37 @@ import { usePrefsStore } from "../../stores/usePrefsStore";
 function IoViewerDrawer({
   task,
   initialDirection,
+  stepIndex,
   onClose,
 }: {
   task: Task;
   initialDirection: "in" | "out";
+  /** PM v4: when set, the viewer reads the Crew sub-step's IO instead
+   *  of the parent task's. The 'in/out' tab maps to the corresponding
+   *  field on the sub_io response. */
+  stepIndex?: number;
   onClose: () => void;
 }) {
   const [tab, setTab] = useState<"in" | "out">(initialDirection);
-  const { data: io, isLoading } = useTaskIO(task.id, tab);
+  const isSubStep = stepIndex !== undefined && stepIndex !== null;
+  const { data: taskIo, isLoading: taskLoading } = useTaskIO(
+    isSubStep ? null : task.id,
+    tab,
+  );
+  const { data: subIo, isLoading: subLoading } = useSubIO(
+    isSubStep ? task.id : null,
+    isSubStep ? stepIndex! : null,
+  );
+  const io = isSubStep
+    ? (subIo
+        ? {
+            direction: tab,
+            structured: tab === "in" ? subIo.in : subIo.out,
+            raw: subIo.raw,
+          }
+        : null)
+    : taskIo;
+  const isLoading = isSubStep ? subLoading : taskLoading;
 
   const width = usePrefsStore((s) => s.ioViewerWidth);
   const setWidth = usePrefsStore((s) => s.setIoViewerWidth);

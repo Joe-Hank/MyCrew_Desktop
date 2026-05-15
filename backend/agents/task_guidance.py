@@ -80,16 +80,49 @@ def _read_text_safe(path_str: str | None, limit: int = 4000) -> str:
         return ""
 
 
-async def _build_context(task: dict) -> str:
-    """Render task facts into a Markdown block the LLM can ground on."""
-    in_md = _read_text_safe(task.get("io_in_ref"))
-    out_md_path = task.get("io_out_ref")
+def _read_sub_step_files(project_id: str, task_id: str, step_index: int) -> tuple[str, str]:
+    """For Crew sub-step chat: return (in_text, out_text) from the
+    `<OUTPUT_DIR>/<pid>/<tid>/sub/` folder. Either may be empty."""
+    from bootstrap.paths import OUTPUT_DIR
+    sub_dir = OUTPUT_DIR / (project_id or "") / task_id / "sub"
+    if not sub_dir.exists():
+        return "", ""
+    in_text = ""
     out_text = ""
-    if out_md_path:
-        p = Path(out_md_path)
-        # io_out_ref points to out.json — read sibling out.md for raw text
-        md_sibling = p.parent / "out.md"
-        out_text = _read_text_safe(str(md_sibling)) or _read_text_safe(out_md_path)
+    for in_json in sub_dir.glob(f"{step_index}_*_in.json"):
+        in_text = _read_text_safe(str(in_json))
+        break
+    # Prefer the markdown rendering of out for readability
+    for out_md in sub_dir.glob(f"{step_index}_*_out.md"):
+        out_text = _read_text_safe(str(out_md))
+        break
+    if not out_text:
+        for out_json in sub_dir.glob(f"{step_index}_*_out.json"):
+            out_text = _read_text_safe(str(out_json))
+            break
+    return in_text, out_text
+
+
+async def _build_context(task: dict, step_index: int | None = None) -> str:
+    """Render task facts into a Markdown block the LLM can ground on.
+
+    When `step_index` is set the helper restricts the IO it reads to a
+    single Crew step — keeps the conversation tightly scoped so the
+    diagnostic doesn't drift between sibling steps' artifacts.
+    """
+    if step_index is not None:
+        in_md, out_text = _read_sub_step_files(
+            task.get("project_id", ""), task.get("id", ""), step_index,
+        )
+    else:
+        in_md = _read_text_safe(task.get("io_in_ref"))
+        out_md_path = task.get("io_out_ref")
+        out_text = ""
+        if out_md_path:
+            p = Path(out_md_path)
+            # io_out_ref points to out.json — read sibling out.md for raw text
+            md_sibling = p.parent / "out.md"
+            out_text = _read_text_safe(str(md_sibling)) or _read_text_safe(out_md_path)
 
     val_err = task.get("validation_errors")
     if val_err:
@@ -137,12 +170,19 @@ async def chat(
     task_id: str,
     user_message: str,
     session: dict | None = None,
+    step_index: int | None = None,
+    step_agent_id: str | None = None,
 ) -> dict[str, Any]:
     """Single-turn guidance chat for a task.
 
     Returns {"ok": bool, "reply": str, "error"?: str}.
     Stateless — no history persisted server-side; the chat drawer is
     expected to keep its own scrollback in component state.
+
+    `step_index` (PM v4): when set, the helper scopes its grounding
+    context to a single Crew step — reads sub/<i>_*_in/out.json instead
+    of the parent task's in.md/out.md, and instructs the model to
+    answer only about that step.
     """
     task = await crud.get_by_id("tasks", task_id)
     if not task:
@@ -177,10 +217,24 @@ async def chat(
         }
     model_name = m["model_name"]
 
-    context_md = await _build_context(task)
+    context_md = await _build_context(task, step_index=step_index)
+
+    # When the chat is scoped to a single Crew step, prepend a tight
+    # instruction so the diagnostic stays focused on that step's IO
+    # rather than the parent task as a whole.
+    system_prompt = _SYSTEM_PROMPT
+    if step_index is not None:
+        scope_addendum = (
+            f"\n\n# 本次会话的特殊限定\n"
+            f"用户正在询问任务的第 {step_index + 1} 步（Crew 中的一步）。"
+            f"上下文里只给了这一步的 in/out；**不要**讨论同 Crew 其他步骤的细节。"
+        )
+        if step_agent_id:
+            scope_addendum += f" 这一步绑定的 agent id 是 `{step_agent_id}`。"
+        system_prompt = _SYSTEM_PROMPT + scope_addendum
 
     messages = [
-        LlmMessage(role="system", content=_SYSTEM_PROMPT),
+        LlmMessage(role="system", content=system_prompt),
         LlmMessage(role="user",
                    content=f"{context_md}\n\n---\n\n# 用户提问\n{user_message[:1000]}"),
     ]
