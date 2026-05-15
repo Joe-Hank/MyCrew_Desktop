@@ -43,10 +43,42 @@ function TaskHeader({ project, selectedTask }: Props) {
   const isRunning = project.state === "running";
   const isPaused = project.state === "paused";
   const isReady = project.state === "ready";
+  const isStalled = project.state === "stalled";
   const isTerminal = ["completed", "completed_with_warnings", "completed_with_issues", "aborted"]
     .includes(project.state);
 
+  // Tasks in any of these statuses are blocking the workflow — the user
+  // needs to manually fix them (edit detail / change agent / retry)
+  // before the project can keep going. Surfacing them here lets the
+  // start button intercept the click with a clear explanation instead
+  // of silently no-op-ing or hitting a generic backend error.
+  const BLOCKING_STATUSES = new Set(["failed", "validation_failed", "blocked"]);
+  const blockingTasks = (project.tasks ?? []).filter(
+    (t) => BLOCKING_STATUSES.has(t.status),
+  );
+  const isBlockedByTasks = isStalled || blockingTasks.length > 0;
+
   async function handlePrimary() {
+    // Stalled or has blocking tasks → tell the user to fix them first.
+    // The watchdog parked the project here because something needs human
+    // intervention; restarting without fixing it would just stall again.
+    if (isBlockedByTasks && !isRunning && !isPaused) {
+      const lines = blockingTasks.length > 0
+        ? blockingTasks
+            .slice(0, 5)
+            .map((t) => `· ${t.title || "未命名"}（${t.status}）`)
+            .join("\n")
+        : "（看不到具体卡住的任务，但项目处于 stalled 状态）";
+      const more = blockingTasks.length > 5
+        ? `\n…还有 ${blockingTasks.length - 5} 个`
+        : "";
+      alert(
+        `当前项目受阻，需要先人工疏通才能继续：\n\n${lines}${more}\n\n` +
+        "在画布上点击卡住的任务卡片 → 编辑详情 / 改 Agent → 然后点任务上的【重试】键。\n" +
+        "如果不确定原因，可以打开任务卡片上的 💬 Agent 对话，让诊断助手解释。",
+      );
+      return;
+    }
     if (isReady) {
       // Pre-flight: refuse to start when any task has no agent. The
       // backend will also block this (workflow_svc.start) but a friendly
@@ -100,13 +132,15 @@ function TaskHeader({ project, selectedTask }: Props) {
   })();
 
   const primaryDisabled = start.isPending || pause.isPending || resume.isPending;
-  const primaryTitle = isReady
-    ? "启动项目"
-    : isRunning
-      ? "暂停项目"
-      : isPaused
-        ? "继续项目"
-        : "已结束";
+  const primaryTitle = isBlockedByTasks && !isRunning && !isPaused
+    ? `项目受阻（${blockingTasks.length || "stalled"}）— 点击查看详情`
+    : isReady
+      ? "启动项目"
+      : isRunning
+        ? "暂停项目"
+        : isPaused
+          ? "继续项目"
+          : "已结束";
 
   return (
     // No background, no border — sits directly on the page. Everything
@@ -170,8 +204,14 @@ function TaskHeader({ project, selectedTask }: Props) {
             className="flex h-7 w-7 items-center justify-center rounded-lg transition-colors disabled:opacity-50"
             style={{
               backgroundColor: "var(--color-card)",
-              border: "1px solid var(--color-border-soft)",
-              color: isRunning ? "var(--color-brand-500)" : "var(--color-ink-muted)",
+              border: isBlockedByTasks && !isRunning && !isPaused
+                ? "1px solid #f59e0b"  // amber border = needs attention
+                : "1px solid var(--color-border-soft)",
+              color: isBlockedByTasks && !isRunning && !isPaused
+                ? "#f59e0b"
+                : isRunning
+                  ? "var(--color-brand-500)"
+                  : "var(--color-ink-muted)",
             }}
           >
             {isRunning ? <PauseIcon /> : <PlayIcon />}

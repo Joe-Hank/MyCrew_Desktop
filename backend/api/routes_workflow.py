@@ -62,6 +62,25 @@ async def active_projects():
     return {"ok": True, "data": {"projects": workflow_svc.get_active_projects()}}
 
 
+class TaskGuidanceChatBody(BaseModel):
+    message: str
+
+
+@router.post("/tasks/{task_id}/guidance")
+async def task_guidance_chat(task_id: str, body: TaskGuidanceChatBody):
+    """Single-turn LLM guidance about why a task didn't complete.
+
+    Stateless: each call is independent — the frontend keeps its own
+    scrollback. The agent is strictly read-only (won't retry, won't
+    edit the task) and refuses requests that ask it to do so."""
+    from agents.task_guidance import chat as guidance_chat
+    result = await guidance_chat(task_id, body.message)
+    if result.get("ok"):
+        return {"ok": True, "data": {"reply": result["reply"]}}
+    return {"ok": False, "error": {"code": result.get("error", "unknown"),
+                                    "message": result.get("reply", "")}}
+
+
 @router.get("/tasks/{task_id}/io")
 async def get_task_io(task_id: str, direction: str = Query("out", pattern="^(in|out)$")):
     task = await crud.get_by_id("tasks", task_id)
@@ -95,6 +114,14 @@ async def get_task_io(task_id: str, direction: str = Query("out", pattern="^(in|
             try:
                 structured = json.loads(p.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
+                pass
+        # Pair with in.md (human-readable view) when available — same
+        # pattern as out.md for the output side.
+        raw_path = p.parent / "in.md"
+        if raw_path.exists():
+            try:
+                raw = raw_path.read_text(encoding="utf-8")
+            except OSError:
                 pass
 
     return {"ok": True, "data": {"direction": direction, "structured": structured, "raw": raw}}

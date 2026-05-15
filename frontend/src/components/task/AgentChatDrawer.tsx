@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Task } from "../../queries/useProjectQuery";
 import { useChatQueue } from "../../hooks/useChatQueue";
+import { apiFetch } from "../../net/api";
 
 interface AgentMsg {
   id: string;
@@ -31,36 +32,50 @@ function AgentChatDrawer({
     {
       id: "intro",
       role: "agent",
-      content: `任务「${task.title}」执行失败，状态: ${task.status}。请描述你希望如何调整或提供额外信息。`,
+      content:
+        `我是 MyCrew 任务诊断助手——只解释「为什么这个任务没跑完」，` +
+        `引导你在 UI 上手动修。改任务详情 / 重试 / 改 agent 都要你自己点。\n\n` +
+        `当前任务：「${task.title}」，状态：${task.status}。问吧。`,
     },
   ]);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Mock sender — Phase 7+ will replace this with a real Agent round-trip.
-  // Routing through useChatQueue here is intentional: it gives the panel the
-  // same queue-while-thinking UX as Plan Maker, so when the backend lands the
-  // call site doesn't need to change.
+  // Real guidance-agent round-trip. Backend endpoint is stateless:
+  // each call sends ONE user message + the latest task snapshot the
+  // server reads from DB; no history is persisted server-side, so
+  // we just append the request + reply to local component state.
   const sendAgentRound = useCallback(
     async (content: string, signal: AbortSignal): Promise<void> => {
-      return new Promise<void>((resolve, reject) => {
-        const id = `agent_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        const t = setTimeout(() => {
-          setMessages((prev) => [
-            ...prev,
-            { id: `${id}_user`, role: "user", content },
-            { id, role: "agent", content: `[Agent 回复占位] 已收到: "${content}"` },
-          ]);
-          resolve();
-        }, 600);
-        signal.addEventListener("abort", () => {
-          clearTimeout(t);
-          const err = new Error("aborted");
-          (err as Error & { name: string }).name = "AbortError";
-          reject(err);
-        });
-      });
+      const id = `agent_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      // Optimistically append the user bubble so it's visible immediately.
+      setMessages((prev) => [...prev, { id: `${id}_user`, role: "user", content }]);
+
+      try {
+        const res = await apiFetch<{ reply: string }>(
+          `/workflow/tasks/${task.id}/guidance`,
+          {
+            method: "POST",
+            body: JSON.stringify({ message: content }),
+            signal,
+            // LLM call — opt out of the default 30s timeout.
+            timeoutMs: 0,
+          },
+        );
+        const reply = res.ok && res.data
+          ? res.data.reply
+          : `⚠️ 诊断助手暂时无法回复：${res.ok ? "无内容" : (res.error?.message ?? "未知错误")}`;
+        setMessages((prev) => [...prev, { id, role: "agent", content: reply }]);
+      } catch (err) {
+        const name = (err as { name?: string })?.name;
+        if (name === "AbortError") throw err;  // let useChatQueue handle
+        const msg = err instanceof Error ? err.message : String(err);
+        setMessages((prev) => [
+          ...prev,
+          { id, role: "agent", content: `⚠️ 网络出错：${msg}` },
+        ]);
+      }
     },
-    [],
+    [task.id],
   );
   const chat = useChatQueue({ send: sendAgentRound });
 

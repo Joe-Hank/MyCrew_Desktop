@@ -9,7 +9,7 @@ import structlog
 
 from domain.harness.states import ProjectState, TaskState
 from domain.harness.state_machine import HarnessStateMachine
-from domain.harness.task_runner import TaskRunner, TaskOutput
+from domain.harness.task_runner import TaskRunner, TaskInput, TaskOutput
 from domain.qa.dag_validator import validate_dag
 from domain.qa.output_validator import validate_output_schema
 from domain.events import DomainEvent
@@ -218,6 +218,12 @@ class WorkflowService:
         try:
             completed_outputs = self._outputs.get(project_id, {})
             task_input = runner.prepare_input(task_id, completed_outputs)
+
+            # Persist the prepared input next to the future output so the
+            # IO viewer / agent guidance chat can read what the task was
+            # actually told to do (previously the input panel was always
+            # blank because io_in_ref was never written).
+            await self._save_task_input(project_id, task_id, task_input)
 
             raw_text = await self._run_agent(project_id, task_id, task_input)
 
@@ -512,6 +518,57 @@ class WorkflowService:
                                         harness: HarnessStateMachine) -> None:
         for task in harness.get_all_tasks():
             await self._persist_task_state(project_id, task["id"], harness)
+
+    async def _save_task_input(self, project_id: str, task_id: str,
+                                task_input: TaskInput) -> None:
+        """Persist the prepared TaskInput so the IO viewer can show it.
+
+        Mirrors _save_task_output: writes `<OUTPUT_DIR>/<pid>/<tid>/in.json`
+        + `in.md` and stamps `tasks.io_in_ref` with the JSON path."""
+        from bootstrap.paths import OUTPUT_DIR
+        task_dir = OUTPUT_DIR / project_id / task_id
+        task_dir.mkdir(parents=True, exist_ok=True)
+
+        payload = {
+            "task_id": task_input.task_id,
+            "title": task_input.title,
+            "detail": task_input.detail,
+            "agent_id": task_input.agent_id,
+            "kind": task_input.kind,
+            "output_schema": task_input.output_schema,
+            "upstream_outputs": task_input.upstream_outputs,
+        }
+        (task_dir / "in.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        # Human-readable markdown view of the task brief
+        md_lines = [
+            f"# Task: {task_input.title}",
+            "",
+            f"**task_id**: `{task_input.task_id}`  ",
+            f"**agent_id**: `{task_input.agent_id}`  ",
+            f"**kind**: `{task_input.kind}`",
+            "",
+            "## 详细指令",
+            task_input.detail or "(none)",
+            "",
+            "## 期望输出 Schema",
+            "```json",
+            json.dumps(task_input.output_schema, ensure_ascii=False, indent=2),
+            "```",
+        ]
+        if task_input.upstream_outputs:
+            md_lines += [
+                "",
+                "## 上游输出",
+                "```json",
+                json.dumps(task_input.upstream_outputs, ensure_ascii=False, indent=2),
+                "```",
+            ]
+        (task_dir / "in.md").write_text("\n".join(md_lines), encoding="utf-8")
+
+        await crud.update_by_id("tasks", task_id, {
+            "io_in_ref": str(task_dir / "in.json"),
+        })
 
     async def _save_task_output(self, project_id: str, task_id: str,
                                  output: TaskOutput) -> None:
