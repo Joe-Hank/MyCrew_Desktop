@@ -695,3 +695,140 @@ manager.broadcast("task.sub_step", {
 - Crew 内的条件分支 / 跳步（MVP 只支持线性串行）
 - iterate_existing 流程的 Crew 化（用户先前已决定 v3 留待后续，v4 延续这个决定）
 - 修复 PM v4 vs PM v3 老草稿的并存兼容（直接覆盖，不维护多版本）
+
+---
+
+# Grill Q&A Decisions (2026-05-16, post-plan-approval)
+
+13 轮 `/grill-me` 把执行机制 + UI / 状态机 / 迁移 / 兼容这几条线全部钉死。下面是决策清单 — 实施时**这是最终契约，比上文设计章节优先**（上文若与下面冲突，以下面为准）。
+
+## Q1 — Crew 步间结构化捕获 = **B**
+每个 step 都调 emit_output，按 step_index 单独捕获到 `<OUTPUT_DIR>/<pid>/<tid>/sub/<i>_out.json`。**不**走 CrewAI Process.sequential 的文本链；它太脆弱（LLM 在文本里写 JSON 会被截断、解析失败级联）。
+
+## Q2 — 步间数据传递 = **B 手动循环**
+不用 Process.sequential。orchestrator 写 for 循环，每步：
+1. 构造 step description = task 整体 + step_instructions + **上一步结构化 payload（JSON 注入）**
+2. 调 run_task_with_crewai（1 agent + 1 task 的单步 Crew）
+3. pop_step_output 拿结构化捕获
+4. 注入下一步
+
+代码骨架：
+```python
+async def _run_crew(crew_id, task_input, start_step=0):
+    sequence = json.loads(crew["agent_sequence"])
+    prev_output = _load_sub_output(task_input.task_id, start_step - 1) if start_step > 0 else None
+    for i in range(start_step, len(sequence)):
+        if await _is_paused(task_input.task_id):
+            await _mark_paused(task_input.task_id, i)
+            return
+        ... # 跑 step + retry 分流（见 Q3）+ 注入 prev_output
+        prev_output = pop_step_output(...)
+```
+
+## Q3 — Step 失败时的重试分流 = **C**
+3 层防御：
+- 瞬时故障 (`network` / `quota` / `mcp_overload`) → orchestrator 外层 retry 最多 2 次，指数退避
+- 逻辑故障 (`validation` / `tool` / `auth`) → 交 CrewAI agent 内 max_iter self-correct
+- 全失败 → step 级失败 → task 整体 validation_failed，UI 显示 Q11 定义的重试按钮
+
+`failure_kind` 复用现有 `_classify_task_error` 启发式（v3 已有）。
+
+## Q4 — Step sub_schema = **D loose schema**
+- 中间 step 的 emit_output 工厂 schema = `{}`（任意 dict 接受），只跑现有"file_paths 路径必须存在"校验（含 Q4 顺带修的 bug：`_PATH_FIELD_NAMES` 加 `file_paths`/`output_paths` 复数）
+- QA step 的 schema = task.output_schema（PM 给的完整契约）
+- orchestrator 启发式：payload 含 `failed`/`errors`/`issues` 非空数组 → 视为 logic-fail
+- step_instructions 在 prose 里描述该 emit 什么字段，不靠 schema 强约束
+
+## Q5 — 重试起点 = **C 用户选**
+失败时 Head 子卡片的「重试」按钮展开成 "Retry from: [Step N ▾]" 下拉。默认值：
+- 失败步（如 Step 3 挂 → 默认 Step 3）
+- 上次跑停在哪步（paused 状态默认下一步）
+
+## Q6 — Head 编辑器 = **A 直接 JSON 编辑**
+- 「编辑」按钮 → GET sub/0_out.json 原文 → 前端 textarea/CodeMirror → 用户改 → 保存覆盖磁盘
+- 不走 LLM 重出 spec 路径；不烧 token；用户精准控制
+- 警告：若用户改完又选 "Retry from Step 1"，覆盖警告"会丢失你手动编辑的 sub/0_out.json"
+
+## Q7 — 暂停 = **A 软暂停（step 边界）**
+- 用户点暂停 → orchestrator 循环顶部检查 pause flag → 当前 step 跑完后退出
+- task.status = `paused`，UI 黄色 halo + 按钮变 ▶ resume
+- 已花 LLM token 不浪费；状态干净（每个 step 原子完成或失败）
+
+## Q8 — Phase 5 performer pool = **B `list_performers` 工具**
+- Phase 5 LLM 看不到 prompt 里的全量池子；只能调 `list_performers(kind="all"|"agent"|"crew")` 拿真相
+- 提交时 `submit_assignments` 工具 schema 严格（PerformerRef.id 必须在池里，Pydantic 拦截 hallucination）
+- **Phase 2/3 不用这个 tool**（它们不负责选 performer，只写任务描述）；在它们的 backstory 里塞一份**静态摘要**（id + 1 行 applicable_scenarios），让它们知道下游粒度
+
+## Q9 — task 表 performer 存储 = **A 两列**
+```sql
+ALTER TABLE tasks ADD COLUMN performer_kind TEXT;  -- 'agent' | 'crew'
+ALTER TABLE tasks ADD COLUMN performer_id TEXT;
+-- agent_id 保留（v3/iterate legacy 还用）
+```
+查询友好（不用 json_extract），新旧并存。
+
+## Q10 — 老 agent + 老项目处理 = **A 硬删 + 清空老项目**
+- DELETE 12 个老 agent：Plan Maker / Project Manager / Project Structure Manager / 9 个 auto-gen Unity 工程师
+- 同时**清空所有现存项目**（projects / tasks / inception_sessions / planner cache）—— 用户决定开发期可承担
+- 迁移脚本 = SQL 删除 + alembic schema migration + bootstrap seed
+- 零 legacy 负担
+
+## Q11 — Crew task 状态机 × UI 动作 gating
+
+| state | 编辑 Head | 暂停 / 开始 | 重试 | 对话 | IO 查看 |
+|---|---|---|---|---|---|
+| ready | ❌ | ❌ | ❌ | ❌ | ✅ |
+| running | ❌ | ✅ 暂停 | ❌ | ❌ | ✅ |
+| paused | ✅ | ✅ 开始（同按钮 label 切换） | ❌ | ❌ | ✅ |
+| failed (validation_failed) | ✅ | ❌ | ✅ | ✅ | ✅ |
+| done | ❌ | ❌ | ❌ | ❌ | ✅ |
+| stalled | ✅ | ❌ | ✅ | ✅ | ✅ |
+
+注意：
+- **ready 不可编辑** — 没有 spec 可改（不做"预填 Head 跳 Step 1"的 MVP feature）
+- **done 完全冻结** — 想改要走项目级迭代（首页项目卡的「迭代」按钮，下一轮 PM 流程）
+- **对话** 只在 failure-y 状态（failed / stalled）— 健康任务不需要对话排查
+- **IO 查看** 总是可用 — 看 sub/<i>_out.json 是基本观察能力
+
+## Q12 — iterate_existing 命运 = **A 不动**
+- iterate_existing sub-agent 保留 v3 行为（3 工具串调 + 老 assign_agents 工具含 new_agent）
+- 它造的 task 是 agent_id-only（无 performer_kind）
+- workflow_svc 双轨读：
+  ```python
+  if task.get("performer_kind") == "crew":
+      return await self._run_crew(...)
+  # else: 单 agent (v3 legacy 或 v4 agent-kind 都走这里)
+  agent_id = task.get("performer_id") or task.get("agent_id")
+  return await self._run_single_agent(agent_id, ...)
+  ```
+- 老 `assign_agents` 工具保留（iterate 用），但 PM v4 Phase 5 用新的 `submit_assignments`（无 new_agent 字段）
+- 双工具并存；iterate 不享受 Crew 福利，留待未来 v5 重写
+
+## Q13 — Sub-card 视觉信息 = **B 中等密度**
+每个子卡片显示：
+- Role 名（如 "ComfyUI Image Gen"）
+- Step 进度 (e.g., "Step 3 / 5")
+- 状态文本（"running" / "done" / "failed" / "生成中 (2/9 完成)" 等，Crew 设计期定模板）
+- 按钮按 Q11 gating（chat / IO / + 仅 Head 多 edit/pause/retry）
+- 尺寸约 140×140px；5 个并排约 720px；Crew 总宽度配合 ROW_H 290 / COL_W 380
+
+每个 Crew 的 step 自定义"进度文本模板"，存在 agent_sequence 的 `progress_template` 字段里：
+```json
+{
+  "role": "executor",
+  "agent_id": "agent_comfy_image_generator",
+  "step_instructions": "...",
+  "progress_template": "生成中 ({generated_count}/{total_count} 完成)"
+}
+```
+模板变量从 step 的 emit_output 增量捕获里填（step 调中间 progress hooks）；没法精确进度的 step 退到 "running" / "done"。
+
+---
+
+## 整体生效优先级
+
+1. **Q1-Q4** 是 Crew 执行内核 → 实施阶段 C/D 必先做
+2. **Q5-Q7, Q11** 是 UI 交互合约 → 实施阶段 F 做
+3. **Q8-Q9** 是 Phase 5 接入点 → 实施阶段 D 做
+4. **Q10, Q12** 是迁移 + 兼容 → 实施阶段 B / 启动前
+5. **Q13** 是前端视觉 → 实施阶段 F
