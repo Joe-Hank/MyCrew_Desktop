@@ -501,14 +501,33 @@ SEED_CREWS: list[dict] = [
 
 async def _ensure_agent(spec: dict, tool_name_to_id: dict[str, str],
                         llm_id_hint: str = "") -> str:
-    """Insert one agent if absent (matched by role); return its id."""
+    """Insert or update a Crew-pool agent (matched by role); return its id.
+
+    Existing agents get their tool_ids + goal/backstory **refreshed** to
+    match the current seed. This is important: tool sets evolve across
+    PM v4 stages (e.g., adding Unity MCP tools to Unity Developer in
+    stage E), and a previously-seeded agent shouldn't be stuck with the
+    older smaller set. Idempotent: same seed input → same DB row.
+    """
+    desired_tool_ids = _resolve_tools(tool_name_to_id, spec["tools"])
+
     existing = await crud.get_all(
         "agents", "role = ? AND is_auto_generated = 0", (spec["role"],),
     )
     if existing:
-        return existing[0]["id"]
+        row = existing[0]
+        # Re-stamp the toolset + prompt fields. llm_id is preserved if
+        # the user has retuned it via the agent editor (we don't want to
+        # clobber a deliberate user choice).
+        await crud.update_by_id("agents", row["id"], {
+            "goal": spec["goal"],
+            "backstory": spec["backstory"],
+            "tool_ids": json.dumps(desired_tool_ids),
+        })
+        log.info("seed.crew_agent_refreshed",
+                 role=spec["role"], id=row["id"], n_tools=len(desired_tool_ids))
+        return row["id"]
 
-    tool_ids = _resolve_tools(tool_name_to_id, spec["tools"])
     row = await crud.insert("agents", {
         "role": spec["role"],
         "goal": spec["goal"],
@@ -518,7 +537,7 @@ async def _ensure_agent(spec: dict, tool_name_to_id: dict[str, str],
         "memory_enabled": 0,
         "memory_path": None,
         "thinking_mode": 0,
-        "tool_ids": json.dumps(tool_ids),
+        "tool_ids": json.dumps(desired_tool_ids),
         "llm_id": llm_id_hint,
         "is_auto_generated": 0,
     }, id_prefix="agent_")
