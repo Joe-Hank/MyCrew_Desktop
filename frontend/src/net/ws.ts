@@ -63,19 +63,42 @@ class WsClient {
   private doConnect() {
     if (this.closed || !this.url) return;
 
+    // CRITICAL: close + detach any prior socket before opening a new one.
+    // Without this, every reconnect / re-discovery accumulates a "ghost"
+    // WebSocket whose onmessage handler is still bound to the same
+    // listener set → backend broadcasts get dispatched N times where N =
+    // number of ghosts. Symptoms: duplicated pm.log entries, duplicated
+    // sub_agent_io lines, etc.
+    if (this.ws) {
+      const stale = this.ws;
+      stale.onopen = null;
+      stale.onmessage = null;
+      stale.onclose = null;
+      stale.onerror = null;
+      try { stale.close(); } catch { /* ignore */ }
+      this.ws = null;
+    }
+
+    let socket: WebSocket;
     try {
-      this.ws = new WebSocket(this.url);
+      socket = new WebSocket(this.url);
     } catch {
       this.scheduleReconnect();
       return;
     }
+    this.ws = socket;
 
-    this.ws.onopen = () => {
+    socket.onopen = () => {
+      // Guard against a stale socket whose onopen fires after we've
+      // already replaced this.ws — only the current socket should
+      // emit a "ws.connected" event and reset reconnect attempts.
+      if (this.ws !== socket) return;
       this.reconnectAttempt = 0;
       this.dispatch({ type: "ws.connected", ts: new Date().toISOString(), payload: {} });
     };
 
-    this.ws.onmessage = (ev) => {
+    socket.onmessage = (ev) => {
+      if (this.ws !== socket) return;  // ignore late frames from a stale ws
       try {
         const msg: WsMessage = JSON.parse(ev.data);
         this.dispatch(msg);
@@ -84,12 +107,17 @@ class WsClient {
       }
     };
 
-    this.ws.onclose = () => {
+    socket.onclose = () => {
+      // Only the CURRENT socket's close should trigger a reconnect. A
+      // detached ghost socket closing must not schedule a new connection
+      // (that's how the cascading reconnect / ghost-accumulation loop
+      // got going in the first place).
+      if (this.ws !== socket) return;
       this.dispatch({ type: "ws.disconnected", ts: new Date().toISOString(), payload: {} });
       this.scheduleReconnect();
     };
 
-    this.ws.onerror = () => {
+    socket.onerror = () => {
       // onclose will fire after onerror
     };
   }
