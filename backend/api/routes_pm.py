@@ -29,12 +29,20 @@ async def get_pm_state(session_id: str):
     return {"ok": True, "data": state}
 
 
+class SavePmBody(BaseModel):
+    # Optional: if set, save uses this version of the blueprint instead
+    # of the one in the cache — that's how the inline TaskBlueprintEditor
+    # propagates the user's edits without needing a separate PATCH route.
+    override_blueprint: dict | None = None
+
+
 @router.post("/sessions/{session_id}/save")
-async def save_pm_draft(session_id: str):
+async def save_pm_draft(session_id: str, body: SavePmBody | None = None):
     """User clicked 「保存项目」 — migrate the draft from cache into a
     real DB project + .mycrew/ files."""
+    override = body.override_blueprint if body else None
     try:
-        result = await save_draft_as_project(session_id)
+        result = await save_draft_as_project(session_id, override)
     except ValueError as exc:
         return {"ok": False, "error": {"code": "no_draft", "message": str(exc)}}
     except Exception as exc:  # noqa: BLE001

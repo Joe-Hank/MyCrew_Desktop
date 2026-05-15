@@ -401,6 +401,29 @@ function InceptionDrawer() {
     return;
   }, [chat.thinking, drafting]);
 
+  // PM v3 — when the crew finishes ('ready'), mirror its draft into the
+  // inception store's draftBlueprint so the inline TaskBlueprintEditor
+  // can edit it. Edits stay in Zustand; the 保存项目 button forwards
+  // the latest draftBlueprint to /pm/save as override_blueprint so
+  // user-side edits are honoured. Skip if user already started editing
+  // a different blueprint (legacy iterate path).
+  useEffect(() => {
+    if (pmState.status === "ready" && pmState.draft_blueprint && !draftBlueprint) {
+      setDraftBlueprint(pmState.draft_blueprint as unknown as Blueprint);
+    }
+    // Clear local mirror when the cache draft disappears (post-save /
+    // 新建对话 / cancel) so the next round starts clean.
+    if (pmState.status === "idle" && draftBlueprint && !createdProjectId) {
+      setDraftBlueprint(null);
+    }
+  }, [
+    pmState.status,
+    pmState.draft_blueprint,
+    draftBlueprint,
+    createdProjectId,
+    setDraftBlueprint,
+  ]);
+
   // First-launch fallback: pick the first available provider/model.
   useEffect(() => {
     if (selectedLlm || !providers) return;
@@ -1040,7 +1063,20 @@ function InceptionDrawer() {
               style={{ backgroundColor: "var(--color-surface)" }}
             >
               <div className="min-h-0 flex-1 p-4">
-                {pmActive ? (
+                {pmState.status === "ready" && draftBlueprint ? (
+                  // PM v3 draft is ready — show the editable task list
+                  // (mirrored from pmState.draft_blueprint via the
+                  // useEffect above). 保存项目 sends this version as
+                  // override_blueprint so user-side edits are honoured.
+                  // onReEvaluate/reEvaluating are legacy-iterate-only;
+                  // PM v3 users refine by sending another chat message.
+                  <TaskBlueprintEditor
+                    blueprint={draftBlueprint}
+                    onChange={setDraftBlueprint}
+                    onReEvaluate={() => {}}
+                    reEvaluating={false}
+                  />
+                ) : pmActive ? (
                   <PMDebugLog state={pmState} />
                 ) : createdProjectId && draftBlueprint ? (
                   <TaskBlueprintEditor
@@ -1066,6 +1102,7 @@ function InceptionDrawer() {
                   <PMActionButtons
                     state={pmState}
                     sessionId={activeSessionId}
+                    editedBlueprint={draftBlueprint}
                     onSaved={() => {
                       // After save, drawer can close + redirect.
                       void qc.invalidateQueries({ queryKey: ["projects"] });
@@ -1118,23 +1155,32 @@ function InceptionDrawer() {
 function PMActionButtons({
   state,
   sessionId,
+  editedBlueprint,
   onSaved,
   onChanged,
 }: {
   state: PMState;
   sessionId: string | null;
+  /** PM v3 — the inline TaskBlueprintEditor's current draft (potentially
+   *  edited by the user). Forwarded as `override_blueprint` to the save
+   *  endpoint so user edits are honoured instead of the cache version. */
+  editedBlueprint?: Blueprint | null;
   onSaved: () => void;
   onChanged: () => void;
 }) {
   const [busy, setBusy] = useState(false);
 
-  async function call(endpoint: string, label: string): Promise<unknown> {
+  async function call(
+    endpoint: string,
+    label: string,
+    body?: Record<string, unknown>,
+  ): Promise<unknown> {
     if (!sessionId) return null;
     setBusy(true);
     try {
       const res = await apiFetch<unknown>(
         `/pm/sessions/${sessionId}/${endpoint}`,
-        { method: "POST", body: JSON.stringify({}) },
+        { method: "POST", body: JSON.stringify(body ?? {}) },
       );
       if (!res.ok) {
         const errMsg = res.ok ? "" : (res.error?.message ?? "未知错误");
@@ -1170,7 +1216,13 @@ function PMActionButtons({
     return (
       <button
         onClick={async () => {
-          const result = await call("save", "保存");
+          // Forward the (potentially edited) blueprint so user-side
+          // tweaks in TaskBlueprintEditor are honoured. Backend uses
+          // it instead of its cached version when provided.
+          const body = editedBlueprint
+            ? { override_blueprint: editedBlueprint }
+            : undefined;
+          const result = await call("save", "保存", body);
           if (result) onSaved();
         }}
         disabled={busy}

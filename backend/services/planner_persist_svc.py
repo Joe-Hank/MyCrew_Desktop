@@ -39,11 +39,21 @@ from services.project_svc import project_svc
 log = structlog.get_logger()
 
 
-async def save_draft_as_project(session_id: str) -> dict[str, Any]:
+async def save_draft_as_project(
+    session_id: str,
+    override_blueprint: dict | None = None,
+) -> dict[str, Any]:
     """Persist the cached draft blueprint as a real project.
 
     Returns {"project_id": str, "task_count": int} on success.
     Raises ValueError if no draft / draft not ready.
+
+    `override_blueprint`: if provided, this is used INSTEAD of the
+    cached draft. Lets the frontend send the user-edited version of
+    the blueprint (after they tweaked task details / agent_ids in the
+    inline editor) without us needing a separate PATCH endpoint.
+    Server still verifies the session has a 'ready' draft in cache so
+    we don't accidentally save someone else's blueprint.
     """
     draft = planner_cache_svc.get(session_id)
     if draft is None:
@@ -53,7 +63,7 @@ async def save_draft_as_project(session_id: str) -> dict[str, Any]:
             f"draft status is '{draft.get('status')}', expected 'ready'"
         )
 
-    blueprint = draft.get("draft_blueprint")
+    blueprint = override_blueprint if override_blueprint else draft.get("draft_blueprint")
     if not isinstance(blueprint, dict) or not blueprint.get("tasks"):
         raise ValueError("draft has no usable blueprint")
 
