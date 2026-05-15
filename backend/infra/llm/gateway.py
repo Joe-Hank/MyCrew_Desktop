@@ -5,9 +5,19 @@ chat/stream/chat_json methods. Caches adapters per (provider_id, model_name).
 """
 from __future__ import annotations
 
+import asyncio
 from typing import AsyncIterator
 
 import structlog
+
+
+# Hard ceiling on a single chat() call. If the upstream LLM hangs past
+# this (typical cause: provider unreachable from this machine — e.g.
+# api.anthropic.com from CN without proxy), we cancel the request and
+# raise TimeoutError instead of letting the asyncio.Task wedge forever.
+# Workflow execution + Plan Maker callers treat TimeoutError as
+# kind="network" via the existing error-classifier heuristic.
+LLM_CALL_TIMEOUT_SECONDS = 90
 
 from infra.llm.base import (
     BaseLLMAdapter,
@@ -64,10 +74,35 @@ class LlmGateway:
         })
 
         try:
+            # Hard network-level timeout: hung LLM calls (e.g. provider
+            # unreachable, DNS blackhole, TCP SYN swallowed) would
+            # otherwise wedge the calling asyncio.Task forever. Wrap with
+            # asyncio.wait_for so we always reclaim the task within
+            # LLM_CALL_TIMEOUT_SECONDS — the cancellation propagates into
+            # adapter.chat which honours it via its own httpx client.
             if json_mode:
-                response = await adapter.chat_json(messages, **kwargs)
+                response = await asyncio.wait_for(
+                    adapter.chat_json(messages, **kwargs),
+                    timeout=LLM_CALL_TIMEOUT_SECONDS,
+                )
             else:
-                response = await adapter.chat(messages, **kwargs)
+                response = await asyncio.wait_for(
+                    adapter.chat(messages, **kwargs),
+                    timeout=LLM_CALL_TIMEOUT_SECONDS,
+                )
+        except asyncio.TimeoutError as exc:
+            await self._broadcast_event("llm.call_failed", {
+                "provider_id": provider_id,
+                "model": model_name,
+                "error": f"timeout after {LLM_CALL_TIMEOUT_SECONDS}s — "
+                         "LLM provider unreachable or hung",
+            })
+            # Re-raise as a TimeoutError with a clearer message — the
+            # workflow_svc error classifier picks this up as kind=network.
+            raise TimeoutError(
+                f"LLM provider {provider_id} did not respond within "
+                f"{LLM_CALL_TIMEOUT_SECONDS}s (check network / API key / base_url)"
+            ) from exc
         except Exception as exc:
             await self._broadcast_event("llm.call_failed", {
                 "provider_id": provider_id,

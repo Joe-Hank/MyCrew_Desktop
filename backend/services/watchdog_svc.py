@@ -138,6 +138,12 @@ async def _reconcile_orphan_project(project_id: str) -> None:
         none currently RUNNING → STALLED (auto-pause for user attention)
       - some tasks PENDING / BLOCKED, no failures → leave PAUSED so the
         user can manually resume
+      - tasks claiming "running" but no harness exists → flip them to
+        stalled. Without this, the project stays wedged forever: the
+        regular stall scan needs a live harness to call stall_task on,
+        and this orphan reconcile used to bail out on any_running=True,
+        creating a deadlock. (Surfaced by the 「霓虹攀升」 Anthropic-hang
+        incident 2026-05-15.)
     """
     tasks = await crud.get_all("tasks", "project_id = ?", (project_id,))
     if not tasks:
@@ -147,12 +153,45 @@ async def _reconcile_orphan_project(project_id: str) -> None:
     terminal_states = {"done", "failed", "aborted", "validation_failed"}
     fail_states = {"failed", "validation_failed", "aborted"}
 
+    # Force-stall any orphan running tasks. Their asyncio.Task is long
+    # dead (backend was restarted or the LLM call hung past TTL), but the
+    # DB still says "running" — and the regular stall scan can't help
+    # because it needs a live harness to call stall_task.
+    orphan_running = [t for t in tasks if t.get("status") == "running"]
+    if orphan_running:
+        from datetime import datetime, timezone
+        from infra.event_bus import event_bus
+        from domain.events import TaskFailed
+        now_iso = datetime.now(timezone.utc).isoformat()
+        for t in orphan_running:
+            await crud.update_by_id("tasks", t["id"], {
+                "status": "stalled",
+                "finished_at": now_iso,
+                "last_error": "后端重启或 LLM 调用超时导致任务僵死。watchdog 强制刷为 stalled，点重试可重新调度。",
+                "last_error_kind": "stalled",
+            })
+            log.warning("watchdog.orphan_running_forced_stalled",
+                        project_id=project_id, task_id=t["id"])
+            # Best-effort domain event so the frontend updates the canvas
+            try:
+                await event_bus.publish_all([TaskFailed(
+                    project_id=project_id, task_id=t["id"],
+                    error="orphan running task force-stalled",
+                )])
+            except Exception:
+                pass
+        # Re-pull statuses since we just flipped some
+        statuses = [
+            "stalled" if t.get("status") == "running" else t.get("status")
+            for t in tasks
+        ]
+
     all_terminal = all(s in terminal_states for s in statuses)
     any_failed = any(s in fail_states for s in statuses)
-    any_running = any(s == "running" for s in statuses)
+    any_running = any(s == "running" for s in statuses)  # now always False
 
     if any_running:
-        return  # not actually orphan — tasks claim to still be running
+        return  # never reached after the orphan-running flip above
 
     if all_terminal:
         # Compute a verdict like _finalize_project would

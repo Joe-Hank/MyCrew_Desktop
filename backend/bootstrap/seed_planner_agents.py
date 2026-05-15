@@ -62,18 +62,28 @@ async def ensure_project_initializer_agent(tool_name_to_id: dict[str, str]) -> s
 
     tool_ids = [tool_name_to_id[n] for n in _TOOL_NAMES if n in tool_name_to_id]
 
-    # Resolve a default LLM — first configured provider+model. The agent's
-    # work is mechanical so this is rarely a bottleneck; cheap_llm would
-    # be ideal but the column may not be set, so just use any.
-    providers = await crud.get_all("llm_providers")
+    # Hard-pick deepseek-flash as the initializer's LLM. The agent does
+    # nothing but mkdir + emit_output — cheap+fast tier is exactly right,
+    # and pinning a specific model avoids the "first provider alphabetically"
+    # roulette that landed Anthropic Sonnet 4 on a China-only machine
+    # (incident 2026-05-15, 「霓虹攀升」 setup task hung 90+ min).
+    #
+    # Per user spec: NO fallback to a different model if deepseek-flash
+    # isn't configured — leave llm_id empty and let the user fix their
+    # provider setup (clearer failure mode than silent provider swap).
+    deepseek_flash_models = await crud.get_all(
+        "llm_models", "model_name LIKE ?", ("%deepseek%flash%",),
+    )
     llm_id = ""
-    if providers:
-        first = providers[0]
-        models = await crud.get_all("llm_models", "provider_id = ?", (first["id"],))
-        if models:
-            llm_id = f"{first['id']}:{models[0]['model_name']}"
-        else:
-            llm_id = first["id"]
+    if deepseek_flash_models:
+        m = deepseek_flash_models[0]
+        llm_id = f"{m['provider_id']}:{m['model_name']}"
+    else:
+        log.warning(
+            "seed.project_initializer_agent.deepseek_flash_not_found",
+            hint="Configure a DeepSeek provider with a deepseek-*-flash "
+                 "model so the project initializer agent has an LLM",
+        )
 
     row = await crud.insert("agents", {
         "role": INITIALIZER_ROLE,
