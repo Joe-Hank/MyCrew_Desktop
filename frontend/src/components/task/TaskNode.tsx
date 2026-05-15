@@ -48,7 +48,13 @@ function TaskNode({
   const canRetry = ["done", "failed", "validation_failed", "aborted"].includes(task.status) && !projectRunning;
   const canChat = ["failed", "validation_failed", "blocked"].includes(task.status);
 
-  const needsInput = task.status === "blocked" || task.status === "validation_failed";
+  // "Needs input" = task is in a state requiring manual intervention.
+  // failed/stalled are added so the amber badge appears for every
+  // case the start button would refuse to ignore (TaskHeader uses the
+  // same BLOCKING_STATUSES set + stalled).
+  const needsInput = ["blocked", "validation_failed", "failed", "stalled"]
+    .includes(task.status);
+  const warningTooltip = needsInput ? buildWarningTooltip(task) : "";
 
   return (
     <div
@@ -78,12 +84,16 @@ function TaskNode({
             : "0 1px 2px rgba(0, 0, 0, 0.04)",
       }}
     >
-      {/* Status indicator dot - top-right corner if needs input */}
+      {/* Status indicator dot - top-right corner if needs input.
+          Tooltip is built from the persisted last_error_kind + last_error
+          (workflow_svc classifies the exception when the task fails) so
+          hover shows e.g. "Token 配额不足" / "MCP 服务未连接 (Unity Bridge)"
+          instead of the generic "需要用户介入". */}
       {needsInput && (
         <div
           className="absolute -right-1 -top-1 flex h-5 w-5 items-center justify-center rounded-full text-[10px] text-white"
           style={{ backgroundColor: "#f59e0b" }}
-          title="需要用户介入"
+          title={warningTooltip}
         >
           !
         </div>
@@ -216,6 +226,41 @@ function IconBtn({
       {children}
     </button>
   );
+}
+
+/** Maps the persisted last_error_kind (set by backend's
+ *  workflow_svc._classify_task_error) into a short Chinese headline.
+ *  Falls back to the task status when no last_error_kind is available
+ *  (e.g. older rows from before the column was added). */
+const KIND_HEADLINES: Record<string, string> = {
+  quota: "⚠️ Token 配额不足 / 计费问题",
+  auth: "⚠️ LLM 鉴权失败（API Key 无效）",
+  mcp: "⚠️ MCP 依赖未连接（如 Unity Bridge / Blender / ComfyUI）",
+  network: "⚠️ 网络问题（超时 / DNS / 5xx）",
+  validation: "⚠️ 输出校验未通过",
+  stalled: "⚠️ 任务长时间无活动，被监控强制停摆",
+  tool: "⚠️ 工具执行被拒或失败",
+  unknown: "⚠️ Agent 执行异常（具体原因见日志）",
+};
+
+const STATUS_FALLBACK: Record<string, string> = {
+  blocked: "⚠️ 依赖任务未完成，无法启动",
+  validation_failed: "⚠️ 输出校验未通过",
+  failed: "⚠️ Agent 执行失败",
+  stalled: "⚠️ 任务长时间无活动",
+};
+
+function buildWarningTooltip(task: Task): string {
+  const kind = task.last_error_kind ?? "";
+  const headline = KIND_HEADLINES[kind] ?? STATUS_FALLBACK[task.status]
+    ?? "⚠️ 需要用户介入";
+  const detail = (task.last_error ?? "").trim();
+  if (!detail) {
+    return `${headline}\n\n点击卡片 → 💬 Agent 对话，让诊断助手解释。`;
+  }
+  // Cap exception text so the native tooltip stays readable.
+  const trimmed = detail.length > 240 ? detail.slice(0, 240) + "…" : detail;
+  return `${headline}\n\n${trimmed}\n\n点击卡片 → 💬 Agent 对话，可获取更详细的修复建议。`;
 }
 
 export default TaskNode;

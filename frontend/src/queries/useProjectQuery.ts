@@ -37,6 +37,14 @@ export interface Task {
    *  wave-layout coordinates for the initial render. */
   position_x?: number | null;
   position_y?: number | null;
+  /** Free-text failure message (full exception / first validation error)
+   *  persisted on the task row so the canvas warning badge can show a
+   *  concrete reason on hover. Null for non-failed tasks. */
+  last_error?: string | null;
+  /** Coarse failure category, derived server-side. Values used by the
+   *  hover tooltip to render a one-line Chinese hint:
+   *    quota | auth | mcp | network | validation | stalled | tool | unknown */
+  last_error_kind?: string | null;
 }
 
 export interface ProjectPage {

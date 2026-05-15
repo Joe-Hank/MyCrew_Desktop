@@ -104,6 +104,14 @@ async def _check_one_project(project_id: str, stall_seconds: int) -> None:
             log.error("watchdog.stall_task_failed",
                       task_id=t["id"], error=str(exc))
             continue
+        # Stamp a friendly reason on the task row so the canvas amber
+        # tooltip shows a concrete cause instead of the generic "task
+        # execution failed". Mirrors workflow_svc's failure path.
+        from infra.repo import crud as _crud
+        await _crud.update_by_id("tasks", t["id"], {
+            "last_error": f"任务已 {int(elapsed / 60)} 分钟无活动迹象，被监控线程强制停摆。",
+            "last_error_kind": "stalled",
+        })
         await workflow_svc._persist_task_state(project_id, t["id"], harness)
         await workflow_svc._persist_project_state(project_id, harness)
         from infra.event_bus import event_bus

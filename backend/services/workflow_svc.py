@@ -21,6 +21,55 @@ from infra.event_bus.in_memory_bus import event_bus
 log = structlog.get_logger()
 
 
+# ── Failure classification ─────────────────────────────────────────
+# Heuristics on the exception string. Generic but enough to give the
+# user a one-word hint on hover instead of just "执行失败".
+# Order matters — most specific patterns first.
+_ERROR_KIND_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
+    ("quota", (
+        "rate_limit", "rate limit", "ratelimit", "quota", "insufficient_quota",
+        "billing", "exceeded your current quota", "tokens_exhausted",
+        "402", "payment required", "余额不足", "额度",
+    )),
+    ("auth", (
+        "401", "unauthorized", "invalid api key", "incorrect api key",
+        "authentication", "auth_failed",
+    )),
+    ("mcp", (
+        "mcp", "connection refused", "no mcp", "tool not found",
+        "tool_not_registered", "unity bridge", "blender mcp", "comfyui mcp",
+        "8090", "127.0.0.1:8090",
+    )),
+    ("network", (
+        "timeout", "timed out", "connection reset", "connection error",
+        "dns", "getaddrinfo", "name resolution", "ssl", "503", "504",
+        "bad gateway", "service unavailable", "ECONNRESET", "ECONNREFUSED",
+    )),
+    ("stalled", (
+        "stalled:", "no activity past timeout", "watchdog",
+    )),
+    ("tool", (
+        "tool_invocation_failed", "tool execution failed", "guarded",
+        "permission_denied", "denied", "tool error",
+    )),
+]
+
+
+def _classify_task_error(err: str) -> str:
+    """Return a short kind label so the frontend can render a specific
+    Chinese hint on hover instead of just \"执行失败\".
+
+    Falls back to \"unknown\" if no pattern matched."""
+    if not err:
+        return "unknown"
+    lower = err.lower()
+    for kind, patterns in _ERROR_KIND_PATTERNS:
+        for p in patterns:
+            if p.lower() in lower:
+                return kind
+    return "unknown"
+
+
 class WorkflowService:
     def __init__(self) -> None:
         self._active: dict[str, HarnessStateMachine] = {}
@@ -253,10 +302,13 @@ class WorkflowService:
                 self._outputs[project_id][task_id] = output.structured
 
                 await self._save_task_output(project_id, task_id, output)
-                # Clear any stale validation_errors from a prior failed
-                # run (retry path) so the UI doesn't show old red noise.
+                # Clear any stale validation_errors / last_error from a
+                # prior failed run (retry path) so the UI doesn't show
+                # old red noise.
                 await crud.update_by_id("tasks", task_id, {
                     "validation_errors": None,
+                    "last_error": None,
+                    "last_error_kind": None,
                 })
                 events = harness.complete_task(task_id)
             else:
@@ -266,6 +318,8 @@ class WorkflowService:
                 err_list = output.validation_errors or []
                 await crud.update_by_id("tasks", task_id, {
                     "validation_errors": json.dumps(err_list, ensure_ascii=False),
+                    "last_error": "; ".join(err_list)[:500] if err_list else None,
+                    "last_error_kind": "validation",
                 })
                 events = harness.validation_fail_task(task_id, err_list)
 
@@ -276,9 +330,16 @@ class WorkflowService:
             self._schedule_ready_tasks(project_id, harness, runner)
 
         except Exception as exc:
+            err_msg = str(exc)
+            kind = _classify_task_error(err_msg)
             log.error("workflow.task_failed",
-                      project_id=project_id, task_id=task_id, error=str(exc))
-            events = harness.fail_task(task_id, str(exc))
+                      project_id=project_id, task_id=task_id,
+                      error=err_msg, kind=kind)
+            await crud.update_by_id("tasks", task_id, {
+                "last_error": err_msg[:500],
+                "last_error_kind": kind,
+            })
+            events = harness.fail_task(task_id, err_msg)
             await self._persist_task_state(project_id, task_id, harness)
             await self._persist_project_state(project_id, harness)
             await event_bus.publish_all(events)
