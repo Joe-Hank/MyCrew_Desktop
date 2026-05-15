@@ -196,12 +196,16 @@ async def run_crew(session: dict, user_message: str, start_from: str | None = No
                 return planner_cache_svc.get(session_id) or {}
 
         # ── Phase 4: 项目管理 ──────────────────────────────────────
+        # v3.1 重设计：LLM 只发 path_specs + setup.extra_folders，
+        # Python 代码做所有结构变换（插 setup task / 加 deps=[0] /
+        # merge ReviewedTask 字段）。详见 _assemble_pathed_tasks 注释。
         if _need_run("project_mgmt", start_from) and not _has_phase_output(session_id, "project_mgmt"):
             planner_cache_svc.update(session_id, current_phase="project_mgmt")
             reviewed = planner_cache_svc.get_phase_output(session_id, "review")
             template_ctx = await _render_template_ctx(session)
             initializer_id = await _get_initializer_agent_id()
-            pathed_dict = await _run_phase(
+            allowed_prefixes = _extract_template_prefixes(template_ctx)
+            phase4_dict = await _run_phase_with_validation(
                 session_id=session_id,
                 phase="project_mgmt",
                 role=PHASE4_ROLE, goal=PHASE4_GOAL,
@@ -211,15 +215,29 @@ async def run_crew(session: dict, user_message: str, start_from: str | None = No
                     "```json\n"
                     f"{json.dumps(reviewed, ensure_ascii=False, indent=2)}\n"
                     "```\n\n"
-                    f"# 项目初始化助手 agent_id（必须 pre-assign 给 tasks[0]）\n{initializer_id}\n\n"
-                    "推导每个任务的 output_paths，前插 setup 任务，调 submit_pathed_tasks。"
+                    f"总共 {len(reviewed or [])} 个上游任务，path_specs 必须 "
+                    f"对应 {len(reviewed or [])} 条（每条一个 task_index 从 0 到 "
+                    f"{len(reviewed or []) - 1}）。"
                 ),
-                expected_output="调一次 submit_pathed_tasks 后一句中文确认。",
+                expected_output=(
+                    f"调一次 submit_pathed_tasks，path_specs 覆盖 "
+                    f"{len(reviewed or [])} 个上游任务，然后一句中文确认。"
+                ),
                 tools=[make_submit_pathed_tasks_tool(session_id)],
                 provider=pro_provider, model_name=pro_model,
-                temperature=0.3, max_tokens=4000,
+                temperature=0.3, max_tokens=3000,
+                validator=lambda payload: _validate_path_specs(
+                    payload, reviewed or [], allowed_prefixes,
+                ),
             )
-            planner_cache_svc.set_phase_output(session_id, "project_mgmt", pathed_dict["tasks"])
+            # 组装最终 PathedTask 列表（含 setup + deps 调整）
+            pathed_tasks = _assemble_pathed_tasks(
+                reviewed=reviewed or [],
+                path_specs=phase4_dict["path_specs"],
+                setup_spec=phase4_dict["setup"],
+                initializer_agent_id=initializer_id,
+            )
+            planner_cache_svc.set_phase_output(session_id, "project_mgmt", pathed_tasks)
             if _check_cancelled(session_id):
                 return planner_cache_svc.get(session_id) or {}
 
@@ -379,6 +397,271 @@ async def _run_phase(
     msg = f"phase {phase}: agent 未能成功调用提交工具（max_iter + 焦点修复均失败）"
     await _broadcast(session_id, phase, role, "phase_failed", msg, error=msg)
     raise RuntimeError(msg)
+
+
+# ── Phase 4 specific: run + validator-driven retry ──────────────────
+
+
+async def _run_phase_with_validation(
+    *,
+    session_id: str,
+    phase: str,
+    role: str, goal: str, backstory: str,
+    description: str, expected_output: str,
+    tools: list,
+    provider: dict, model_name: str,
+    temperature: float, max_tokens: int,
+    validator,  # Callable[[dict], list[str]] — returns error strings; empty = OK
+) -> dict:
+    """Like _run_phase, but after a kickoff produces a captured payload
+    we run a custom validator (e.g. coverage/conflict checks). On
+    validation failure we *also* try a focused-repair kickoff that
+    includes the validator errors in the prompt so the LLM can self-fix.
+
+    This is what makes Plan A safe: Pydantic only verifies per-record
+    structure; this layer enforces cross-record invariants (coverage,
+    no duplicate indices, no path conflicts, prefix correctness)."""
+    from src.tools.builtin.local._output_capture import pop_planner_output
+
+    await _broadcast(session_id, phase, role, "started", f"phase {phase} started")
+
+    last_validator_errors: list[str] = []
+
+    # Try 1: standard kickoff
+    try:
+        await run_crewai_agent(
+            session_id=session_id, role=role, goal=goal, backstory=backstory,
+            description=description, expected_output=expected_output,
+            tools=tools, provider=provider, model_name=model_name,
+            max_iter=5, temperature=temperature, max_tokens=max_tokens,
+            broadcast_steps=False,
+        )
+    except Exception as exc:  # noqa: BLE001
+        await _broadcast(session_id, phase, role, "phase_failed",
+                         f"kickoff 异常：{exc}", error=str(exc))
+        raise
+
+    payload = pop_planner_output(session_id, phase)
+    if payload is not None:
+        last_validator_errors = validator(payload)
+        if not last_validator_errors:
+            await _broadcast(session_id, phase, role, "phase_completed",
+                             f"phase {phase} completed",
+                             payload_preview=payload)
+            return payload
+        await _broadcast(
+            session_id, phase, role, "retry",
+            f"输出通过 Pydantic 但跨记录校验失败：{'; '.join(last_validator_errors[:3])}",
+        )
+    else:
+        await _broadcast(session_id, phase, role, "retry",
+                         "未捕获到合法输出，焦点修复中…")
+
+    # Try 2: focused repair — include validator errors so LLM can fix
+    error_hint = (
+        f"# 上次失败原因\n你上次的 submit_pathed_tasks 调用没通过校验：\n"
+        f"  - {chr(10) + '  - '.join(last_validator_errors)}\n"
+        f"请这次**严格按上面的错误说明**修正后再调一次。"
+        if last_validator_errors
+        else "# 上次失败原因\n你没成功调用 submit_pathed_tasks。请这次"
+              "**务必调用** submit_pathed_tasks 工具一次性提交。"
+    )
+    repair_desc = f"{description}\n\n{error_hint}"
+    try:
+        await run_crewai_agent(
+            session_id=session_id, role=role, goal=goal, backstory=backstory,
+            description=repair_desc, expected_output=expected_output,
+            tools=tools, provider=provider, model_name=model_name,
+            max_iter=3, temperature=temperature, max_tokens=max_tokens,
+            broadcast_steps=False,
+        )
+    except Exception as exc:  # noqa: BLE001
+        await _broadcast(session_id, phase, role, "phase_failed",
+                         f"焦点修复异常：{exc}", error=str(exc))
+        raise
+
+    payload = pop_planner_output(session_id, phase)
+    if payload is not None:
+        last_validator_errors = validator(payload)
+        if not last_validator_errors:
+            await _broadcast(session_id, phase, role, "phase_completed",
+                             f"phase {phase} completed (repaired)",
+                             payload_preview=payload)
+            return payload
+        msg = ("phase project_mgmt 焦点修复后仍未通过校验："
+               + "; ".join(last_validator_errors[:5]))
+    else:
+        msg = "phase project_mgmt: agent 未能成功调用提交工具（max_iter + 焦点修复均失败）"
+
+    await _broadcast(session_id, phase, role, "phase_failed", msg, error=msg)
+    raise RuntimeError(msg)
+
+
+# ── Phase 4 cross-record validation + composition ───────────────────
+
+
+def _validate_path_specs(
+    payload: dict,
+    reviewed_tasks: list[dict],
+    allowed_prefixes: list[str],
+) -> list[str]:
+    """4 invariants that Pydantic can't check on its own:
+        1. path_specs covers all upstream tasks (count + indices)
+        2. no duplicate task_index
+        3. paths use allowed template prefixes
+        4. no path collides across tasks
+
+    Returns list of error strings; empty list = valid."""
+    errors: list[str] = []
+    path_specs = payload.get("path_specs", [])
+    n = len(reviewed_tasks)
+
+    indices = [ps.get("task_index") for ps in path_specs]
+    # 1. coverage
+    expected = set(range(n))
+    got = set(i for i in indices if isinstance(i, int))
+    missing = sorted(expected - got)
+    extra = sorted(got - expected)
+    if missing:
+        errors.append(f"path_specs 漏掉了上游任务索引：{missing}")
+    if extra:
+        errors.append(f"path_specs 含越界索引（上游只有 {n} 个任务）：{extra}")
+
+    # 2. dup
+    seen: dict[int, int] = {}
+    for i in indices:
+        if isinstance(i, int):
+            seen[i] = seen.get(i, 0) + 1
+    dups = [i for i, c in seen.items() if c > 1]
+    if dups:
+        errors.append(f"path_specs 含重复 task_index：{dups}")
+
+    # 3. prefix correctness
+    bad_prefix: list[str] = []
+    for ps in path_specs:
+        for p in (ps.get("output_paths") or []):
+            if not any(p.startswith(prefix) for prefix in allowed_prefixes):
+                bad_prefix.append(p)
+    if bad_prefix:
+        errors.append(
+            f"以下路径不在模板允许的前缀下（{allowed_prefixes[:5]}…）："
+            f"{bad_prefix[:5]}"
+        )
+
+    # 4. path collision across tasks
+    all_paths: list[str] = []
+    for ps in path_specs:
+        all_paths.extend(ps.get("output_paths") or [])
+    dup_paths = [p for p in set(all_paths) if all_paths.count(p) > 1]
+    if dup_paths:
+        errors.append(f"以下路径被多个任务共用（必须唯一）：{dup_paths[:5]}")
+
+    return errors
+
+
+def _assemble_pathed_tasks(
+    reviewed: list[dict],
+    path_specs: list[dict],
+    setup_spec: dict,
+    initializer_agent_id: str,
+) -> list[dict]:
+    """Compose the final PathedTask list from LLM's per-task path
+    delta + the upstream ReviewedTask records. Deterministic — same
+    inputs always produce the same output."""
+    # Index path_specs for O(1) lookup
+    specs_by_idx = {ps["task_index"]: ps for ps in path_specs}
+
+    # Build the regular/final_qa tasks: merge ReviewedTask + output_paths
+    composed: list[dict] = []
+    all_output_paths: list[str] = []
+    for i, rt in enumerate(reviewed):
+        spec = specs_by_idx.get(i, {})
+        paths = list(spec.get("output_paths") or [])
+        all_output_paths.extend(paths)
+        composed.append({
+            **rt,
+            "output_paths": paths,
+            "agent_id": None,  # Phase 5 will fill
+        })
+
+    # Setup task — derive folders from all output_paths' parents + extras.
+    # Setup goes at index 0; recompute every other task's deps to +1 and
+    # add 0 (since old indices shift).
+    parent_dirs: set[str] = set()
+    for p in all_output_paths:
+        # Take parent if it's a file path (has extension); take itself if
+        # it's already a dir-like path (ends with /)
+        if "/" in p:
+            parent = p.rsplit("/", 1)[0] + "/"
+            parent_dirs.add(parent)
+    for f in (setup_spec.get("extra_folders") or []):
+        if f and not f.endswith("/"):
+            f = f + "/"
+        if f:
+            parent_dirs.add(f)
+    setup_folders = sorted(parent_dirs)
+
+    setup_task = {
+        "title": "创建项目目录结构",
+        "detail": (
+            "为后续任务批量创建子目录，避免后续 mkdir 缺失父目录。"
+            "目录列表：" + ", ".join(setup_folders)
+        ),
+        "deps": [],
+        "kind": "setup",
+        "est_complexity": "small",
+        "acceptance_notes": "所有列出的目录在文件系统上都被建好（mkdir -p 幂等）。",
+        "input_sources": ["项目模板目录骨架 + 后续任务的 output_paths"],
+        "output_schema": {
+            "type": "object",
+            "properties": {
+                "file_paths": {"type": "array", "items": {"type": "string"}},
+                "summary": {"type": "string"},
+            },
+            "required": ["file_paths"],
+        },
+        "output_paths": setup_folders,
+        "agent_id": initializer_agent_id,
+    }
+
+    # Reindex: setup is the new tasks[0]. Every previous index i becomes
+    # i+1, and its deps' old indices [a, b, ...] become [a+1, b+1, ...] + [0]
+    reindexed: list[dict] = []
+    for rt in composed:
+        new_deps = [d + 1 for d in (rt.get("deps") or [])]
+        if 0 not in new_deps:
+            new_deps.insert(0, 0)
+        reindexed.append({**rt, "deps": new_deps})
+
+    return [setup_task] + reindexed
+
+
+def _extract_template_prefixes(template_context: str) -> list[str]:
+    """Parse the rendered template context to find directory prefixes
+    the LLM is allowed to use. The template renderer emits lines like:
+        - Assets/Scripts/         # 推荐：核心系统与控制器
+    so we grep for those bullets and take everything before the first
+    space/comment."""
+    prefixes: list[str] = []
+    for line in template_context.splitlines():
+        line = line.strip()
+        if not line.startswith("- "):
+            continue
+        rest = line[2:].strip()
+        # Stop at first '#' or space
+        for sep in ["#", " ", "  "]:
+            idx = rest.find(sep)
+            if idx > 0:
+                rest = rest[:idx]
+                break
+        rest = rest.strip()
+        if rest and rest not in prefixes:
+            prefixes.append(rest)
+    # Always allow these — Unity convention regardless of template
+    for default in ("Assets/", "Packages/", "ProjectSettings/"):
+        if default not in prefixes:
+            prefixes.append(default)
+    return prefixes
 
 
 # ── Helpers ─────────────────────────────────────────────────────────

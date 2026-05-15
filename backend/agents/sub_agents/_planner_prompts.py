@@ -173,46 +173,54 @@ PHASE4_GOAL = (
 
 
 def _phase4_backstory_template(template_context: str, initializer_agent_id: str) -> str:
+    # initializer_agent_id 现在由代码使用，prompt 里不再要求 LLM 引用
+    _ = initializer_agent_id
     return f"""# 身份
-你是 Unity 项目管理 — 把审核策划的任务表落到具体的项目文件系统位置上。
+你是 Unity 项目管理 — **只做一件事**：给每个上游审核任务推导它产出
+物的存放路径。**所有结构性变换（插入 setup 任务、配 agent、调整
+deps）都由代码自动完成，你不用管。**
 
 # Unity 项目模板信息（必须用它推导路径）
 {template_context}
 
-# 工作流
-1. 收下审核后的任务列表
-2. 给每个任务的 output_schema 里的 file_path / file_paths 推导具体路径：
-   - C# 脚本 → Assets/Scripts/<Module>/<Name>.cs
-   - Prefab → Assets/Prefabs/<Category>/<Name>.prefab
-   - ScriptableObject 数据 → Assets/ScriptableObjects/<Name>.asset
-   - sprite → Assets/Sprites/<Name>.png
-   - 中文字体材质 → 引用 Assets/Fonts/ 下已有字体
-   - ...
-3. 把这些推导出的路径填到每个任务的 output_paths 字段
-4. **必须在任务列表最前面插入一个 kind="setup" 的项目初始化任务**：
-   - title: "创建项目目录结构"
-   - detail: "为后续任务批量创建子目录，避免后续 mkdir 缺失父目录"
-   - deps: []
-   - kind: "setup"
-   - agent_id: "{initializer_agent_id}"  ← 这是预分配的项目初始化助手，必填
-   - output_paths: 所有要建的目录列表（去重）
-   - output_schema: {{"type":"object","properties":{{"file_paths":{{"type":"array"}}}},"required":["file_paths"]}}
-   - acceptance_notes: "所有目录都被建好"
-   - input_sources: ["项目模板目录骨架"]
-5. **给所有其他任务的 deps 加上 0**（让它们等 setup 完成）
-6. 调 submit_pathed_tasks(tasks=[...]) 一次性提交完整列表
+# 你的输入
+上游 Phase 3 审核策划的任务列表（每个任务有 title / detail / kind
+等字段）。
+
+# 你的输出（**只调 submit_pathed_tasks 一次**）
+```
+submit_pathed_tasks(
+    path_specs=[
+        {{"task_index": 0, "output_paths": ["Assets/Scripts/Combat/CombatSystem.cs", "Assets/Prefabs/Combat/EnergyBullet.prefab"]}},
+        {{"task_index": 1, "output_paths": ["Assets/Scripts/Player/PlayerController.cs"]}},
+        ...一条对应一个上游任务...
+    ],
+    setup={{"extra_folders": ["Assets/Resources/"]}}  # 可留空
+)
+```
 
 # 路径推导原则
-- 优先复用模板已有目录（Assets/Scripts、Assets/Prefabs 等）
-- 子目录可以新建，但取名要有意义（Assets/Scripts/Combat/、不要 Assets/Scripts/Misc/）
-- 同模块的脚本聚到同一子目录
-- 中文资产引用 Assets/Fonts/ 已有字体
+- C# 脚本 → Assets/Scripts/<Module>/<Name>.cs（子目录有意义，不要 Misc）
+- Prefab → Assets/Prefabs/<Category>/<Name>.prefab
+- ScriptableObject 数据 → Assets/ScriptableObjects/<Name>.asset
+- 图像 sprite → Assets/Sprites/<Name>.png
+- 音频 → Assets/Audio/<Type>/<Name>.wav
+- 中文显示直接用 Assets/Fonts/ 下已有字体（不要新建字体任务的路径）
+- 一个任务可以产出多个文件（如某个系统脚本 + 配套 prefab）
 
-# 硬约束
-- setup 任务必须是 tasks[0]
-- setup 的 agent_id 必须是 "{initializer_agent_id}"
-- 所有其他任务的 deps 必须含 0
-- 调完一句中文确认收尾"""
+# 硬约束（**违反 → tool 拒收 → 重试**）
+- **path_specs 必须覆盖全部上游任务**（数量一致 / 索引齐全 / 不重复）
+- **每个 output_paths 至少含 1 条路径**
+- **路径必须以模板骨架里的某个目录为前缀**（如 Assets/Scripts/、Assets/Prefabs/ 等）
+- **不同任务的 output_paths 不可重复**（一个文件路径只能归属一个任务）
+
+# setup.extra_folders 怎么用
+通常给 `{{"extra_folders": []}}` 就行 — 代码会自动从所有 output_paths
+推导出父目录列表作为 setup 任务要 mkdir 的基础目录。如果模板里有
+某些目录（如 Assets/Scenes/、Assets/Settings/）虽然没任务直接产出
+但你认为应该确保存在，列在 extra_folders 里。
+
+调完用一句中文确认收尾（如"已为 8 个任务推导路径"）。"""
 
 
 # ── Phase 5: Agent 指挥员 ──────────────────────────────────────────

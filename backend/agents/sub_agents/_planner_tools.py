@@ -134,17 +134,21 @@ def make_submit_reviewed_tasks_tool(session_id: str) -> SubmitReviewedTasks:
 class SubmitPathedTasks(_PlannerSubmitTool):
     name: str = "submit_pathed_tasks"
     description: str = (
-        "提交带输出路径的任务列表。第一项必须是 kind=\"setup\" 的"
-        "项目初始化任务，agent_id 应指向 seeded 的「项目初始化助手」"
-        "（id 由系统提供给你）。其余任务都要：(1) 在 deps 里包含 0 "
-        "（表示等 setup 完成）；(2) 每个 output_paths 是基于 Unity "
-        "模板目录骨架算出的相对路径列表。"
+        "为每个上游审核任务提交它的输出路径列表 + setup 任务的额外目录。"
+        "**你不需要重发任务的标题/详情/schema/agent_id 等字段** — 它们"
+        "会被代码自动从上游继承。你只发两块数据：\n"
+        "  1. path_specs: 每条 {task_index, output_paths}，覆盖所有"
+        "上游任务（数量一致、索引完整、不重复、路径不冲突）\n"
+        "  2. setup: {extra_folders: [...]} — 模板里有但本轮没任务"
+        "直接用的目录；常规情况留空数组即可\n"
+        "setup 任务本身（mkdir 任务、agent 分配、deps 调整）由代码自动"
+        "拼装，你不用管。"
     )
     args_schema: type[BaseModel] = SubmitPathedTasksArgs
     _phase: ClassVar[str] = "project_mgmt"
 
-    def _run(self, tasks: list[dict]) -> str:
-        return self._capture({"tasks": tasks})
+    def _run(self, path_specs: list[dict], setup: dict) -> str:
+        return self._capture({"path_specs": path_specs, "setup": setup})
 
 
 def make_submit_pathed_tasks_tool(session_id: str) -> SubmitPathedTasks:

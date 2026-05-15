@@ -88,7 +88,13 @@ class ReviewedTask(AtomicTask):
 
 
 class PathedTask(ReviewedTask):
-    """项管补字段：基于模板推导的输出路径。"""
+    """项管阶段的产物。**不再由 LLM 直接 emit** — 由 orchestrator
+    根据 LLM 提交的 PathSpec/SetupTaskSpec + 上游 ReviewedTask 组装。
+
+    保留这个模型纯粹为了在 cache / persist_svc / blueprint_writer 那
+    一路使用同一套类型；Phase 4 LLM 不再看到它的 schema（避免被复杂
+    嵌套结构吓退）。
+    """
     # 项管阶段允许引入第 3 种 kind = setup
     kind: Literal["regular", "final_qa", "setup"] = Field("regular")
     output_paths: list[str] = Field(
@@ -97,6 +103,44 @@ class PathedTask(ReviewedTask):
     )
     # setup 任务在 phase 4 就 pre-assigned；其余 task 由 phase 5 填
     agent_id: str | None = Field(None)
+
+
+# ── Phase 4 输入契约（LLM 实际看到的形态） ─────────────────────────
+
+
+class PathSpec(BaseModel):
+    """LLM 给一个上游审核任务推导出的输出路径。
+
+    设计：LLM 一次只想一个 task 的事，不重复发上游字段；orchestrator
+    在 Python 里把 PathSpec 跟 ReviewedTask merge 出最终 PathedTask。
+    """
+    task_index: int = Field(
+        ...,
+        ge=0,
+        description="0-based 索引，指向上游 Phase 3 审核后的任务列表",
+    )
+    output_paths: list[str] = Field(
+        ...,
+        min_length=1,
+        description="本任务产出的文件/目录的相对路径列表，必须以 Unity 模板"
+                    "目录骨架里的某个目录为前缀（如 Assets/Scripts/...）",
+    )
+
+
+class SetupTaskSpec(BaseModel):
+    """LLM 决定 setup 任务额外需要建的目录（除了所有 output_paths
+    的父目录之外）。
+
+    Orchestrator 会自动从所有 PathSpec.output_paths 推导出每个文件的
+    父目录并去重，作为 setup 的基础目录列表；本字段供 LLM 补充那些
+    "虽然没有任务直接产出，但属于项目骨架必须存在" 的目录（如
+    Assets/Scenes/、Assets/Settings/ 等模板里有但本轮可能没人写的）。
+    """
+    extra_folders: list[str] = Field(
+        default_factory=list,
+        description="除了所有任务 output_paths 的父目录之外，还需要额外"
+                    "创建的目录（如模板要求但本轮没任务用到的）",
+    )
 
 
 # ── Phase 5: Agent 指挥员 ──────────────────────────────────────────
@@ -125,10 +169,22 @@ class SubmitReviewedTasksArgs(BaseModel):
 
 
 class SubmitPathedTasksArgs(BaseModel):
-    tasks: list[PathedTask] = Field(
+    """**重设计 v3.1**：LLM 只发它真正需要思考的两个东西 — 每个上游
+    任务的路径列表 + setup 任务的额外目录。Orchestrator 用 Python
+    代码做所有结构变换（插 setup 到 tasks[0]、给所有非 setup 任务的
+    deps 加 0、合并 PathSpec 到 ReviewedTask 上）。
+
+    这把 Phase 4 LLM 的输出体量从「8 个 task × 600 字 = 5KB」降到
+    「8 行 task_index + paths = 1KB」，max_tokens 不再被打爆。"""
+    path_specs: list[PathSpec] = Field(
         ...,
-        min_length=2,
-        description="第一项必须是 kind=setup 的初始化任务，其余依次跟上",
+        min_length=1,
+        description="每个上游审核任务对应一条 PathSpec；必须覆盖全部"
+                    "上游任务（数量一致、索引齐全、不重复）",
+    )
+    setup: SetupTaskSpec = Field(
+        ...,
+        description="setup 任务的额外目录配置；常规情况下 extra_folders 可为空",
     )
 
 
@@ -140,6 +196,8 @@ __all__ = [
     "CompletenessLabel",
     "ConceptDoc",
     "AtomicTask",
+    "PathSpec",
+    "SetupTaskSpec",
     "ReviewedTask",
     "PathedTask",
     "Assignment",
