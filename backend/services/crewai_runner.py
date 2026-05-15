@@ -447,3 +447,179 @@ async def run_task_with_crewai(
     log.info("crewai_runner.finished", task_id=task_input.task_id,
              output_len=len(output_text))
     return output_text
+
+
+# ── PM v4 Crew step runner ────────────────────────────────────────
+#
+# One CrewAI Agent + one CrewAI Task = one step of a Crew. The Crew
+# orchestrator in workflow_svc walks the head→executors→QA sequence
+# itself (manual for-loop), so each step is a fresh single-step Crew
+# kickoff. That keeps step boundaries clean for: pause checks, per-step
+# emit_output capture, sub-step IO files, and progress WS events.
+
+async def run_crew_step_with_crewai(
+    *,
+    agent_row: dict,
+    step_role: str,                 # 'head' | 'executor' | 'qa'
+    step_index: int,                # 0-based
+    step_instructions: str,
+    project_id: str,
+    project_root: str | None,
+    parent_task_id: str,            # the original Crew task id
+    parent_task_title: str,
+    parent_task_detail: str,
+    parent_output_schema: dict,
+    parent_output_paths: list[str],
+    upstream_outputs: dict,
+    prev_step_payload: dict | None,
+    provider_id: str,
+    model_name: str,
+) -> tuple[str, dict | None]:
+    """Run a single Crew step. Returns (raw_text, captured_emit_payload_or_None).
+
+    The emit_output tool is bound to a step-namespaced task_id —
+    `{parent_task_id}#step{i}` — so each step's payload lands in its
+    own slot in `_output_capture._outputs`. The QA step (the chain's
+    last) ALSO captures into the plain parent_task_id key so the
+    existing workflow_svc post-processing picks it up unchanged.
+    """
+    from crewai import Agent, Crew, Process, Task
+
+    provider = await crud.get_by_id("llm_providers", provider_id)
+    if not provider:
+        raise ValueError(f"LLM provider {provider_id} not found")
+
+    llm = _build_crewai_llm(provider, model_name)
+
+    # The QA step (chain's tail) writes into the parent task_id slot —
+    # workflow_svc reads pop_output(task_id) after _run_crew returns.
+    # All other steps write into a per-step namespace.
+    step_task_key = (
+        parent_task_id
+        if step_role == "qa"
+        else f"{parent_task_id}#step{step_index}"
+    )
+
+    # For QA we honour the full task.output_schema (PM contract). For
+    # head/executors the schema is loose (Q4: dict accepted) — pass {}.
+    bound_schema = parent_output_schema if step_role == "qa" else {}
+
+    tool_ctx = {
+        "project_id": project_id,
+        "project_root": project_root,
+        "task_id": step_task_key,
+        "output_schema": bound_schema,
+    }
+    tools = await _resolve_agent_tools(agent_row, tool_ctx)
+
+    role = agent_row.get("role") or "Assistant"
+    goal = agent_row.get("goal") or "完成分配的任务"
+    backstory = agent_row.get("backstory") or "你是一个专业的 AI 助手。"
+
+    agent = Agent(
+        role=role,
+        goal=goal,
+        backstory=backstory,
+        llm=llm,
+        tools=tools or None,
+        max_iter=int(agent_row.get("max_retry") or 3),
+        verbose=False,
+        allow_delegation=False,
+    )
+
+    # Description = step_instructions + PM contract block + prev-step
+    # JSON payload (so the LLM has structured input, not just prose).
+    desc_parts: list[str] = [
+        f"## Crew 步骤 {step_index + 1}（角色：{step_role}）",
+        "",
+        step_instructions,
+        "",
+        f"## 父任务（PM 契约，**不允许修改**）",
+        f"- 标题：{parent_task_title}",
+        f"- 细节：{parent_task_detail or '(无)'}",
+        f"- output_paths（必产）：{json.dumps(parent_output_paths or [], ensure_ascii=False)}",
+        f"- output_schema：```json\n{json.dumps(parent_output_schema or {}, ensure_ascii=False, indent=2)}\n```",
+    ]
+    if upstream_outputs:
+        desc_parts += [
+            "",
+            "## 上游任务输出（其他 task 的产物，可选参考）",
+            "```json",
+            json.dumps(upstream_outputs, ensure_ascii=False, indent=2),
+            "```",
+        ]
+    if prev_step_payload is not None:
+        desc_parts += [
+            "",
+            f"## 上一步（step {step_index}）的结构化输出",
+            "```json",
+            json.dumps(prev_step_payload, ensure_ascii=False, indent=2),
+            "```",
+            "下游 step 必须在这一份基础上推进；不要重新评估或忽略它。",
+        ]
+
+    description = "\n".join(desc_parts)
+    expected_output = "请调用 emit_output 提交本步骤的结构化产物。"
+
+    task = Task(description=description, expected_output=expected_output, agent=agent)
+
+    main_loop = asyncio.get_running_loop()
+
+    def _step_cb(s: object) -> None:
+        # Heartbeat the parent task so the watchdog stays happy through
+        # the whole Crew, not just the executor step.
+        try:
+            from datetime import datetime, timezone
+            now_iso = datetime.now(timezone.utc).isoformat()
+            asyncio.run_coroutine_threadsafe(
+                crud.update_by_id("tasks", parent_task_id,
+                                  {"last_activity_at": now_iso}),
+                main_loop,
+            )
+        except Exception:
+            pass
+        text = _extract_step_text(s)
+        if not text:
+            return
+        try:
+            from api.ws import manager
+            asyncio.run_coroutine_threadsafe(
+                manager.broadcast("agent.output", {
+                    "project_id": project_id,
+                    "task_id": parent_task_id,
+                    "agent_role": role,
+                    "step": step_index,
+                    "text": text,
+                }),
+                main_loop,
+            )
+        except Exception:
+            pass
+
+    crew = Crew(
+        agents=[agent], tasks=[task],
+        process=Process.sequential, verbose=False, memory=False,
+        step_callback=_step_cb,
+    )
+
+    log.info("crew_step.start",
+             parent_task=parent_task_id, step_index=step_index,
+             step_role=step_role, agent_role=role, model=model_name)
+    try:
+        result = await asyncio.to_thread(crew.kickoff)
+    except PermissionDenied as exc:
+        log.warning("crew_step.permission_denied",
+                    parent_task=parent_task_id, step=step_index, kind=exc.kind)
+        return f"[PermissionDenied] {exc}", None
+
+    output_text = str(result.raw if hasattr(result, "raw") else result)
+
+    # Pull whatever the step emitted via emit_output (may be None if the
+    # agent forgot to call it — orchestrator decides how to handle).
+    from src.tools.builtin.local._output_capture import pop_output
+    captured = pop_output(step_task_key)
+
+    log.info("crew_step.finished",
+             parent_task=parent_task_id, step_index=step_index,
+             captured=captured is not None, output_len=len(output_text))
+    return output_text, (captured if isinstance(captured, dict) else None)

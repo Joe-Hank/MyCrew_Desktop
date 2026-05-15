@@ -55,6 +55,44 @@ _ERROR_KIND_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
 ]
 
 
+def _extract_output_paths(output_schema: dict, _detail: str = "") -> list[str]:
+    """Best-effort recovery of the PM contract's output_paths list.
+
+    PM v3/v4 stores the expected file paths inside output_schema under
+    `properties.file_paths.const` or `properties.file_paths.examples`,
+    and sometimes also lists them in plain text inside task.detail.
+    The Crew runner pipes this into every step's prompt so Head/Executor
+    agents see exactly what they're contractually obliged to produce.
+
+    Returns [] if nothing concrete is found — downstream steps still get
+    the raw output_schema as a fallback.
+    """
+    paths: list[str] = []
+    if isinstance(output_schema, dict):
+        props = output_schema.get("properties") or {}
+        for key in ("file_paths", "output_paths", "paths"):
+            entry = props.get(key) or {}
+            if isinstance(entry, dict):
+                for candidate_key in ("const", "default", "examples"):
+                    val = entry.get(candidate_key)
+                    if isinstance(val, list):
+                        paths.extend(p for p in val if isinstance(p, str) and p.strip())
+                    elif isinstance(val, str) and val.strip():
+                        paths.append(val.strip())
+        # Sometimes the contract is at top level
+        top_val = output_schema.get("required_paths")
+        if isinstance(top_val, list):
+            paths.extend(p for p in top_val if isinstance(p, str))
+    # Dedup while preserving order
+    seen: set[str] = set()
+    result: list[str] = []
+    for p in paths:
+        if p not in seen:
+            seen.add(p)
+            result.append(p)
+    return result
+
+
 def _classify_task_error(err: str) -> str:
     """Return a short kind label so the frontend can render a specific
     Chinese hint on hover instead of just \"执行失败\".
@@ -348,14 +386,25 @@ class WorkflowService:
 
     async def _run_agent(self, project_id: str, task_id: str,
                           task_input: Any) -> str:
-        """Execute a task via its bound Agent.
+        """Execute a task — route to Crew runner or single-agent runner.
 
-        Prefers a real CrewAI Agent/Crew/Task pipeline (with tools + memory
-        plumbing) when the agent has tools or the agent record requests it.
-        Falls back to a direct LLM completion when CrewAI fails to start
-        (e.g. litellm provider mismatch), so a missing tool config never
-        blocks task execution.
+        PM v4 introduced a performer_kind column on tasks. When the task
+        was assigned a Crew (`performer_kind == 'crew'`), the orchestrator
+        walks the Crew's agent_sequence step-by-step. Otherwise (v3
+        legacy or v4 single-agent picks) the original single-agent path
+        runs unchanged.
         """
+        task_row = await crud.get_by_id("tasks", task_id) or {}
+        performer_kind = task_row.get("performer_kind")
+
+        if performer_kind == "crew":
+            performer_id = task_row.get("performer_id")
+            if not performer_id:
+                raise ValueError(
+                    f"Task {task_id} has performer_kind='crew' but no performer_id"
+                )
+            return await self._run_crew(project_id, task_id, task_input, performer_id)
+
         agent = await crud.get_by_id("agents", task_input.agent_id)
         if not agent:
             raise ValueError(f"Agent {task_input.agent_id} not found")
@@ -384,6 +433,198 @@ class WorkflowService:
         return await self._run_agent_direct_llm(
             project_id, task_id, task_input, agent, provider_id, model_name,
         )
+
+    async def _run_crew(self, project_id: str, task_id: str,
+                         task_input: Any, crew_id: str) -> str:
+        """Walk a Crew's agent_sequence head → executors → QA.
+
+        Per Q1 / Q2: each step is its own single-agent kickoff; the
+        previous step's emit_output payload is injected into the next
+        step's description as structured JSON.
+
+        Per Q7: a pause flag is checked at every step boundary; when set,
+        the loop exits cleanly without touching the in-flight CrewAI
+        worker (it has already completed the current step).
+
+        Returns a Markdown summary of the full Crew run — workflow_svc's
+        existing post-processing will pick up the QA step's structured
+        emit_output via `pop_output(task_id)` (the QA step is bound to
+        the parent task_id key so the chain's tail flows into the same
+        downstream pipeline as a v3 single-agent task).
+        """
+        from bootstrap.paths import OUTPUT_DIR
+        # Imported via this module so tests can monkey-patch it.
+        from services import crewai_runner as _crewai_runner
+
+        crew = await crud.get_by_id("crews", crew_id)
+        if not crew:
+            raise ValueError(f"Crew {crew_id} not found")
+        sequence_raw = crew.get("agent_sequence") or "[]"
+        try:
+            sequence = json.loads(sequence_raw) if isinstance(sequence_raw, str) else sequence_raw
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise ValueError(f"Crew {crew_id} has malformed agent_sequence: {exc}")
+        if not isinstance(sequence, list) or not sequence:
+            raise ValueError(f"Crew {crew_id} agent_sequence is empty")
+
+        project = await crud.get_by_id("projects", project_id) or {}
+        project_root = project.get("root_path") or None
+
+        # output_paths is part of the PM contract; tasks table doesn't
+        # have it as a column, but the upstream Plan Maker stores it
+        # inside output_schema (as "required" list of path strings) OR
+        # in detail. For now derive a best-effort list from output_schema.
+        parent_output_schema = task_input.output_schema or {}
+        parent_output_paths = _extract_output_paths(parent_output_schema, task_input.detail or "")
+
+        sub_dir = OUTPUT_DIR / project_id / task_id / "sub"
+        sub_dir.mkdir(parents=True, exist_ok=True)
+
+        prev_payload: dict | None = None
+        step_summaries: list[str] = []
+
+        for i, step in enumerate(sequence):
+            # Q7 soft pause: cooperative check at step boundary
+            harness = self._active.get(project_id)
+            if harness and harness.state == ProjectState.PAUSED:
+                log.info("crew.paused_at_step_boundary",
+                         task_id=task_id, step_index=i)
+                step_summaries.append(f"⏸ Step {i + 1} skipped — project paused")
+                break
+
+            step_role = step.get("role") or "executor"
+            agent_id = step.get("agent_id")
+            step_instructions = step.get("step_instructions") or ""
+            agent_row = await crud.get_by_id("agents", agent_id) if agent_id else None
+            if not agent_row:
+                raise ValueError(
+                    f"Crew {crew_id} step {i} references missing agent_id {agent_id}"
+                )
+            provider_id, model_name = await self._resolve_agent_llm(agent_row)
+
+            await self._broadcast_sub_step(
+                project_id, task_id, i, step_role,
+                agent_id, agent_row.get("role", ""), "started",
+            )
+
+            try:
+                text, captured = await _crewai_runner.run_crew_step_with_crewai(
+                    agent_row=agent_row,
+                    step_role=step_role,
+                    step_index=i,
+                    step_instructions=step_instructions,
+                    project_id=project_id,
+                    project_root=project_root,
+                    parent_task_id=task_id,
+                    parent_task_title=task_input.title,
+                    parent_task_detail=task_input.detail or "",
+                    parent_output_schema=parent_output_schema,
+                    parent_output_paths=parent_output_paths,
+                    upstream_outputs=task_input.upstream_outputs or {},
+                    prev_step_payload=prev_payload,
+                    provider_id=provider_id,
+                    model_name=model_name,
+                )
+            except Exception as exc:
+                err = str(exc)
+                log.error("crew.step_failed",
+                          task_id=task_id, step_index=i, error=err)
+                await self._broadcast_sub_step(
+                    project_id, task_id, i, step_role,
+                    agent_id, agent_row.get("role", ""), "failed",
+                    error=err[:200],
+                )
+                raise
+
+            # Persist sub-step IO
+            await self._save_sub_step_io(
+                project_id, task_id, i, step_role,
+                step_instructions, prev_payload,
+                text, captured,
+            )
+
+            prev_payload = captured  # may be None — next step sees null
+            step_summaries.append(
+                f"✓ Step {i + 1}/{len(sequence)} [{step_role}] {agent_row.get('role', '')} "
+                f"— captured={'yes' if captured else 'no'}"
+            )
+
+            await self._broadcast_sub_step(
+                project_id, task_id, i, step_role,
+                agent_id, agent_row.get("role", ""), "completed",
+            )
+
+        # The QA step's emit_output was bound to parent task_id, so the
+        # caller's `pop_output(task_id)` finds it. We return a markdown
+        # log of the Crew run for the agent_output / debug viewers.
+        return "\n".join(step_summaries) or "(empty Crew run)"
+
+    async def _save_sub_step_io(self, project_id: str, task_id: str,
+                                 step_index: int, step_role: str,
+                                 step_instructions: str,
+                                 prev_payload: dict | None,
+                                 raw_text: str,
+                                 captured: dict | None) -> None:
+        """Write `<OUTPUT_DIR>/<pid>/<tid>/sub/<i>_<role>_{in,out}.json+md`.
+
+        These files back the sub-card IO viewer in the frontend — every
+        step gets its own observable slice.
+        """
+        from bootstrap.paths import OUTPUT_DIR
+        sub_dir = OUTPUT_DIR / project_id / task_id / "sub"
+        sub_dir.mkdir(parents=True, exist_ok=True)
+
+        in_payload = {
+            "step_index": step_index,
+            "step_role": step_role,
+            "step_instructions": step_instructions,
+            "prev_step_payload": prev_payload,
+        }
+        (sub_dir / f"{step_index}_{step_role}_in.json").write_text(
+            json.dumps(in_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        out_payload = {
+            "step_index": step_index,
+            "step_role": step_role,
+            "raw_text": raw_text[:4000],
+            "captured": captured,
+        }
+        (sub_dir / f"{step_index}_{step_role}_out.json").write_text(
+            json.dumps(out_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        (sub_dir / f"{step_index}_{step_role}_out.md").write_text(
+            f"# Step {step_index + 1} · {step_role}\n\n"
+            f"## Raw text\n\n```\n{raw_text[:4000]}\n```\n\n"
+            f"## Captured (emit_output)\n\n```json\n"
+            f"{json.dumps(captured, ensure_ascii=False, indent=2) if captured else '(none)'}\n```",
+            encoding="utf-8",
+        )
+
+    async def _broadcast_sub_step(
+        self, project_id: str, task_id: str,
+        step_index: int, step_role: str,
+        agent_id: str | None, agent_role: str,
+        status: str, error: str = "",
+    ) -> None:
+        """Fire a task.sub_step WS event so the Crew sub-cards update live."""
+        try:
+            from datetime import datetime, timezone
+            from api.ws import manager
+            payload = {
+                "task_id": task_id,
+                "project_id": project_id,
+                "step_index": step_index,
+                "role": step_role,
+                "agent_id": agent_id or "",
+                "agent_role": agent_role,
+                "status": status,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            }
+            if error:
+                payload["error"] = error
+            await manager.broadcast("task.sub_step", payload)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("workflow.sub_step_broadcast_failed",
+                        task_id=task_id, error=str(exc))
 
     async def _run_agent_direct_llm(
         self,
