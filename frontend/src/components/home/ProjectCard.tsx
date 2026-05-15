@@ -15,6 +15,7 @@ import { useAgents } from "../../queries/useTeamQuery";
 import { useCreateInceptionSession } from "../../queries/useInceptionQuery";
 import { useInceptionStore } from "../../stores/useInceptionStore";
 import { usePrefsStore } from "../../stores/usePrefsStore";
+import { apiFetch, ApiError } from "../../net/api";
 
 // ── Card state machine ─────────────────────────────────────────────
 //
@@ -80,8 +81,12 @@ function ProjectCard({ project }: { project: Project }) {
   /** Tauri folder picker. Returns the chosen absolute path, or null if the
    *  user cancelled. Throws with a descriptive message if Tauri isn't
    *  available (running in a plain browser) or the plugin call failed —
-   *  callers decide whether to alert or silently fall through. */
-  async function pickFolder(): Promise<string | null> {
+   *  callers decide whether to alert or silently fall through.
+   *
+   *  `defaultPath` (optional) seeds the dialog's initial directory — used
+   *  by the "configured but not yet started" state so users can quickly
+   *  see / modify the previously-picked folder. */
+  async function pickFolder(defaultPath?: string): Promise<string | null> {
     const hasTauri =
       typeof window !== "undefined" &&
       !!(window as unknown as { __TAURI_INTERNALS__?: unknown })
@@ -93,17 +98,43 @@ function ProjectCard({ project }: { project: Project }) {
       directory: true,
       multiple: false,
       title: "选择项目根目录",
+      defaultPath: defaultPath || undefined,
     });
     return typeof result === "string" ? result : null;
   }
 
-  /** Click handler for the "设置路径" button. Opens the folder picker
-   *  immediately; if the user picks one, save and skip the modal entirely.
-   *  On any failure surface the error then fall back to the manual-entry
-   *  modal so the user can still paste a path. */
+  // Path button has three states (per spec):
+  //   1. unset       — no root_path yet                → blue, picker
+  //   2. modifiable  — root configured but never started → gray, picker seeded with current
+  //   3. locked      — project has been started or finished → gray, lock icon, opens Explorer read-only
+  // "started" detection: any state besides 'ready' implies execution
+  // happened at some point (running/paused/stalled/completed*/aborted).
+  type PathBtnMode = "unset" | "modifiable" | "locked";
+  const pathBtnMode: PathBtnMode = !project.root_path
+    ? "unset"
+    : project.state === "ready"
+      ? "modifiable"
+      : "locked";
+
+  /** Click handler for the "路径" button. Behaviour branches by mode:
+   *   unset / modifiable → folder picker (modifiable seeds defaultPath)
+   *   locked             → just open the existing root in Explorer */
   async function handleConfigurePath() {
+    if (pathBtnMode === "locked") {
+      try {
+        await apiFetch(`/projects/${project.id}/open-root`, { method: "POST" });
+      } catch (err) {
+        const msg = err instanceof ApiError && err.kind === "envelope"
+          ? err.message
+          : (err as Error).message;
+        alert(`无法打开路径：${msg}`);
+      }
+      return;
+    }
     try {
-      const picked = await pickFolder();
+      const picked = await pickFolder(
+        pathBtnMode === "modifiable" ? project.root_path ?? undefined : undefined,
+      );
       if (picked) {
         rootPathMut.mutate({ id: project.id, root_path: picked });
         return;
@@ -317,11 +348,7 @@ function ProjectCard({ project }: { project: Project }) {
           {primary.label}
         </button>
 
-        <PathButton
-          locked={!!project.root_path}
-          configured={!!project.root_path}
-          onClick={handleConfigurePath}
-        />
+        <PathButton mode={pathBtnMode} onClick={handleConfigurePath} />
 
         <button
           onClick={handleIterate}
@@ -462,28 +489,52 @@ function ProjectCard({ project }: { project: Project }) {
 }
 
 function PathButton({
-  locked,
-  configured,
+  mode,
   onClick,
 }: {
-  locked: boolean;
-  configured: boolean;
+  mode: "unset" | "modifiable" | "locked";
   onClick: () => void;
 }) {
+  // Visual contract:
+  //   unset       — brand-blue fill, white text. Calls user attention
+  //                 because the primary "开始" button is gated on this.
+  //   modifiable  — light gray bg, label-color text, unlock icon. Picker
+  //                 will seed defaultPath to the current root_path.
+  //   locked      — light gray bg, disabled-color text, lock icon. Click
+  //                 opens Explorer at root_path; no modification allowed.
+  const bg = mode === "unset"
+    ? "var(--color-brand-500)"
+    : "var(--color-card)";
+  const color = mode === "unset"
+    ? "white"
+    : mode === "modifiable"
+      ? "var(--color-ink-label)"
+      : "var(--color-ink-disabled)";
+  const border = mode === "unset"
+    ? "var(--color-brand-500)"
+    : "var(--color-border-soft)";
+  const title = mode === "unset"
+    ? "未配置路径 — 点击选择根目录"
+    : mode === "modifiable"
+      ? "已配置路径但项目未启动，可重新选择"
+      : "项目已启动，路径锁定。点击在资源管理器中打开";
   return (
     <button
       onClick={onClick}
-      className="flex items-center gap-1 rounded-lg border bg-white px-3 py-2 text-sm transition-colors hover:bg-zinc-50"
-      style={{
-        borderColor: "var(--color-border-soft)",
-        color: configured ? "var(--color-ink-label)" : "var(--color-ink-disabled)",
-      }}
-      title={configured ? "已配置路径" : "配置路径"}
+      className="flex items-center gap-1 rounded-lg border px-3 py-2 text-sm transition-opacity hover:opacity-90"
+      style={{ backgroundColor: bg, borderColor: border, color }}
+      title={title}
     >
-      {locked && (
+      {mode === "locked" && (
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
           <rect x="3" y="11" width="18" height="11" rx="2" />
           <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+        </svg>
+      )}
+      {mode === "modifiable" && (
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <rect x="3" y="11" width="18" height="11" rx="2" />
+          <path d="M7 11V7a5 5 0 0 1 10 0v4 M17 11V7a5 5 0 0 0-5-5" />
         </svg>
       )}
       路径
