@@ -188,9 +188,10 @@ function TaskPage() {
           />
         </div>
 
-        {/* Side drawer */}
+        {/* Side drawer — width tuned to match the Plan Maker chat column
+            so the two LLM-chat surfaces feel like the same product. */}
         {drawer?.kind === "agent_chat" && (
-          <div className="w-[340px]">
+          <div className="w-[400px] shrink-0">
             <AgentChatDrawer task={drawer.task} onClose={() => setDrawer(null)} />
           </div>
         )}
