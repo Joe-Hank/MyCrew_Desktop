@@ -19,7 +19,9 @@ import TaskBlueprintEditor from "./TaskBlueprintEditor";
 import ChoicePanel, { type ChoiceOption } from "./ChoicePanel";
 import PathInputPanel from "./PathInputPanel";
 import HistoryDropdown from "./HistoryDropdown";
+import PMDebugLog from "./PMDebugLog";
 import { useTemplates } from "../../queries/useTemplatesQuery";
+import { usePmState, type PMState } from "../../hooks/usePmState";
 
 function InceptionDrawer() {
   const navigate = useNavigate();
@@ -33,6 +35,12 @@ function InceptionDrawer() {
     setDraftBlueprint,
   } = useInceptionStore();
   const { data: session } = useInceptionSession(activeSessionId);
+  // PM v3 — backend in-memory draft state. Drives the right-panel debug
+  // log + the 保存/从断点重来/取消 buttons. status='idle' = no PM round
+  // ever started on this session (or session changed); other statuses
+  // mean the right panel should take over from the legacy iterate/
+  // DraftingSkeleton path.
+  const { state: pmState, refetch: refetchPmState } = usePmState(activeSessionId);
   const { data: providers } = useLlmProviders();
   const createSession = useCreateInceptionSession();
   const streamMessage = useStreamInceptionMessage();
@@ -413,7 +421,14 @@ function InceptionDrawer() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [session?.messages, chat.pending, chat.thinking, streamingText, completedRound]);
 
-  if (!drawerOpen) return null;
+  // NOTE: Don't `return null` when closed — PM v3 keeps the drawer
+  // mounted (with display:none) so that:
+  //   1. Active fetches (the blocked POST /messages/stream) keep their
+  //      reference to setState callbacks even if user navigates away
+  //   2. WS event handlers (useEvent) stay subscribed so debug logs
+  //      keep accumulating in the right hooks while the drawer is hidden
+  //   3. Reopening the drawer instantly shows current state instead of
+  //      re-fetching everything from scratch
 
   const providerList = (providers as unknown as Array<{ id: string; name: string; models?: Array<{ model_name: string }> }>) ?? [];
   const currentProvider = providerList.find((p) => p.id === selectedLlm);
@@ -564,8 +579,12 @@ function InceptionDrawer() {
   const visiblePending = chat.pending.filter((p) => !recentUserContents.has(p.content));
 
   // Right panel is shown whenever (a) we already have a blueprint, OR
-  // (b) a create/iterate sub-agent is mid-draft. Drives drawer width.
-  const showRightPanel = !!(createdProjectId && draftBlueprint) || !!drafting;
+  // (b) a create/iterate sub-agent is mid-draft, OR (c) the PM v3
+  // cache has any state besides idle (running / ready / failed /
+  // cancelled — all of which deserve the debug log panel). Drives
+  // drawer width.
+  const pmActive = pmState.status !== "idle";
+  const showRightPanel = !!(createdProjectId && draftBlueprint) || !!drafting || pmActive;
   const drawerWidth = showRightPanel
     ? "min(64vw, 1100px)"
     : "min(38vw, 560px)";
@@ -586,6 +605,10 @@ function InceptionDrawer() {
           top: 0,
           bottom: logExpanded ? 224 : 28,
           backgroundColor: "rgba(0, 0, 0, 0.35)",
+          // PM v3 — hide via display:none instead of unmounting so all
+          // hooks (useChatQueue / useEvent / usePmState) keep their
+          // subscriptions alive across drawer open/close.
+          display: drawerOpen ? undefined : "none",
         }}
       />
       <div
@@ -597,6 +620,7 @@ function InceptionDrawer() {
           width: drawerWidth,
           backgroundColor: "var(--color-surface)",
           borderRight: "1px solid var(--color-border-soft)",
+          display: drawerOpen ? undefined : "none",
         }}
       >
       <div className="flex flex-1 flex-col overflow-hidden">
@@ -1016,7 +1040,9 @@ function InceptionDrawer() {
               style={{ backgroundColor: "var(--color-surface)" }}
             >
               <div className="min-h-0 flex-1 p-4">
-                {createdProjectId && draftBlueprint ? (
+                {pmActive ? (
+                  <PMDebugLog state={pmState} />
+                ) : createdProjectId && draftBlueprint ? (
                   <TaskBlueprintEditor
                     blueprint={draftBlueprint}
                     onChange={setDraftBlueprint}
@@ -1034,28 +1060,44 @@ function InceptionDrawer() {
                   borderTop: "1px solid var(--color-border-soft)",
                 }}
               >
-                <div className="flex gap-2">
-                  <button
-                    onClick={handleRegenerate}
-                    disabled={chat.thinking}
-                    className="rounded-lg border bg-white px-3 py-2 text-xs font-medium transition-colors hover:bg-zinc-50 disabled:opacity-40"
-                    style={{
-                      borderColor: "var(--color-border-soft)",
-                      color: "var(--color-ink-label)",
+                {/* PM v3 — buttons depend on cache status. status ===
+                    'idle' falls through to legacy iterate path. */}
+                {pmActive ? (
+                  <PMActionButtons
+                    state={pmState}
+                    sessionId={activeSessionId}
+                    onSaved={() => {
+                      // After save, drawer can close + redirect.
+                      void qc.invalidateQueries({ queryKey: ["projects"] });
+                      closeDrawer();
+                      navigate("/");
                     }}
-                    title="删除当前方案并让 Plan Maker 重新生成"
-                  >
-                    {chat.thinking ? "生成中..." : "重新生成"}
-                  </button>
-                  <button
-                    onClick={handleSave}
-                    disabled={chat.thinking}
-                    className="flex-1 rounded-lg py-2 text-sm font-medium text-white transition-opacity disabled:opacity-40"
-                    style={{ backgroundColor: "var(--color-brand-500)" }}
-                  >
-                    保存项目
-                  </button>
-                </div>
+                    onChanged={() => { void refetchPmState(); }}
+                  />
+                ) : (
+                  <div className="flex gap-2">
+                    <button
+                      onClick={handleRegenerate}
+                      disabled={chat.thinking}
+                      className="rounded-lg border bg-white px-3 py-2 text-xs font-medium transition-colors hover:bg-zinc-50 disabled:opacity-40"
+                      style={{
+                        borderColor: "var(--color-border-soft)",
+                        color: "var(--color-ink-label)",
+                      }}
+                      title="删除当前方案并让 Plan Maker 重新生成"
+                    >
+                      {chat.thinking ? "生成中..." : "重新生成"}
+                    </button>
+                    <button
+                      onClick={handleSave}
+                      disabled={chat.thinking}
+                      className="flex-1 rounded-lg py-2 text-sm font-medium text-white transition-opacity disabled:opacity-40"
+                      style={{ backgroundColor: "var(--color-brand-500)" }}
+                    >
+                      保存项目
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -1064,6 +1106,113 @@ function InceptionDrawer() {
       </div>
     </>
   );
+}
+
+/** PM v3 — bottom action bar driven by the draft cache status.
+ *
+ *  - status='running'    → Stop (calls /pm/cancel)
+ *  - status='ready'      → 保存项目 (calls /pm/save)
+ *  - status='failed'     → 从断点重来 (calls /pm/restart)
+ *  - status='cancelled'  → 新建对话提示（用户应去 history dropdown 起新会话）
+ */
+function PMActionButtons({
+  state,
+  sessionId,
+  onSaved,
+  onChanged,
+}: {
+  state: PMState;
+  sessionId: string | null;
+  onSaved: () => void;
+  onChanged: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+
+  async function call(endpoint: string, label: string): Promise<unknown> {
+    if (!sessionId) return null;
+    setBusy(true);
+    try {
+      const res = await apiFetch<unknown>(
+        `/pm/sessions/${sessionId}/${endpoint}`,
+        { method: "POST", body: JSON.stringify({}) },
+      );
+      if (!res.ok) {
+        const errMsg = res.ok ? "" : (res.error?.message ?? "未知错误");
+        alert(`${label} 失败：${errMsg}`);
+        return null;
+      }
+      return res.data;
+    } catch (exc) {
+      alert(`${label} 网络出错：${(exc as Error).message}`);
+      return null;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (state.status === "running") {
+    return (
+      <button
+        onClick={async () => {
+          await call("cancel", "取消");
+          onChanged();
+        }}
+        disabled={busy}
+        className="flex w-full items-center justify-center gap-1 rounded-lg py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
+        style={{ backgroundColor: "#dc2626" }}
+      >
+        停止 PM 工作流
+      </button>
+    );
+  }
+
+  if (state.status === "ready") {
+    return (
+      <button
+        onClick={async () => {
+          const result = await call("save", "保存");
+          if (result) onSaved();
+        }}
+        disabled={busy}
+        className="flex w-full items-center justify-center gap-1 rounded-lg py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
+        style={{ backgroundColor: "var(--color-brand-500)" }}
+      >
+        {busy ? "保存中…" : "保存项目"}
+      </button>
+    );
+  }
+
+  if (state.status === "failed") {
+    return (
+      <div className="flex gap-2">
+        <button
+          onClick={async () => {
+            await call("restart", "重来");
+            onChanged();
+          }}
+          disabled={busy}
+          className="flex-1 rounded-lg py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
+          style={{ backgroundColor: "#f59e0b" }}
+          title={`从 phase '${state.failed_phase ?? "?"}' 重跑，上游产物从缓存复用`}
+        >
+          {busy ? "重来中…" : `从断点重来（${state.failed_phase ?? "?"}）`}
+        </button>
+      </div>
+    );
+  }
+
+  if (state.status === "cancelled") {
+    return (
+      <div
+        className="text-center text-xs"
+        style={{ color: "var(--color-ink-muted)" }}
+      >
+        工作流已取消。点上方「新建对话」开启新一轮。
+      </div>
+    );
+  }
+
+  return null;
 }
 
 /** Human-readable labels for Plan Maker pipeline stages — used by the
