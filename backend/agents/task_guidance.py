@@ -149,15 +149,33 @@ async def chat(
         return {"ok": False, "error": "task_not_found",
                 "reply": "找不到这个任务（可能已被删除）。"}
 
-    # Resolve LLM via the cheap-preference picker — same chain Plan
-    # Maker's compliance gate uses, so no extra config required.
-    try:
-        from agents._llm_picker import pick_llm
-        provider, model_name = await pick_llm(session or {}, DEFAULT_PARAMS["llm_preference"])
-    except (ValueError, KeyError) as exc:
-        log.warning("task_guidance.no_llm", error=str(exc))
-        return {"ok": False, "error": "no_llm",
-                "reply": "⚠️ 未配置 LLM，无法给出诊断。请先在设置里添加一个 LLM。"}
+    # Pin the diagnostic agent to deepseek-flash. Rationale:
+    #   - The user explicitly chose this LLM (2026-05-15) — task_guidance
+    #     is a stateless single-turn Q&A, doesn't need to inherit the
+    #     task's executing agent context, so it shouldn't be driven by
+    #     pick_llm's fallback chain (which can land on whichever provider
+    #     happens to be first in DB — landed Anthropic / blocked from
+    #     CN in the 「霓虹攀升」 incident).
+    #   - No fallback to other models if deepseek-flash isn't configured;
+    #     log + return a clear error so the misconfig is visible.
+    flash_models = await crud.get_all(
+        "llm_models", "model_name LIKE ?", ("%deepseek%flash%",),
+    )
+    if not flash_models:
+        log.warning("task_guidance.no_deepseek_flash")
+        return {
+            "ok": False, "error": "no_llm",
+            "reply": "⚠️ 未配置 deepseek-flash 模型。请在设置页 LLM 列表里添加 "
+                     "DeepSeek 提供方 + 一个 deepseek-*-flash 模型后再试。",
+        }
+    m = flash_models[0]
+    provider = await crud.get_by_id("llm_providers", m["provider_id"])
+    if provider is None:
+        return {
+            "ok": False, "error": "no_llm",
+            "reply": "⚠️ deepseek-flash 模型记录指向的 provider 不存在。",
+        }
+    model_name = m["model_name"]
 
     context_md = await _build_context(task)
 
