@@ -90,6 +90,11 @@ class ProjectService:
                 "output_schema": json.dumps(t.get("output_schema", {})),
                 "status": "pending",
                 "deps": "[]",
+                # PM v4: performer_kind / performer_id route execution
+                # (agent path vs Crew walker). Legacy agent_id is kept
+                # for iterate_existing + the team page tag.
+                "performer_kind": t.get("performer_kind"),
+                "performer_id": t.get("performer_id"),
             }, id_prefix="task_")
             index_to_id[i] = row["id"]
 

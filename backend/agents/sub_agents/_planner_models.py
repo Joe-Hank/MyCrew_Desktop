@@ -146,11 +146,28 @@ class SetupTaskSpec(BaseModel):
 # ── Phase 5: Agent 指挥员 ──────────────────────────────────────────
 
 
+class PerformerRef(BaseModel):
+    """指向一个预设 performer（agent 或 Crew）。Phase 5 LLM 只能从
+    `list_performers` 工具返回的池子里选，不允许新建。"""
+    kind: Literal["agent", "crew"] = Field(
+        ...,
+        description="performer 种类。agent=单 agent 任务；crew=多步 Crew 任务（自带 QA）。",
+    )
+    id: str = Field(
+        ...,
+        description="agent_id 或 crew_id。**必须**是 list_performers 返回的某个 id；"
+                    "禁止编造或返回 list_performers 未列出的 id。",
+    )
+
+
 class Assignment(BaseModel):
-    """单个任务的 agent 匹配结果。"""
+    """单个任务的 performer 匹配结果（v4：agent 或 crew 任选）。"""
     task_index: int = Field(..., description="0-based 任务索引")
-    agent_id: str = Field(..., description="选定的现有 agent_id")
-    reason: str = Field(..., description="一句话解释为什么选这个 agent")
+    performer_ref: PerformerRef = Field(
+        ...,
+        description="选定的 performer 引用。从 list_performers 工具返回的池子里选。",
+    )
+    reason: str = Field(..., description="一句话解释为什么选这个 performer")
 
 
 # ── 工具 args schema ───────────────────────────────────────────────
@@ -200,6 +217,7 @@ __all__ = [
     "SetupTaskSpec",
     "ReviewedTask",
     "PathedTask",
+    "PerformerRef",
     "Assignment",
     "SubmitConceptArgs",
     "SubmitAtomicTasksArgs",

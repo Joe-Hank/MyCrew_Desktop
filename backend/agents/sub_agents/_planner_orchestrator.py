@@ -46,6 +46,9 @@ from agents.sub_agents._planner_prompts import (
     phase4_backstory,
     phase5_backstory,
 )
+from agents.sub_agents._list_performers_tool import (
+    make_list_performers_tool,
+)
 from agents.sub_agents._planner_tools import (
     make_submit_assignments_tool,
     make_submit_atomic_tasks_tool,
@@ -155,11 +158,12 @@ async def run_crew(session: dict, user_message: str, start_from: str | None = No
                 phase2_input = f"# 用户提供的 PRD\n{user_message}"
             else:
                 phase2_input = f"# 上游概念草案 (Phase 1)\n```json\n{json.dumps(concept, ensure_ascii=False, indent=2)}\n```"
+            pool_summary = await _render_pool_summary()
             atomic_dict = await _run_phase(
                 session_id=session_id,
                 phase="system_design",
                 role=PHASE2_ROLE, goal=PHASE2_GOAL,
-                backstory=PHASE2_BACKSTORY,
+                backstory=f"{PHASE2_BACKSTORY}\n\n# 下游 performer 池（拆任务时按这些能力单元的粒度切）\n{pool_summary}",
                 description=phase2_input,
                 expected_output="调一次 submit_atomic_tasks 提交任务列表后一句中文确认。",
                 tools=[make_submit_atomic_tasks_tool(session_id)],
@@ -174,11 +178,12 @@ async def run_crew(session: dict, user_message: str, start_from: str | None = No
         if _need_run("review", start_from) and not _has_phase_output(session_id, "review"):
             planner_cache_svc.update(session_id, current_phase="review")
             atomic_tasks = planner_cache_svc.get_phase_output(session_id, "system_design")
+            pool_summary = await _render_pool_summary()
             reviewed_dict = await _run_phase(
                 session_id=session_id,
                 phase="review",
                 role=PHASE3_ROLE, goal=PHASE3_GOAL,
-                backstory=PHASE3_BACKSTORY,
+                backstory=f"{PHASE3_BACKSTORY}\n\n# 下游 performer 池（output_schema 要跟 Crew 的 QA 验收口径对齐）\n{pool_summary}",
                 description=(
                     "# 上游原子任务列表（系统策划 Phase 2 产物）\n"
                     "```json\n"
@@ -241,30 +246,42 @@ async def run_crew(session: dict, user_message: str, start_from: str | None = No
             if _check_cancelled(session_id):
                 return planner_cache_svc.get(session_id) or {}
 
-        # ── Phase 5: Agent 指挥员 ──────────────────────────────────
+        # ── Phase 5: Agent 指挥员 (PM v4) ──────────────────────────
+        # Phase 5 LLM picks each task's performer from the live pool that
+        # list_performers exposes. It is *required* to call list_performers
+        # before submit_assignments — submit_assignments now has zero
+        # facility for new-agent creation, and an id outside the pool
+        # is rejected post-LLM by _validate_assignments below.
         if _need_run("agent_assignment", start_from) and not _has_phase_output(session_id, "agent_assignment"):
             planner_cache_svc.update(session_id, current_phase="agent_assignment")
             pathed = planner_cache_svc.get_phase_output(session_id, "project_mgmt")
-            agents_info = await _render_agents_info(session)
             assignments_dict = await _run_phase(
                 session_id=session_id,
                 phase="agent_assignment",
                 role=PHASE5_ROLE, goal=PHASE5_GOAL,
-                backstory=phase5_backstory(agents_info),
+                backstory=phase5_backstory(),
                 description=(
                     "# 上游带路径的任务列表（Phase 4 产物）\n"
                     "```json\n"
                     f"{json.dumps(pathed, ensure_ascii=False, indent=2)}\n"
                     "```\n\n"
-                    "跳过 tasks[0] 的 setup（已 pre-assigned），给其余每个任务匹配 agent，调 submit_assignments。"
+                    "**先调 list_performers(kind='all') 拿到真实可用 performer 池**，"
+                    "再跳过 tasks[0] 的 setup（已 pre-assigned），给其余每个任务匹配 "
+                    "performer_ref（kind + id），最后调 submit_assignments。"
                 ),
-                expected_output="调一次 submit_assignments 后一句中文确认。",
-                tools=[make_submit_assignments_tool(session_id)],
+                expected_output=(
+                    "1) 一次 list_performers 调用 2) 一次 submit_assignments 调用 3) 一句中文确认。"
+                ),
+                tools=[
+                    make_list_performers_tool(),
+                    make_submit_assignments_tool(session_id),
+                ],
                 provider=pro_provider, model_name=pro_model,
                 temperature=0.2, max_tokens=3000,
             )
-            planner_cache_svc.set_phase_output(session_id, "agent_assignment",
-                                                 assignments_dict["assignments"])
+            raw_assignments = assignments_dict.get("assignments", [])
+            validated = await _validate_assignments(raw_assignments, pathed or [])
+            planner_cache_svc.set_phase_output(session_id, "agent_assignment", validated)
 
         # ── Assemble final draft blueprint ────────────────────────
         draft_blueprint = _assemble_draft_blueprint(session_id)
@@ -766,6 +783,66 @@ async def _render_agents_info(session: dict) -> str:
     return "\n".join(lines) if lines else "（无可用 agent）"
 
 
+async def _render_pool_summary() -> str:
+    """Compact human-readable summary of the performer pool. Used by
+    Phase 2/3 backstories so they know the executor granularity."""
+    from agents.sub_agents._list_performers_tool import (
+        render_performer_pool_static_summary,
+    )
+    return await render_performer_pool_static_summary()
+
+
+async def _validate_assignments(
+    raw_assignments: list[dict],
+    pathed_tasks: list[dict],
+) -> list[dict]:
+    """Cross-check each assignment's performer_ref against the live pool.
+
+    Pydantic guards shape; this guards *existence*: even if the LLM
+    invented an id that happens to look valid, we re-query the DB and
+    reject anything that doesn't resolve. Returns the validated list
+    (passes through unchanged on success) or raises a ValueError that
+    the planner orchestrator surfaces to the user.
+    """
+    # Build the live id allow-list from the same source list_performers uses
+    from agents.sub_agents._list_performers_tool import _build_payload
+    pool = await _build_payload("all")
+    agent_ids = {a["id"] for a in pool.get("agents", [])}
+    crew_ids = {c["id"] for c in pool.get("crews", [])}
+
+    bad: list[str] = []
+    seen_indices: set[int] = set()
+    setup_indices = {i for i, t in enumerate(pathed_tasks) if t.get("kind") == "setup"}
+
+    for a in raw_assignments:
+        idx = a.get("task_index")
+        ref = a.get("performer_ref") or {}
+        kind = ref.get("kind")
+        pid = ref.get("id")
+        if idx in setup_indices:
+            bad.append(f"task_index={idx} 是 setup 任务，不允许分配 performer（已 pre-assigned）")
+            continue
+        if not isinstance(idx, int) or idx in seen_indices:
+            bad.append(f"task_index={idx} 缺失或重复")
+            continue
+        seen_indices.add(idx)
+        if kind == "agent":
+            if pid not in agent_ids:
+                bad.append(f"task_index={idx}: agent id '{pid}' 不在可用池（list_performers 没列出）")
+        elif kind == "crew":
+            if pid not in crew_ids:
+                bad.append(f"task_index={idx}: crew id '{pid}' 不在可用池")
+        else:
+            bad.append(f"task_index={idx}: performer_ref.kind 必须是 'agent' 或 'crew'，收到 '{kind}'")
+
+    if bad:
+        raise ValueError(
+            "Phase 5 assignments validation failed:\n  - "
+            + "\n  - ".join(bad)
+        )
+    return raw_assignments
+
+
 def _assemble_draft_blueprint(session_id: str) -> dict:
     """Combine all phase outputs into the final draft blueprint shape
     that the frontend's blueprint editor consumes + persist_svc writes."""
@@ -777,14 +854,27 @@ def _assemble_draft_blueprint(session_id: str) -> dict:
     ) or []
     concept: dict | None = planner_cache_svc.get_phase_output(session_id, "concept")
 
-    # Merge agent_id from assignments into the tasks
+    # PM v4: assignments carry performer_ref={kind, id}. For 'agent' kind
+    # we also stamp agent_id (legacy column) so workflow_svc fallbacks
+    # and the team page still find a row. For 'crew' kind agent_id stays
+    # null — workflow_svc._run_agent looks at performer_kind first.
     assignment_by_idx = {a["task_index"]: a for a in assignments}
     final_tasks = []
     for i, t in enumerate(pathed_tasks):
         merged = dict(t)
         if i in assignment_by_idx:
-            merged["agent_id"] = assignment_by_idx[i]["agent_id"]
-        # Setup task already has agent_id from Phase 4
+            ref = assignment_by_idx[i].get("performer_ref") or {}
+            kind = ref.get("kind")
+            pid = ref.get("id")
+            merged["performer_kind"] = kind
+            merged["performer_id"] = pid
+            if kind == "agent":
+                merged["agent_id"] = pid
+        # Setup task already has agent_id from Phase 4; also stamp it as
+        # an "agent" performer so workflow_svc routes it correctly.
+        elif t.get("agent_id"):
+            merged["performer_kind"] = "agent"
+            merged["performer_id"] = t["agent_id"]
         final_tasks.append(merged)
 
     title = (concept or {}).get("title") if isinstance(concept, dict) else None

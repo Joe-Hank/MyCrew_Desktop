@@ -163,10 +163,13 @@ def make_submit_pathed_tasks_tool(session_id: str) -> SubmitPathedTasks:
 class SubmitAssignments(_PlannerSubmitTool):
     name: str = "submit_assignments"
     description: str = (
-        "提交每个非 setup 任务的 agent 匹配结果。assignments 数组里每条 "
-        "对应 task_index（0-based 指向上游任务列表），agent_id 必须是 "
-        "现有 agents 列表里的真实 id，reason 一句话解释选择理由。"
-        "kind=\"setup\" 的任务已经被项管 pre-assigned，本次提交跳过它。"
+        "提交每个非 setup 任务的 performer 匹配结果（PM v4）。"
+        "assignments 数组里每条对应 task_index（0-based 指向上游任务列表）："
+        "performer_ref={kind, id}（kind 是 'agent' 或 'crew'，id **必须**"
+        "是先前 list_performers 工具返回的池子里的某个真实 id），reason "
+        "一句话解释选择理由。kind=\"setup\" 的任务已被项管 pre-assigned，"
+        "本次提交跳过它。**严禁创建新 performer**：本工具没有 new_agent "
+        "字段，编造或返回 list_performers 未列出的 id 会被 Pydantic 拒绝。"
     )
     args_schema: type[BaseModel] = SubmitAssignmentsArgs
     _phase: ClassVar[str] = "agent_assignment"
