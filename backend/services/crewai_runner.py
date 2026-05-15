@@ -130,6 +130,7 @@ def _load_builtin_tools(tool_names: list[str], ctx: dict | None = None) -> list:
         # Local + factory-bound
         from src.tools.builtin.local.workspace import make_workspace_tools
         from src.tools.builtin.local.emit_output import make_emit_output_tool
+        from src.tools.builtin.local.synth_8bit_sfx import make_synth_8bit_sfx_tool
         from src.tools.builtin.mcp_git.tools import make_git_tools
         # Unity MCP — pre-instantiated CrewStructuredTool instances
         from src.tools.builtin.unity import TOOL_MAP as UNITY_TOOL_MAP
@@ -203,6 +204,8 @@ def _load_builtin_tools(tool_names: list[str], ctx: dict | None = None) -> list:
             ctx.get("output_schema") or {},
             ctx.get("project_root"),
         ),
+        # 8-bit audio synthesis (Audio Crew executor)
+        "synth_8bit_sfx": lambda: make_synth_8bit_sfx_tool(ctx.get("project_root")),
         # git
         "git_status": lambda: _get_git()["git_status"],
         "git_log": lambda: _get_git()["git_log"],

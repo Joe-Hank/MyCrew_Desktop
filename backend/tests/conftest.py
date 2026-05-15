@@ -1,7 +1,9 @@
 """Shared fixtures for backend tests — mock CRUD, event bus, LLM gateway."""
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 import uuid
 from collections import defaultdict
 from typing import Any
@@ -11,6 +13,32 @@ import pytest
 
 from domain.events import DomainEvent
 from domain.harness.states import ProjectState, TaskState
+from infra import runtime as _infra_runtime
+
+
+# ── Session-wide background loop so GuardedLocalTool._guarded_local
+# can hop back to a "main loop" in tests just like the FastAPI lifespan
+# provides at runtime. Without this, any test that drives a local tool
+# (synth_8bit_sfx, workspace.write_file, …) errors with
+# "main loop not registered".
+
+@pytest.fixture(scope="session", autouse=True)
+def _test_main_loop():
+    loop = asyncio.new_event_loop()
+    ready = threading.Event()
+
+    def _runner():
+        asyncio.set_event_loop(loop)
+        ready.set()
+        loop.run_forever()
+
+    thread = threading.Thread(target=_runner, daemon=True, name="test-main-loop")
+    thread.start()
+    ready.wait(timeout=5.0)
+    _infra_runtime.set_main_loop(loop)
+    yield loop
+    loop.call_soon_threadsafe(loop.stop)
+    thread.join(timeout=5.0)
 
 
 # ── In-memory CRUD mock ──────────────────────────────────────

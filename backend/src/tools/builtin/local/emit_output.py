@@ -40,24 +40,37 @@ log = structlog.get_logger()
 # 心之回廊 audit (2026-05-13) surfaced.
 _PATH_FIELD_NAMES = (
     "file_path", "filepath", "path",
+    "file_paths", "filepaths", "paths",
     "image_path", "asset_path", "script_path",
-    "output_path",
+    "output_path", "output_paths",
 )
 
 
 def _gather_paths(payload: Any, out: list[str]) -> None:
-    """Recursively collect candidate file paths from a payload tree."""
+    """Recursively collect candidate file paths from a payload tree.
+
+    Singular keys (file_path, image_path, ...) expect a string value.
+    Plural keys (file_paths, output_paths, ...) expect a list of strings.
+    The PM v4 「霓虹攀升」 incident exposed that the prior version only
+    matched the singular forms, letting agents submit nine sprite paths
+    in `file_paths` and pass validation with zero file checks.
+    """
     if isinstance(payload, dict):
         for k, v in payload.items():
-            if k in _PATH_FIELD_NAMES and isinstance(v, str) and v.strip():
-                out.append(v.strip())
+            if k in _PATH_FIELD_NAMES:
+                if isinstance(v, str) and v.strip():
+                    out.append(v.strip())
+                elif isinstance(v, list):
+                    for item in v:
+                        if isinstance(item, str) and item.strip():
+                            out.append(item.strip())
+                else:
+                    _gather_paths(v, out)
             else:
                 _gather_paths(v, out)
     elif isinstance(payload, list):
         for item in payload:
             _gather_paths(item, out)
-    # `file_paths` (plural) → list of strings
-    # already handled by the list branch above
 
 
 class EmitOutputArgs(BaseModel):
