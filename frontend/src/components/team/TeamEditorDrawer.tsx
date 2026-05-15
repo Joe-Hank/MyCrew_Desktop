@@ -166,14 +166,37 @@ function AgentForm({ data, onDone }: { data: Partial<Agent> | null; onDone: () =
   const [memoryPath, setMemoryPath] = useState(data?.memory_path ?? "");
   const [thinkingMode, setThinkingMode] = useState(data?.thinking_mode ?? false);
   const [toolIds, setToolIds] = useState<string[]>(data?.tool_ids ?? []);
-  const [llmId, setLlmId] = useState(data?.llm_id ?? "");
+  // Legacy rows persist `llm_id` as the bare provider id OR as
+  // "<provider_id>:<model_name>" (the convention every other call site
+  // uses — Plan Maker session, _llm_picker.pick_llm). Split on first ":"
+  // so existing rows still load, and recompose on save.
+  const initialLlmId = data?.llm_id ?? "";
+  const [initialProviderId, initialModel] = (() => {
+    if (!initialLlmId) return ["", ""];
+    const idx = initialLlmId.indexOf(":");
+    if (idx < 0) return [initialLlmId, ""];
+    return [initialLlmId.slice(0, idx), initialLlmId.slice(idx + 1)];
+  })();
+  const [providerId, setProviderId] = useState(initialProviderId);
+  const [modelName, setModelName] = useState(initialModel);
 
-  const providerList = (providers as unknown as Array<{ id: string; name: string }>) ?? [];
+  const providerList = (providers as unknown as Array<{
+    id: string;
+    name: string;
+    models?: Array<{ model_name: string; label?: string | null }>;
+  }>) ?? [];
+  const currentProvider = providerList.find((p) => p.id === providerId);
+  const modelOptions = currentProvider?.models ?? [];
   const toolList = allTools ?? [];
 
   const saving = create.isPending || update.isPending;
 
   async function handleSave() {
+    const fullLlmId = providerId
+      ? modelName
+        ? `${providerId}:${modelName}`
+        : providerId
+      : "";
     const payload = {
       role,
       goal: goal || null,
@@ -184,7 +207,7 @@ function AgentForm({ data, onDone }: { data: Partial<Agent> | null; onDone: () =
       memory_path: memoryPath || null,
       thinking_mode: thinkingMode,
       tool_ids: toolIds,
-      llm_id: llmId || null,
+      llm_id: fullLlmId || null,
     };
     if (isEdit) {
       await update.mutateAsync({ id: data!.id!, ...payload });
@@ -250,14 +273,60 @@ function AgentForm({ data, onDone }: { data: Partial<Agent> | null; onDone: () =
       </div>
 
       <FormField label="LLM">
-        <select value={llmId ?? ""} onChange={(e) => setLlmId(e.target.value)} className={inputCls} style={inputStyle}>
-          <option value="">— 选择 LLM —</option>
-          {providerList.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.name}
+        <div className="flex gap-2">
+          <select
+            value={providerId}
+            onChange={(e) => {
+              const nextProv = e.target.value;
+              setProviderId(nextProv);
+              // When provider changes, auto-pick its first model so the
+              // user never lands in a "provider chosen but no model"
+              // half-state. Cleared if no models are configured.
+              const nextProvRow = providerList.find((p) => p.id === nextProv);
+              const firstModel = nextProvRow?.models?.[0]?.model_name ?? "";
+              setModelName(firstModel);
+            }}
+            className={inputCls}
+            style={inputStyle}
+          >
+            <option value="">— 选择服务商 —</option>
+            {providerList.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+          <select
+            value={modelName}
+            onChange={(e) => setModelName(e.target.value)}
+            disabled={!providerId || modelOptions.length === 0}
+            className={inputCls}
+            style={{
+              ...inputStyle,
+              opacity: !providerId || modelOptions.length === 0 ? 0.5 : 1,
+            }}
+            title={
+              !providerId
+                ? "先选服务商"
+                : modelOptions.length === 0
+                  ? "该服务商未配置模型"
+                  : "选择模型版本"
+            }
+          >
+            <option value="">
+              {!providerId
+                ? "— 先选服务商 —"
+                : modelOptions.length === 0
+                  ? "— 该服务商未配置模型 —"
+                  : "— 选择模型 —"}
             </option>
-          ))}
-        </select>
+            {modelOptions.map((m) => (
+              <option key={m.model_name} value={m.model_name}>
+                {m.label || m.model_name}
+              </option>
+            ))}
+          </select>
+        </div>
       </FormField>
 
       <FormField label="工具">
