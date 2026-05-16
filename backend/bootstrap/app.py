@@ -295,6 +295,7 @@ def create_app() -> FastAPI:
     from api.routes_storage import router as storage_router
     from api.routes_settings import router as settings_router
     from api.routes_pm import router as pm_router
+    from api.routes_preferences import router as preferences_router
 
     app.include_router(health_router, prefix="/api/v1")
     app.include_router(auth_router, prefix="/api/v1")
@@ -315,5 +316,6 @@ def create_app() -> FastAPI:
     app.include_router(storage_router, prefix="/api/v1")
     app.include_router(settings_router, prefix="/api/v1")
     app.include_router(pm_router, prefix="/api/v1")
+    app.include_router(preferences_router, prefix="/api/v1")
 
     return app
