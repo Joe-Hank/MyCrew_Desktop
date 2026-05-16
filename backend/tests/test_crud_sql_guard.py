@@ -100,3 +100,31 @@ def test_order_by_accepts_safe_forms(ob):
 def test_order_by_rejects_anything_else(ob):
     with pytest.raises(SqlFragmentError):
         _validate_order_by(ob)
+
+
+# Real-world fragments used by services/project_svc.LIST_ORDER_BY.
+# This test exists because a stricter version of the regex once broke
+# the home-page list (2026-05-16): COALESCE got chopped at the comma
+# and `(favorited_at IS NULL)` was rejected as not-an-identifier.
+# Whitelisting the literal fragments here means any future tightening
+# has to deal with the regression here first.
+@pytest.mark.parametrize("ob", [
+    "(favorited_at IS NULL)",
+    "(favorited_at IS NOT NULL)",
+    "COALESCE(unfavorited_at, created_at) DESC",
+    "COALESCE(a, b, c)",
+    "(favorited_at IS NULL), favorited_at DESC, COALESCE(unfavorited_at, created_at) DESC",
+])
+def test_order_by_accepts_real_world_callers(ob):
+    _validate_order_by(ob)
+
+
+# Injection attempts that look like the accepted forms must still fail.
+@pytest.mark.parametrize("ob", [
+    "(name; DROP TABLE projects)",  # blocklist catches the semicolon
+    "COALESCE(name, 1)",  # 1 isn't an identifier
+    "COALESCE(name) /*",  # comment marker
+])
+def test_order_by_extended_forms_still_block_injection(ob):
+    with pytest.raises(SqlFragmentError):
+        _validate_order_by(ob)
