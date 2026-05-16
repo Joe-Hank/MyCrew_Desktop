@@ -608,30 +608,47 @@ _LEGACY_NAME_MAP: dict[str, str] = {
 
 
 async def _rename_legacy_crews() -> None:
-    """One-shot in-place rename of seeded Crews to their Chinese names.
+    """In-place migration of legacy English-named Crews to their Chinese
+    seed equivalents.
 
-    Skips when the target name already exists (fresh install / second
-    boot) so we never end up with duplicate rows. Preserves Crew ids
-    so existing task.performer_id references keep working.
+    Three cases per (old, new) pair:
+      1. Neither row exists  → nothing to do.
+      2. Only old exists     → rename in place (cheapest path).
+      3. Both rows exist     → repoint every tasks.performer_id from old
+         to new, then delete old. Without this branch the prior version
+         silently SKIPPED, leaving duplicate Crews (the 24-row mess on
+         2026-05-16 that scripts/cleanup_legacy_crews.py had to clean).
     """
+    from infra.repo.sqlite_repo import get_db
+
     for old, new in _LEGACY_NAME_MAP.items():
         if old == new:
             continue
         old_rows = await crud.get_all("crews", "name = ?", (old,))
         if not old_rows:
             continue
-        # Don't UPDATE if a row with the new name already exists — that
-        # would create a unique-name collision (or, with no constraint,
-        # leave dupes). Pick the old one to keep stable id ; user can
-        # manually clean up the dupe in the team page.
         new_rows = await crud.get_all("crews", "name = ?", (new,))
-        if new_rows:
-            log.warning("seed.crew_rename_skipped_target_exists",
-                        old=old, new=new)
+        if not new_rows:
+            # Simple rename — preserves crew id, so task refs stay valid.
+            await crud.update_by_id("crews", old_rows[0]["id"], {"name": new})
+            log.info("seed.crew_renamed",
+                     id=old_rows[0]["id"], old=old, new=new)
             continue
-        await crud.update_by_id("crews", old_rows[0]["id"], {"name": new})
-        log.info("seed.crew_renamed",
-                 id=old_rows[0]["id"], old=old, new=new)
+        # Both exist: merge by repointing every task that referenced
+        # the legacy crew to the seed crew, then drop the legacy row.
+        old_id = old_rows[0]["id"]
+        new_id = new_rows[0]["id"]
+        db = await get_db()
+        cursor = await db.execute(
+            "UPDATE tasks SET performer_id = ? WHERE performer_id = ?",
+            (new_id, old_id),
+        )
+        repointed = cursor.rowcount or 0
+        await db.execute("DELETE FROM crews WHERE id = ?", (old_id,))
+        await db.commit()
+        log.info("seed.crew_merged",
+                 old=old, old_id=old_id, new=new, new_id=new_id,
+                 task_refs_repointed=repointed)
 
 
 async def ensure_crew_pool(tool_name_to_id: dict[str, str]) -> dict[str, str]:
