@@ -43,7 +43,13 @@ function IoViewerDrawer({
         ? {
             direction: tab,
             structured: tab === "in" ? subIo.in : subIo.out,
-            raw: subIo.raw,
+            // Pick the tab-specific raw markdown. `raw_in` / `raw_out`
+            // landed 2026-05-17 — the legacy `raw` field served the
+            // OUT md regardless of tab, which is exactly the bug being
+            // fixed here (input tab showing output's raw).
+            raw: tab === "in"
+              ? (subIo.raw_in ?? null)
+              : (subIo.raw_out ?? subIo.raw ?? null),
           }
         : null)
     : taskIo;
@@ -207,7 +213,7 @@ function IoViewerDrawer({
               className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider"
               style={{ color: "var(--color-ink-ghost)" }}
             >
-              原始输出
+              {tab === "in" ? "原始输入" : "原始输出"}
             </h4>
             <pre
               className="rounded p-3 text-[12px] leading-relaxed"

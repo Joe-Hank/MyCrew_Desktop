@@ -167,6 +167,11 @@ export interface SubIO {
   step_index: number;
   in: Record<string, unknown> | null;
   out: Record<string, unknown> | null;
+  // Separate raw markdown for in vs out tabs. Pre-2026-05-17 backends
+  // only wrote out.md (raw_in is null) — IO viewer falls back gracefully.
+  raw_in: string | null;
+  raw_out: string | null;
+  /** @deprecated use raw_out — kept for old-server compatibility */
   raw: string | null;
 }
 

@@ -822,6 +822,23 @@ class WorkflowService:
         }
         (sub_dir / f"{step_index}_{step_role}_in.json").write_text(
             json.dumps(in_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        # Companion human-readable rendering of the input — the IO
+        # viewer's 「输入 · 原始」 panel reads this. Previously only
+        # `_out.md` existed, so the viewer's input tab fell back to
+        # whatever raw the backend served (which was the OUTPUT md),
+        # producing the 2026-05-17 "raw input shows raw output" bug.
+        prev_block = (
+            json.dumps(prev_payload, ensure_ascii=False, indent=2)
+            if prev_payload is not None
+            else "(none — this is the first step or upstream emitted nothing)"
+        )
+        (sub_dir / f"{step_index}_{step_role}_in.md").write_text(
+            f"# Step {step_index + 1} · {step_role} · input\n\n"
+            f"## Step instructions\n\n```\n{step_instructions[:4000]}\n```\n\n"
+            f"## Previous step payload (prev_step_payload)\n\n"
+            f"```json\n{prev_block}\n```",
+            encoding="utf-8",
+        )
 
         out_payload = {
             "step_index": step_index,

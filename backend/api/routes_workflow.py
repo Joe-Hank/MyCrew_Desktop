@@ -138,7 +138,13 @@ async def get_task_sub_io(task_id: str, step_index: int = Query(..., ge=0)):
     sub_dir = OUTPUT_DIR / (project_id or "") / task_id / "sub"
     if not sub_dir.exists():
         return {"ok": True, "data": {
-            "step_index": step_index, "in": None, "out": None, "raw": None,
+            "step_index": step_index,
+            "in": None, "out": None,
+            "raw_in": None, "raw_out": None,
+            # `raw` is kept as an alias of raw_out for any pre-2026-05-17
+            # frontend builds that still read it; current frontend uses
+            # raw_in / raw_out per tab.
+            "raw": None,
         }}
 
     def _find_one(suffix: str) -> Path | None:
@@ -148,34 +154,34 @@ async def get_task_sub_io(task_id: str, step_index: int = Query(..., ge=0)):
             return candidate
         return None
 
-    in_struct = None
-    out_struct = None
-    raw_md = None
-
-    in_json = _find_one("in.json")
-    if in_json and in_json.exists():
+    def _read_text(p: Path | None) -> str | None:
+        if not p or not p.exists():
+            return None
         try:
-            in_struct = json.loads(in_json.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    out_json = _find_one("out.json")
-    if out_json and out_json.exists():
-        try:
-            out_struct = json.loads(out_json.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    out_md = _find_one("out.md")
-    if out_md and out_md.exists():
-        try:
-            raw_md = out_md.read_text(encoding="utf-8")
+            return p.read_text(encoding="utf-8")
         except OSError:
-            pass
+            return None
+
+    def _read_json(p: Path | None) -> dict | None:
+        s = _read_text(p)
+        if s is None:
+            return None
+        try:
+            return json.loads(s)
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+    in_struct = _read_json(_find_one("in.json"))
+    out_struct = _read_json(_find_one("out.json"))
+    raw_in = _read_text(_find_one("in.md"))
+    raw_out = _read_text(_find_one("out.md"))
 
     return {"ok": True, "data": {
         "step_index": step_index,
-        "in": in_struct, "out": out_struct, "raw": raw_md,
+        "in": in_struct, "out": out_struct,
+        "raw_in": raw_in, "raw_out": raw_out,
+        # Back-compat alias for older frontend builds.
+        "raw": raw_out,
     }}
 
 

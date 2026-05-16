@@ -134,7 +134,15 @@ def test_sub_io_returns_nulls_when_no_sub_dir(fake_crud, tmp_path, monkeypatch):
     res = client.get("/workflow/tasks/tkB/sub_io?step_index=0")
     assert res.status_code == 200
     data = res.json()["data"]
-    assert data == {"step_index": 0, "in": None, "out": None, "raw": None}
+    # 2026-05-17: response now also includes raw_in / raw_out so the
+    # IO viewer can show tab-specific markdown. Legacy `raw` is kept
+    # as an alias of raw_out for old-client compat.
+    assert data == {
+        "step_index": 0,
+        "in": None, "out": None,
+        "raw_in": None, "raw_out": None,
+        "raw": None,
+    }
 
 
 def test_sub_io_404_when_task_missing(fake_crud, tmp_path, monkeypatch):
