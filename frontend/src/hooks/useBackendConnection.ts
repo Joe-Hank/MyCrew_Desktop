@@ -30,6 +30,10 @@ async function discoverPort(): Promise<number | null> {
 export function useBackendConnection() {
   const [connected, setConnected] = useState(false);
   const [port, setPort] = useState<number | null>(null);
+  // True once the WS layer has tripped its auth-failure breaker (≥3
+  // consecutive 4401 rejections). AppShell renders a dedicated banner
+  // with a 「重试」 button → wsClient.retryAuth() clears the breaker.
+  const [authLocked, setAuthLocked] = useState(false);
   const qc = useQueryClient();
 
   useEffect(() => {
@@ -60,7 +64,10 @@ export function useBackendConnection() {
 
     tryConnect("initial");
 
-    const offConnected = wsClient.on("ws.connected", () => setConnected(true));
+    const offConnected = wsClient.on("ws.connected", () => {
+      setConnected(true);
+      setAuthLocked(false);
+    });
     const offDisconnected = wsClient.on("ws.disconnected", () => {
       setConnected(false);
       // WS dropped — backend may have died or moved to another port. Schedule
@@ -68,15 +75,24 @@ export function useBackendConnection() {
       if (probeTimer) clearTimeout(probeTimer);
       probeTimer = setTimeout(() => tryConnect("ws-down"), PROBE_INTERVAL_MS);
     });
+    const offAuthLocked = wsClient.on("ws.auth_locked", () => {
+      setAuthLocked(true);
+    });
 
     return () => {
       cancelled = true;
       if (probeTimer) clearTimeout(probeTimer);
       offConnected();
       offDisconnected();
+      offAuthLocked();
       wsClient.disconnect();
     };
   }, [qc]);
 
-  return { connected, port };
+  const retryAuth = () => {
+    setAuthLocked(false);
+    wsClient.retryAuth();
+  };
+
+  return { connected, port, authLocked, retryAuth };
 }

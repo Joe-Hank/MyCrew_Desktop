@@ -9,7 +9,7 @@ import { useThemeStore, applyTheme } from "../../stores/useThemeStore";
 const GRACE_MS = 2_000; // hide banner during initial boot so it doesn't flash
 
 function AppShell({ children }: { children: ReactNode }) {
-  const { connected, port } = useBackendConnection();
+  const { connected, port, authLocked, retryAuth } = useBackendConnection();
   const theme = useThemeStore((s) => s.theme);
   const [showBanner, setShowBanner] = useState(false);
 
@@ -38,13 +38,48 @@ function AppShell({ children }: { children: ReactNode }) {
     >
       <Sidebar connected={connected} />
       <div className="flex flex-1 flex-col overflow-hidden">
-        {showBanner && <BackendDownBanner port={port} />}
+        {/* Auth lock takes priority over the plain disconnect banner —
+            different failure mode, different user action (click 重试
+            vs wait for backend). */}
+        {authLocked ? (
+          <AuthLockedBanner onRetry={retryAuth} />
+        ) : (
+          showBanner && <BackendDownBanner port={port} />
+        )}
         <ErrorBoundary>
           <main className="flex-1 overflow-auto">{children}</main>
         </ErrorBoundary>
         <LogDrawer />
       </div>
       <PromptModal />
+    </div>
+  );
+}
+
+function AuthLockedBanner({ onRetry }: { onRetry: () => void }) {
+  return (
+    <div
+      className="flex items-center justify-between gap-3 border-b px-4 py-2 text-xs"
+      style={{
+        backgroundColor: "rgba(245, 158, 11, 0.08)",
+        borderColor: "rgba(245, 158, 11, 0.3)",
+        color: "var(--color-ink)",
+      }}
+    >
+      <div className="flex items-center gap-2">
+        <span className="inline-block h-2 w-2 rounded-full bg-amber-500" />
+        <span>
+          WebSocket 鉴权连续 3 次失败已停止重连。常见原因：后端重启后 token 轮换 +
+          多个前端窗口竞态。点【重试】重新拉 token；不行就刷新整页。
+        </span>
+      </div>
+      <button
+        onClick={onRetry}
+        className="shrink-0 rounded-md px-3 py-0.5 text-[11px] font-medium text-white transition-opacity hover:opacity-90"
+        style={{ backgroundColor: "var(--color-brand-500)" }}
+      >
+        重试
+      </button>
     </div>
   );
 }

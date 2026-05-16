@@ -8,6 +8,16 @@ type Listener = (msg: WsMessage) => void;
 
 const RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 15000];
 
+// Auth circuit breaker — after this many consecutive 4401 rejections,
+// stop reconnecting and emit `ws.auth_locked`. AppShell catches the
+// event and shows a banner with a 「重试」 button that calls retryAuth().
+// Three is enough to weather a transient backend reload (token rotates
+// → 1-2 rejected attempts → fetchToken pulls fresh → success) without
+// burning the user's log with hundreds of warnings when something is
+// truly stuck (e.g. multiple frontend tabs racing on token rotation,
+// or a backend/proxy mismatch on the auth endpoint).
+const MAX_AUTH_FAILURES = 3;
+
 class WsClient {
   private ws: WebSocket | null = null;
   private listeners = new Map<string, Set<Listener>>();
@@ -21,11 +31,31 @@ class WsClient {
   private port = 0;
   private token = "";
   private closed = false;
+  private authFailures = 0;
+  private authLocked = false;
 
   connect(port: number) {
     this.port = port;
     this.baseUrl = `ws://127.0.0.1:${port}/api/v1/ws`;
     this.closed = false;
+    // A fresh connect() (e.g. AppShell remounted, port re-discovered)
+    // is the user's implicit intent to try again — unlock the auth
+    // breaker too.
+    this.authFailures = 0;
+    this.authLocked = false;
+    this.doConnect();
+  }
+
+  /** Manual unlock for the AppShell banner's 「重试」 button.
+   *  Resets the auth-failure counter, clears the closed flag, and
+   *  triggers an immediate reconnect attempt. Idempotent: a no-op when
+   *  the breaker isn't tripped. */
+  retryAuth() {
+    if (!this.authLocked) return;
+    this.authFailures = 0;
+    this.authLocked = false;
+    this.closed = false;
+    this.token = "";  // force fetchToken on the next attempt
     this.doConnect();
   }
 
@@ -130,6 +160,7 @@ class WsClient {
       // emit a "ws.connected" event and reset reconnect attempts.
       if (this.ws !== socket) return;
       this.reconnectAttempt = 0;
+      this.authFailures = 0;  // any successful open clears the breaker
       this.dispatch({ type: "ws.connected", ts: new Date().toISOString(), payload: {} });
     };
 
@@ -154,6 +185,25 @@ class WsClient {
       // next doConnect() refetches /auth/ws_token.
       if (ev.code === 4401) {
         this.token = "";
+        this.authFailures++;
+        if (this.authFailures >= MAX_AUTH_FAILURES) {
+          // Trip the breaker: stop the reconnect loop + tell the UI
+          // to show a banner. Without this the log fills with
+          // ws.auth_rejected forever (one per ~5-15s backoff tick).
+          this.authLocked = true;
+          this.closed = true;
+          this.dispatch({
+            type: "ws.auth_locked",
+            ts: new Date().toISOString(),
+            payload: { failures: this.authFailures },
+          });
+          this.dispatch({
+            type: "ws.disconnected",
+            ts: new Date().toISOString(),
+            payload: {},
+          });
+          return;
+        }
       }
       this.dispatch({ type: "ws.disconnected", ts: new Date().toISOString(), payload: {} });
       this.scheduleReconnect();
