@@ -29,6 +29,14 @@ async def get_db() -> aiosqlite.Connection:
         _db.row_factory = aiosqlite.Row
         await _db.execute("PRAGMA journal_mode=WAL")
         await _db.execute("PRAGMA foreign_keys=ON")
+        # busy_timeout (audit 2026-05-16 followup): when another process
+        # — orphaned test runs, dev scripts that hung — holds the write
+        # lock briefly, default behaviour is to raise "database is locked"
+        # immediately. 5s timeout lets SQLite retry transparently and
+        # absorbs cross-process contention without surfacing it to the
+        # event log path or the seed pipeline.
+        await _db.execute("PRAGMA busy_timeout=5000")
+        await _db.execute("PRAGMA synchronous=NORMAL")
         # Bound the WAL size on connect — abandoned test runs left a
         # 4MB WAL (incident 2026-05-16 14:20) that thrashed write locks
         # during seed UPDATEs. TRUNCATE forces all pending WAL pages
