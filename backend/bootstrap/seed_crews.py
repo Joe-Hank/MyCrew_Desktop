@@ -510,19 +510,28 @@ async def _ensure_agent(spec: dict, tool_name_to_id: dict[str, str],
     older smaller set. Idempotent: same seed input → same DB row.
     """
     desired_tool_ids = _resolve_tools(tool_name_to_id, spec["tools"])
+    desired_tool_ids_json = json.dumps(desired_tool_ids)
 
     existing = await crud.get_all(
         "agents", "role = ? AND is_auto_generated = 0", (spec["role"],),
     )
     if existing:
         row = existing[0]
-        # Re-stamp the toolset + prompt fields. llm_id is preserved if
-        # the user has retuned it via the agent editor (we don't want to
-        # clobber a deliberate user choice).
+        # **Diff-then-update**: only write if something actually changed.
+        # Every boot used to UPDATE 14 rows even when content was
+        # identical — combined with the 4MB WAL accumulated from earlier
+        # test runs, that triggered "database is locked" on `_ensure_agent`
+        # during PM v4 startup (incident 2026-05-16 14:20). The no-op
+        # path avoids the write-lock churn entirely.
+        existing_tool_ids = row.get("tool_ids") or "[]"
+        if (row.get("goal") == spec["goal"]
+                and row.get("backstory") == spec["backstory"]
+                and existing_tool_ids == desired_tool_ids_json):
+            return row["id"]
         await crud.update_by_id("agents", row["id"], {
             "goal": spec["goal"],
             "backstory": spec["backstory"],
-            "tool_ids": json.dumps(desired_tool_ids),
+            "tool_ids": desired_tool_ids_json,
         })
         log.info("seed.crew_agent_refreshed",
                  role=spec["role"], id=row["id"], n_tools=len(desired_tool_ids))

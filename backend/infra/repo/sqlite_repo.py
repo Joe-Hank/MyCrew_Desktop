@@ -29,6 +29,15 @@ async def get_db() -> aiosqlite.Connection:
         _db.row_factory = aiosqlite.Row
         await _db.execute("PRAGMA journal_mode=WAL")
         await _db.execute("PRAGMA foreign_keys=ON")
+        # Bound the WAL size on connect — abandoned test runs left a
+        # 4MB WAL (incident 2026-05-16 14:20) that thrashed write locks
+        # during seed UPDATEs. TRUNCATE forces all pending WAL pages
+        # into the main DB and resets the WAL file to zero.
+        try:
+            await _db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            await _db.commit()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("db.wal_checkpoint_failed", error=str(exc))
     return _db
 
 
