@@ -14,13 +14,35 @@ class WsClient {
   private globalListeners = new Set<Listener>();
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private url = "";
+  // Base URL stays free of the token so reconnects re-fetch fresh
+  // (e.g. if the backend restarts between attempts and rotates the
+  // session token).
+  private baseUrl = "";
+  private port = 0;
+  private token = "";
   private closed = false;
 
   connect(port: number) {
-    this.url = `ws://127.0.0.1:${port}/api/v1/ws`;
+    this.port = port;
+    this.baseUrl = `ws://127.0.0.1:${port}/api/v1/ws`;
     this.closed = false;
     this.doConnect();
+  }
+
+  /** Fetch the WS session token from the backend's localhost-only
+   *  auth endpoint. The backend rotates this token on every boot so
+   *  the previous one is meaningless after a restart — we always
+   *  refresh before opening a fresh socket. Returns the token or
+   *  empty string on failure (callers schedule a reconnect). */
+  private async fetchToken(): Promise<string> {
+    try {
+      const res = await fetch(`http://127.0.0.1:${this.port}/api/v1/auth/ws_token`);
+      if (!res.ok) return "";
+      const body = await res.json();
+      return body?.data?.token ?? "";
+    } catch {
+      return "";
+    }
   }
 
   disconnect() {
@@ -60,8 +82,8 @@ class WsClient {
     return this.ws?.readyState === WebSocket.OPEN;
   }
 
-  private doConnect() {
-    if (this.closed || !this.url) return;
+  private async doConnect() {
+    if (this.closed || !this.baseUrl) return;
 
     // CRITICAL: close + detach any prior socket before opening a new one.
     // Without this, every reconnect / re-discovery accumulates a "ghost"
@@ -79,9 +101,23 @@ class WsClient {
       this.ws = null;
     }
 
+    // Refresh the session token before each connect attempt — covers
+    // backend restarts (token rotates) and the initial cold start.
+    if (!this.token) {
+      this.token = await this.fetchToken();
+    }
+    if (!this.token) {
+      // Token endpoint not ready yet — back off and try again. The
+      // backend lifespan generates the token early, so this only
+      // happens during a very brief window at boot.
+      this.scheduleReconnect();
+      return;
+    }
+    const fullUrl = `${this.baseUrl}?token=${encodeURIComponent(this.token)}`;
+
     let socket: WebSocket;
     try {
-      socket = new WebSocket(this.url);
+      socket = new WebSocket(fullUrl);
     } catch {
       this.scheduleReconnect();
       return;
@@ -107,12 +143,18 @@ class WsClient {
       }
     };
 
-    socket.onclose = () => {
+    socket.onclose = (ev) => {
       // Only the CURRENT socket's close should trigger a reconnect. A
       // detached ghost socket closing must not schedule a new connection
       // (that's how the cascading reconnect / ghost-accumulation loop
       // got going in the first place).
       if (this.ws !== socket) return;
+      // Code 4401 = backend rejected our token (e.g. backend restarted
+      // and rotated the session token). Drop the cached value so the
+      // next doConnect() refetches /auth/ws_token.
+      if (ev.code === 4401) {
+        this.token = "";
+      }
       this.dispatch({ type: "ws.disconnected", ts: new Date().toISOString(), payload: {} });
       this.scheduleReconnect();
     };

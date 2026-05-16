@@ -1,4 +1,5 @@
 import time
+import uuid
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 
@@ -6,9 +7,29 @@ import structlog
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from bootstrap.paths import ensure_dirs
+from bootstrap.paths import RUNTIME_DIR, ensure_dirs
 
 log = structlog.get_logger()
+
+
+# ── Request-ID helpers (audit Phase 2 — dimension 7 gap) ─────────
+# structlog already has merge_contextvars at the head of its processor
+# chain (bootstrap/main.py:12), so binding request_id here propagates
+# automatically into every log.info() / log.warning() emitted on the
+# current task. clear after the request so a long-lived worker task
+# doesn't inherit a stale id.
+
+def _gen_request_id() -> str:
+    return uuid.uuid4().hex[:12]
+
+
+def _bind_request_id(rid: str):
+    structlog.contextvars.bind_contextvars(request_id=rid)
+    return rid  # placeholder — structlog's API doesn't return a token
+
+
+def _unbind_request_id(_token) -> None:
+    structlog.contextvars.unbind_contextvars("request_id")
 
 
 # Methods we treat as "mutations" — recorded in the audit event log so
@@ -22,6 +43,33 @@ _AUDIT_SKIP_PREFIXES = (
     "/api/v1/inceptions/sessions/",   # message streams handle their own
     "/api/v1/events",                  # don't audit reads of audit log
 )
+
+
+async def _request_id_middleware(request: Request, call_next):
+    """Mint a request id, bind it into structlog's contextvars, echo it
+    back as X-Request-ID, and stash it on request.state for handlers.
+
+    Audit (2026-05-16, dimension 7): the logs schema already had a
+    request_id column but it was never populated. structlog.merge_contextvars
+    is already in the processor chain (bootstrap/main.py:12), so binding
+    here propagates to every log line emitted during this request — no
+    per-call f-string wiring needed.
+
+    The client can also supply its own X-Request-ID (e.g. a frontend
+    trace id), which we honour so a single browser action can be
+    correlated across multiple backend calls.
+    """
+    incoming = request.headers.get("x-request-id", "").strip()
+    rid = incoming if incoming else _gen_request_id()
+    request.state.request_id = rid
+
+    token = _bind_request_id(rid)
+    try:
+        response = await call_next(request)
+    finally:
+        _unbind_request_id(token)
+    response.headers["X-Request-ID"] = rid
+    return response
 
 
 async def _audit_middleware(request: Request, call_next):
@@ -111,7 +159,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     log.info("startup.seeded")
 
     # WS connection manager — imported up front because steps 3/4/5 all use it
-    from api.ws import manager
+    from api.ws import manager, generate_session_token, set_session_token
+
+    # WS session token (audit 2026-05-16 Top 5 #2). Generated each boot
+    # so a previous token can't be replayed against this process. We
+    # write it to data/runtime/session.token AND print it to stdout so
+    # the Tauri sidecar can pick it up (the sidecar reads stdout for
+    # the port handshake already).
+    ws_token = generate_session_token()
+    set_session_token(ws_token)
+    token_path = RUNTIME_DIR / "session.token"
+    token_path.write_text(ws_token, encoding="utf-8")
+    # Tauri sidecar parses lines like MYCREW_PORT=18321 — same format.
+    print(f"MYCREW_WS_TOKEN={ws_token}", flush=True)
+    log.info("startup.ws_token_ready", path=str(token_path))
 
     # STEP 3: start MCP connection pool
     from services.mcp_svc import mcp_svc
@@ -209,7 +270,14 @@ def create_app() -> FastAPI:
     # are skipped to keep table small.
     app.middleware("http")(_audit_middleware)
 
+    # Request-ID middleware — registered AFTER audit so it wraps audit
+    # (FastAPI middleware ordering: last-registered runs outermost).
+    # Net effect: rid is bound before audit calls record_event, so the
+    # mutation audit row inherits the same correlation id.
+    app.middleware("http")(_request_id_middleware)
+
     from api.routes_health import router as health_router
+    from api.routes_auth import router as auth_router
     from api.ws import router as ws_router
     from api.routes_llm import router as llm_router
     from api.routes_mcp import router as mcp_router
@@ -229,6 +297,7 @@ def create_app() -> FastAPI:
     from api.routes_pm import router as pm_router
 
     app.include_router(health_router, prefix="/api/v1")
+    app.include_router(auth_router, prefix="/api/v1")
     app.include_router(ws_router, prefix="/api/v1")
     app.include_router(llm_router, prefix="/api/v1")
     app.include_router(mcp_router, prefix="/api/v1")

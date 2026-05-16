@@ -200,7 +200,9 @@ async def _do_remove_task(
         deps_raw = t.get("deps") or "[]"
         try:
             deps = json.loads(deps_raw) if isinstance(deps_raw, str) else (deps_raw or [])
-        except Exception:
+        except (json.JSONDecodeError, TypeError) as exc:
+            log.warning("patch_blueprint.deps_decode_failed",
+                        task_id=tid, error=str(exc))
             deps = []
         if task_id in deps:
             deps = [d for d in deps if d != task_id]
@@ -307,11 +309,15 @@ async def _refresh_mycrew_blueprint(project_id: str) -> None:
         os_raw = t.get("output_schema") or "{}"
         try:
             deps = json.loads(deps_raw) if isinstance(deps_raw, str) else (deps_raw or [])
-        except Exception:
+        except (json.JSONDecodeError, TypeError) as exc:
+            log.warning("patch_blueprint.deps_decode_failed",
+                        task_id=t.get("id"), error=str(exc))
             deps = []
         try:
             os_obj = json.loads(os_raw) if isinstance(os_raw, str) else (os_raw or {})
-        except Exception:
+        except (json.JSONDecodeError, TypeError) as exc:
+            log.warning("patch_blueprint.schema_decode_failed",
+                        task_id=t.get("id"), error=str(exc))
             os_obj = {}
         task_dicts.append({
             "id": t["id"],
@@ -325,7 +331,9 @@ async def _refresh_mycrew_blueprint(project_id: str) -> None:
 
     try:
         existing = json.loads(bp_path.read_text(encoding="utf-8"))
-    except Exception:
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
+        log.warning("patch_blueprint.read_blueprint_failed",
+                    path=str(bp_path), error=str(exc))
         existing = {}
     existing["tasks"] = task_dicts
     existing["project_id"] = project_id

@@ -70,51 +70,68 @@ class ProjectService:
              ids (so callers that already hold task ids can pass them
              through). UPDATE the row only when deps are non-empty.
 
-        This is the same pattern `clone_project` uses; the previous
-        single-pass version stored the raw int indices, so the canvas
-        couldn't match edges (`source=0` vs `target="task_xxx"`) and
-        the scheduler couldn't look up deps in its id-keyed dict.
+        Compensating-write transaction model (audit 2026-05-16, Top 5 #4):
+        SQLite + aiosqlite each crud op auto-commits, so we can't wrap the
+        two passes in a single BEGIN/COMMIT without rewriting crud. Instead
+        we catch any exception during passes 1-2 and roll back manually by
+        calling delete_project — which cascades to the partially-inserted
+        tasks. Net effect: caller sees either a fully-created project or a
+        clean failure with no orphan rows.
         """
         project = await self.create_project(data)
         project_id = project["id"]
 
-        # Pass 1: insert empty-dep tasks, build index → task_id map.
-        index_to_id: dict[int, str] = {}
-        for i, t in enumerate(tasks):
-            row = await crud.insert("tasks", {
-                "project_id": project_id,
-                "title": t["title"],
-                "detail": t.get("detail", ""),
-                "agent_id": t.get("agent_id"),
-                "kind": t.get("kind", "regular"),
-                "output_schema": json.dumps(t.get("output_schema", {})),
-                "status": "pending",
-                "deps": "[]",
-                # PM v4: performer_kind / performer_id route execution
-                # (agent path vs Crew walker). Legacy agent_id is kept
-                # for iterate_existing + the team page tag.
-                "performer_kind": t.get("performer_kind"),
-                "performer_id": t.get("performer_id"),
-            }, id_prefix="task_")
-            index_to_id[i] = row["id"]
+        try:
+            # Pass 1: insert empty-dep tasks, build index → task_id map.
+            index_to_id: dict[int, str] = {}
+            for i, t in enumerate(tasks):
+                row = await crud.insert("tasks", {
+                    "project_id": project_id,
+                    "title": t["title"],
+                    "detail": t.get("detail", ""),
+                    "agent_id": t.get("agent_id"),
+                    "kind": t.get("kind", "regular"),
+                    "output_schema": json.dumps(t.get("output_schema", {})),
+                    "status": "pending",
+                    "deps": "[]",
+                    # PM v4: performer_kind / performer_id route execution
+                    # (agent path vs Crew walker). Legacy agent_id is kept
+                    # for iterate_existing + the team page tag.
+                    "performer_kind": t.get("performer_kind"),
+                    "performer_id": t.get("performer_id"),
+                }, id_prefix="task_")
+                index_to_id[i] = row["id"]
 
-        # Pass 2: translate dep references and patch each task that
-        # actually has upstream dependencies. Mixed int/str arrays are
-        # tolerated so callers that supply real task ids still work.
-        for i, t in enumerate(tasks):
-            raw_deps = t.get("deps") or []
-            translated: list[str] = []
-            for d in raw_deps:
-                if isinstance(d, int):
-                    mapped = index_to_id.get(d)
-                    if mapped:
-                        translated.append(mapped)
-                elif isinstance(d, str) and d:
-                    translated.append(d)
-            if translated:
-                await crud.update_by_id("tasks", index_to_id[i], {
-                    "deps": json.dumps(translated),
-                })
+            # Pass 2: translate dep references and patch each task that
+            # actually has upstream dependencies. Mixed int/str arrays are
+            # tolerated so callers that supply real task ids still work.
+            for i, t in enumerate(tasks):
+                raw_deps = t.get("deps") or []
+                translated: list[str] = []
+                for d in raw_deps:
+                    if isinstance(d, int):
+                        mapped = index_to_id.get(d)
+                        if mapped:
+                            translated.append(mapped)
+                    elif isinstance(d, str) and d:
+                        translated.append(d)
+                if translated:
+                    await crud.update_by_id("tasks", index_to_id[i], {
+                        "deps": json.dumps(translated),
+                    })
+        except Exception as exc:
+            # Compensate: drop the half-created project + every task we
+            # managed to insert. delete_project iterates tasks by
+            # project_id so it catches everything Pass 1 wrote, plus any
+            # sessions/messages that happened to attach.
+            log.error("project.create_with_tasks_failed_rolling_back",
+                      project_id=project_id, error=str(exc))
+            try:
+                await self.delete_project(project_id)
+            except Exception as cleanup_exc:  # noqa: BLE001
+                log.error("project.rollback_failed",
+                          project_id=project_id, error=str(cleanup_exc))
+            raise
 
         log.info("project.created_with_tasks",
                  id=project_id, task_count=len(tasks))

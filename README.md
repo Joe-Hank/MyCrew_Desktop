@@ -42,10 +42,13 @@ MyCrew_v3/
 
 ## 文档入口
 
-- [plan.md](./plan.md) — 完整架构与实施路线图（权威来源）
-- [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) — 架构定稿（Phase 0 产出）
-- [docs/API.md](./docs/API.md) — REST + WS 契约（Phase 1 起持续更新）
+- [docs/README.md](./docs/README.md) — 文档总索引（spec / iterations / roadmap / ADR / archive 分类）
+- [plan.md](./plan.md) — 初始架构与实施路线图（**已冻结**；演进版见 `docs/spec/ARCHITECTURE.md`）
+- [docs/spec/ARCHITECTURE.md](./docs/spec/ARCHITECTURE.md) — 架构定稿（跟代码同步演进）
+- [docs/spec/API.md](./docs/spec/API.md) — REST + WS 契约
 - [docs/ADR/](./docs/ADR/) — 关键架构决策记录
+- [docs/iterations/](./docs/iterations/) — 按日期归档的迭代日志
+- [docs/roadmap/](./docs/roadmap/) — 未来规划 + 设计草案（含 MCP / OpenClaw 集成预案）
 
 ## 快速开始
 

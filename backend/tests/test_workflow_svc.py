@@ -117,12 +117,17 @@ class TestWorkflowPauseResume:
                 p.stop()
 
     async def test_pause_inactive_raises(self, env):
+        # workflow_svc.pause now has a two-tier behaviour:
+        # 1. live harness present → pause it
+        # 2. no harness, DB row exists → orphan reconcile (mark tasks paused)
+        # 3. no harness, no DB row → raise KeyError(project_id)
+        # This test exercises path 3, so the project must NOT be seeded.
         patches = _patch_deps(env)
         for p in patches:
             p.start()
         try:
-            with pytest.raises(KeyError, match="not active"):
-                await env["svc"].pause("proj_1")
+            with pytest.raises(KeyError, match="proj_does_not_exist"):
+                await env["svc"].pause("proj_does_not_exist")
         finally:
             for p in patches:
                 p.stop()

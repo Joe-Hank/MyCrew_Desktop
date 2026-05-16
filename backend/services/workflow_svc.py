@@ -114,10 +114,34 @@ class WorkflowService:
         self._runners: dict[str, TaskRunner] = {}
         self._run_tasks: dict[str, asyncio.Task] = {}
         self._outputs: dict[str, dict[str, dict]] = {}
+        # Per-project asyncio.Lock — serialises start/pause/resume/abort/retry
+        # for the same project so a double-click Start or a concurrent
+        # retry can't produce two harnesses or duplicate asyncio.Tasks.
+        # Lazily created in _get_project_lock(); the lock map itself is
+        # mutated only on the main event loop (FastAPI request handlers),
+        # so dict mutation is single-threaded.
+        # Audit (2026-05-16 architecture-audit.md, Top 5 #3) called out
+        # the TOCTOU race here as P1; this is the fix.
+        self._project_locks: dict[str, asyncio.Lock] = {}
+
+    def _get_project_lock(self, project_id: str) -> asyncio.Lock:
+        lock = self._project_locks.get(project_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._project_locks[project_id] = lock
+        return lock
 
     # ── Public API ────────────────────────────────────────
+    # Every state-mutating entry point grabs the per-project lock first
+    # so start/pause/resume/abort/retry_task on the same project_id are
+    # serialised. Concurrent requests on DIFFERENT projects still run
+    # in parallel.
 
     async def start(self, project_id: str) -> None:
+        async with self._get_project_lock(project_id):
+            await self._start_locked(project_id)
+
+    async def _start_locked(self, project_id: str) -> None:
         project = await crud.get_by_id("projects", project_id)
         if not project:
             raise KeyError(f"Project {project_id} not found")
@@ -167,6 +191,10 @@ class WorkflowService:
         log.info("workflow.started", project_id=project_id)
 
     async def pause(self, project_id: str) -> None:
+        async with self._get_project_lock(project_id):
+            await self._pause_locked(project_id)
+
+    async def _pause_locked(self, project_id: str) -> None:
         # Live-harness path — normal in-session pause
         harness = self._active.get(project_id)
         if harness is not None:
@@ -199,6 +227,10 @@ class WorkflowService:
                  project_id=project_id, tasks_flipped=len(running_tasks))
 
     async def resume(self, project_id: str) -> None:
+        async with self._get_project_lock(project_id):
+            await self._resume_locked(project_id)
+
+    async def _resume_locked(self, project_id: str) -> None:
         harness = self._get_harness(project_id)
         events = harness.resume()
 
@@ -212,6 +244,10 @@ class WorkflowService:
         log.info("workflow.resumed", project_id=project_id)
 
     async def abort(self, project_id: str, reason: str = "") -> None:
+        async with self._get_project_lock(project_id):
+            await self._abort_locked(project_id, reason)
+
+    async def _abort_locked(self, project_id: str, reason: str = "") -> None:
         # Live-harness path
         harness = self._active.get(project_id)
         if harness is not None:
@@ -247,14 +283,15 @@ class WorkflowService:
                  reason=reason)
 
     async def retry_task(self, project_id: str, task_id: str) -> None:
-        harness = self._get_harness(project_id)
-        runner = self._runners[project_id]
+        async with self._get_project_lock(project_id):
+            harness = self._get_harness(project_id)
+            runner = self._runners[project_id]
 
-        events = harness.retry_task(task_id)
-        await self._persist_task_state(project_id, task_id, harness)
-        await event_bus.publish_all(events)
+            events = harness.retry_task(task_id)
+            await self._persist_task_state(project_id, task_id, harness)
+            await event_bus.publish_all(events)
 
-        self._schedule_task(project_id, task_id, harness, runner)
+            self._schedule_task(project_id, task_id, harness, runner)
 
     async def recover(self) -> list[str]:
         rows = await crud.get_all("projects", "state = ?", (ProjectState.RUNNING,))
@@ -902,6 +939,11 @@ class WorkflowService:
             task = self._run_tasks.pop(key, None)
             if task:
                 task.cancel()
+        # Drop the per-project lock too — a stale lock can't deadlock
+        # anything (it's project-keyed and the project is now gone) but
+        # keeping it around accumulates entries over a long-running
+        # process. New start() will allocate a fresh one.
+        self._project_locks.pop(project_id, None)
 
 
 workflow_svc = WorkflowService()
