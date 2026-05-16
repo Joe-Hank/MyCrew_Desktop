@@ -72,7 +72,12 @@ function PMDebugLog({ state }: Props) {
         ref={scrollRef}
         className="min-h-0 flex-1 overflow-y-auto pr-1"
       >
-        {PHASE_ORDER.filter((p) => grouped.has(p)).map((phase) => {
+        {/* Always render every phase as a row — pending phases get a
+            `·` glyph, current gets ▶, completed ✓, failed ⚠️. Lets
+            the user see the whole 5-phase pipeline up-front (incl.
+            the ones that haven't fired yet) rather than only the
+            phases that have produced log entries. */}
+        {PHASE_ORDER.map((phase) => {
           const entries = grouped.get(phase) ?? [];
           const isFailed = phase === state.failed_phase;
           const isCurrent = phase === state.current_phase;
@@ -81,7 +86,7 @@ function PMDebugLog({ state }: Props) {
               key={phase}
               phase={phase}
               entries={entries}
-              expanded={isExpanded(phase)}
+              expanded={isExpanded(phase) && entries.length > 0}
               isFailed={isFailed}
               isCurrent={isCurrent}
               onToggle={() =>
@@ -93,14 +98,6 @@ function PMDebugLog({ state }: Props) {
             />
           );
         })}
-        {grouped.size === 0 && (
-          <div
-            className="py-6 text-center text-xs"
-            style={{ color: "var(--color-ink-ghost)" }}
-          >
-            等待 PM 工作流启动…
-          </div>
-        )}
       </div>
     </div>
   );
@@ -164,14 +161,29 @@ function PhaseSection({
   onToggle: () => void;
 }) {
   const label = PHASE_LABELS[phase] ?? phase;
-  // Phase done if it has a phase_completed entry
   const done = entries.some((e) => e.status === "phase_completed");
-  const glyph = isFailed ? "⚠️" : done ? "✓" : isCurrent ? "▶" : "·";
+  const pending = entries.length === 0 && !isCurrent && !isFailed && !done;
+  const glyph = isFailed
+    ? "⚠️"
+    : done
+      ? "✓"
+      : isCurrent
+        ? "▶"
+        : pending
+          ? "○"
+          : "·";
   const bg = isFailed
     ? "rgba(245, 158, 11, 0.08)"
     : isCurrent
       ? "rgba(12, 140, 233, 0.06)"
       : "transparent";
+  // Pending phases (no entries yet) read in ink-ghost so they recede
+  // visually relative to running / completed ones.
+  const textColor = pending
+    ? "var(--color-ink-ghost)"
+    : "var(--color-ink-soft)";
+  const countLabel = entries.length > 0 ? `${entries.length} 条` : "等待";
+  const toggleable = entries.length > 0;
   return (
     <div
       className="mb-2 rounded-md"
@@ -183,9 +195,12 @@ function PhaseSection({
       }}
     >
       <button
-        onClick={onToggle}
+        onClick={toggleable ? onToggle : undefined}
         className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] font-medium"
-        style={{ color: "var(--color-ink-soft)" }}
+        style={{
+          color: textColor,
+          cursor: toggleable ? "pointer" : "default",
+        }}
       >
         <span style={{ width: "14px" }}>{glyph}</span>
         <span className="flex-1">{label}</span>
@@ -193,16 +208,16 @@ function PhaseSection({
           className="text-[10px]"
           style={{ color: "var(--color-ink-ghost)" }}
         >
-          {entries.length} 条
+          {countLabel}
         </span>
         <span
           className="text-[10px]"
           style={{ color: "var(--color-ink-ghost)" }}
         >
-          {expanded ? "▾" : "▸"}
+          {toggleable ? (expanded ? "▾" : "▸") : ""}
         </span>
       </button>
-      {expanded && (
+      {expanded && entries.length > 0 && (
         <div className="px-3 pb-2 pl-7">
           {entries.map((e, i) => (
             <LogEntry key={`${e.ts}_${i}`} entry={e} />

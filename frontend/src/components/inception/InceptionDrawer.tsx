@@ -761,7 +761,15 @@ function InceptionDrawer() {
         <div className="flex min-h-0 flex-1">
           <div
             className="flex flex-1 flex-col"
-            style={{ borderRight: draftBlueprint ? "1px solid var(--color-border-soft)" : "none" }}
+            style={{
+              // Always show a subtle divider when the right panel is
+              // present, not just when a blueprint draft exists.
+              // Previously the right panel and chat blurred together
+              // visually during PM running — no border, similar bg.
+              borderRight: showRightPanel
+                ? "1px solid var(--color-border-soft)"
+                : "none",
+            }}
           >
             <div className="flex-1 overflow-auto p-6">
               {visibleMessages.length === 0
@@ -1141,8 +1149,9 @@ function InceptionDrawer() {
                     <button
                       onClick={handleRegenerate}
                       disabled={chat.thinking}
-                      className="rounded-lg border bg-white px-3 py-2 text-xs font-medium transition-colors hover:bg-zinc-50 disabled:opacity-40"
+                      className="rounded-lg border px-3 py-2 text-xs font-medium transition-opacity hover:opacity-90 disabled:opacity-40"
                       style={{
+                        backgroundColor: "var(--color-card)",
                         borderColor: "var(--color-border-soft)",
                         color: "var(--color-ink-label)",
                       }}
@@ -1222,18 +1231,22 @@ function PMActionButtons({
   }
 
   if (state.status === "running") {
+    // The chat composer (left column) already shows a red Stop button
+    // while a round is in-flight — that's the same /pm/cancel call.
+    // Repeating it here as 停止 PM 工作流 just made the bottom of the
+    // panel feel cluttered. Show a thin hint instead so users still
+    // discover where to cancel.
     return (
-      <button
-        onClick={async () => {
-          await call("cancel", "取消");
-          onChanged();
-        }}
-        disabled={busy}
-        className="flex w-full items-center justify-center gap-1 rounded-lg py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
-        style={{ backgroundColor: "#dc2626" }}
+      <div
+        className="flex items-center justify-center gap-2 text-[11px]"
+        style={{ color: "var(--color-ink-faint)" }}
       >
-        停止 PM 工作流
-      </button>
+        <span
+          className="inline-block h-1.5 w-1.5 animate-pulse rounded-full"
+          style={{ backgroundColor: "var(--color-brand-500)" }}
+        />
+        <span>工作流进行中 · 取消请用聊天框右下的「Stop」按钮</span>
+      </div>
     );
   }
 
