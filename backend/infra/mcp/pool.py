@@ -141,6 +141,18 @@ class MCPPool:
         enabled = [s for s in servers if s.get("enabled", True)]
         auto_start = [s for s in enabled if s.get("auto_start", True)]
 
+        # Cross-boot orphan sweep (2026-05-17): previous reload cycles
+        # may have left npx/uvx zombies holding npm/uv cache locks.
+        # Without this sweep, the new spawns below deadlock waiting
+        # for those locks and the whole startup hangs forever (the
+        # 8s wait_for has been observed not to fire reliably on
+        # Windows ProactorEventLoop). See infra/mcp/subprocess_reaper.
+        try:
+            from infra.mcp.subprocess_reaper import sweep_orphan_mcp_subprocesses
+            sweep_orphan_mcp_subprocesses(enabled)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("mcp.pool.orphan_sweep_failed", error=str(exc))
+
         tasks = [self._safe_connect(s) for s in auto_start]
         if tasks:
             await asyncio.gather(*tasks)
@@ -162,6 +174,17 @@ class MCPPool:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._connections.clear()
+
+        # SDK's AsyncExitStack.aclose() routinely fails to clean up
+        # subprocesses on Windows (the silent disconnect_error warnings
+        # logged above). Reap any survivors so the next --reload cycle
+        # doesn't inherit a growing pile of zombies.
+        try:
+            from infra.mcp.subprocess_reaper import reap_my_subprocesses
+            reap_my_subprocesses(reason="pool.stop")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("mcp.pool.reap_failed", error=str(exc))
+
         log.info("mcp.pool.stopped")
 
     async def connect_server(self, server_id: str, config: dict) -> dict:
@@ -230,6 +253,28 @@ class MCPPool:
         server_id = server_config["id"]
         conn = MCPConnection(server_id, server_config)
         self._connections[server_id] = conn
+
+        # HTTP MCP pre-flight (2026-05-17): probe the TCP port first.
+        # The SDK's streamable / SSE client otherwise burns the full
+        # `timeout` (30s default) trying to negotiate against a port
+        # nobody is listening on — and on Windows ProactorEventLoop
+        # this sometimes hangs longer than the wait_for() below
+        # rescues. A cheap socket connect tells us in 2s whether the
+        # backing daemon (Unity Editor + Bridge / similar) is alive.
+        if server_config.get("transport") == "http":
+            from infra.mcp.subprocess_reaper import http_url_reachable
+            url = server_config.get("url") or ""
+            if url and not http_url_reachable(url, timeout_s=2.0):
+                conn.status = "error"
+                conn.error_message = (
+                    f"{url} refused TCP connect — backing server "
+                    "(Unity Editor + MCP Bridge / similar) not running."
+                )
+                log.info("mcp.pool.http_preflight_skip",
+                         server_id=server_id, url=url)
+                await self._broadcast_status_change(server_id, conn)
+                return
+
         try:
             # Hard timeout so a hanging stdio command can't block app startup.
             # On timeout the conn enters "error" — user can retry via UI later.
