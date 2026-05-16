@@ -47,10 +47,21 @@ export interface Blueprint {
     deps: number[];
     output_schema: Record<string, unknown>;
     kind: string;
-    /** Frontend-only: which agent should run this task. Persisted via
-     *  per-task PUT /workflow/tasks/{id} on save (server doesn't include
-     *  agent_id in the create_workflow tool payload). */
+    /** Legacy single-agent assignment (PM v3 / setup tasks / iterate
+     *  flow). When `performer_kind === "agent"`, this mirrors
+     *  `performer_id` so workflow_svc fallbacks and the team page still
+     *  find a row. NULL for Crew tasks. */
     agent_id?: string | null;
+    /** PM v4: 'agent' (single agent) or 'crew' (head → executor → QA
+     *  chain). Filled by Phase 5 (planner_orchestrator
+     *  ._assemble_draft_blueprint) and round-tripped through
+     *  pmState.draft_blueprint without modification. The task draft
+     *  preview reads this to show "Crew: Art Crew" vs "Agent: …". */
+    performer_kind?: "agent" | "crew" | null;
+    /** ID of the assigned performer (agent_id or crew_id depending on
+     *  kind). For Crew tasks this is the only field carrying the
+     *  identity — the legacy `agent_id` column is null. */
+    performer_id?: string | null;
   }[];
 }
 

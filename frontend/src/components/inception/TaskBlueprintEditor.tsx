@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { Blueprint } from "../../queries/useInceptionQuery";
 import { useAssignableAgents } from "../../queries/useAgentQuery";
+import { useCrews } from "../../queries/useTeamQuery";
 
 interface Props {
   blueprint: Blueprint;
@@ -8,6 +9,8 @@ interface Props {
   onReEvaluate: () => void;
   reEvaluating: boolean;
 }
+
+type BpTask = Blueprint["tasks"][number];
 
 function TaskBlueprintEditor({
   blueprint,
@@ -18,8 +21,12 @@ function TaskBlueprintEditor({
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const { data: agents } = useAssignableAgents();
   const agentList = agents ?? [];
+  // PM v4: tasks may be assigned to a Crew instead of a single agent.
+  // We need the crew list to render the human-readable label.
+  const { data: crews } = useCrews();
+  const crewList = crews ?? [];
 
-  function updateTask(index: number, patch: Partial<Blueprint["tasks"][0]>) {
+  function updateTask(index: number, patch: Partial<BpTask>) {
     const tasks = blueprint.tasks.map((t, i) => (i === index ? { ...t, ...patch } : t));
     onChange({ ...blueprint, tasks });
   }
@@ -43,9 +50,20 @@ function TaskBlueprintEditor({
     setEditingIndex(tasks.length - 1);
   }
 
-  function agentLabel(agentId: string | null | undefined, kind: string): string {
-    if (!agentId) return kind === "final_qa" ? "QA-Agent" : "待指定";
-    const a = agentList.find((x) => x.id === agentId);
+  // PM v4: prefer performer_kind/performer_id when set (filled by
+  // planner_orchestrator._assemble_draft_blueprint). Fall back to
+  // legacy agent_id for PM v3 / iterate / setup tasks.
+  function performerLabel(task: BpTask): string {
+    const kind = task.performer_kind;
+    const pid = task.performer_id ?? task.agent_id;
+    if (kind === "crew") {
+      if (!pid) return "Crew: 待指定";
+      const c = crewList.find((x) => x.id === pid);
+      return c ? `Crew: ${c.name}` : "Crew: 未知";
+    }
+    // kind === "agent" or undefined (legacy)
+    if (!pid) return task.kind === "final_qa" ? "QA-Agent" : "待指定";
+    const a = agentList.find((x) => x.id === pid);
     return a?.role ?? "未知 Agent";
   }
 
@@ -115,18 +133,64 @@ function TaskBlueprintEditor({
                   />
                 </div>
                 <div className="flex items-center gap-2 text-xs">
-                  <label style={{ color: "var(--color-ink-faint)" }}>执行 Agent:</label>
+                  <label style={{ color: "var(--color-ink-faint)" }}>执行者:</label>
                   <select
-                    value={task.agent_id ?? ""}
-                    onChange={(e) => updateTask(i, { agent_id: e.target.value || null })}
+                    // Stored as "agent:<id>" / "crew:<id>" so we can
+                    // recover the kind on change; mirrors what
+                    // planner_orchestrator persists into the task row.
+                    value={
+                      task.performer_kind && (task.performer_id ?? task.agent_id)
+                        ? `${task.performer_kind}:${task.performer_id ?? task.agent_id}`
+                        : task.agent_id
+                          ? `agent:${task.agent_id}`
+                          : ""
+                    }
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (!v) {
+                        updateTask(i, {
+                          agent_id: null,
+                          performer_kind: null,
+                          performer_id: null,
+                        });
+                        return;
+                      }
+                      const [kind, id] = v.split(":", 2);
+                      if (kind === "crew") {
+                        updateTask(i, {
+                          performer_kind: "crew",
+                          performer_id: id,
+                          agent_id: null,
+                        });
+                      } else {
+                        updateTask(i, {
+                          performer_kind: "agent",
+                          performer_id: id,
+                          agent_id: id,
+                        });
+                      }
+                    }}
                     className="flex-1 rounded-md bg-zinc-50 px-2 py-1 text-xs outline-none"
                   >
                     <option value="">
                       {task.kind === "final_qa" ? "（默认 QA-Agent）" : "（待指定）"}
                     </option>
-                    {agentList.map((a) => (
-                      <option key={a.id} value={a.id}>{a.role}</option>
-                    ))}
+                    {crewList.length > 0 && (
+                      <optgroup label="Crew（多 Agent 协作）">
+                        {crewList.map((c) => (
+                          <option key={`crew:${c.id}`} value={`crew:${c.id}`}>
+                            {c.name}
+                          </option>
+                        ))}
+                      </optgroup>
+                    )}
+                    <optgroup label="单 Agent">
+                      {agentList.map((a) => (
+                        <option key={`agent:${a.id}`} value={`agent:${a.id}`}>
+                          {a.role}
+                        </option>
+                      ))}
+                    </optgroup>
                   </select>
                 </div>
                 <div className="flex gap-2">
@@ -197,7 +261,7 @@ function TaskBlueprintEditor({
                       <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
                       <circle cx="12" cy="7" r="4" />
                     </svg>
-                    {agentLabel(task.agent_id, task.kind)}
+                    {performerLabel(task)}
                   </span>
                   {task.deps.length > 0 && (
                     <span>依赖: {task.deps.map((d) => `#${d + 1}`).join(", ")}</span>
