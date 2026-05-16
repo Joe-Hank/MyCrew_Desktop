@@ -154,7 +154,10 @@ function CanvasCrewNode({ data, selected }: NodeProps) {
               handleToggle();
             }}
             title={`展开 Crew (${sequence.length} 步)`}
-            className="absolute right-2 bottom-2 flex h-6 w-6 items-center justify-center rounded-full text-[11px] font-bold text-white shadow-md transition-colors"
+            // Moved from bottom-right → top-right 2026-05-17: TaskNode's
+            // action row (edit / pause / retry / chat / IO) lives at the
+            // bottom; the expand button was sitting on top of the IO icon.
+            className="absolute right-2 top-2 z-10 flex h-6 w-6 items-center justify-center rounded-full text-[11px] font-bold text-white shadow-md transition-colors"
             style={{ backgroundColor: "var(--color-brand-500)" }}
           >
             ⊕
