@@ -232,6 +232,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     events_janitor_task = asyncio.create_task(run_event_janitor())
     log.info("startup.events_janitor_started")
 
+    # STEP 8: one-time LLM quota probe so the sticky-skip set is
+    # initialised before the first frontend poll. Providers that fail
+    # here won't be re-probed on the regular 30s cache miss until the
+    # user explicitly hits the home-page 「刷新」 button — that's the
+    # only path that calls get_quota(force=True). Without this seed
+    # probe the first 30s of life would still log fail warnings until
+    # the cache turns over.
+    try:
+        from services.llm_svc import llm_svc
+        await llm_svc.get_quota(force=True)
+        log.info("startup.llm_quota_probed")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("startup.llm_quota_probe_failed", error=str(exc))
+
     log.info("startup.complete")
     yield
 

@@ -78,9 +78,32 @@ class LlmService:
         log.info("llm.model_deleted", id=model_id)
 
     # 30s TTL cache (per plan §11.2 — quota probes are expensive)
-    _quota_cache: dict | None = None
+    _quota_cache: list[dict] | None = None
     _quota_cache_at: float = 0.0
     _QUOTA_TTL = 30.0
+
+    # Sticky-skip set (audit 2026-05-17): once a provider's probe
+    # fails, we stop probing it on every cache miss. The user's log
+    # was filling with the same two providers' 403 / 404 warnings
+    # every 30s forever (Anthropic from CN; an old DashScope URL).
+    # The probe stays skipped until the user clicks the home-page
+    # "刷新" button, which calls get_quota(force=True) — that path
+    # clears the set and re-probes fresh. If a provider fails again
+    # on refresh it goes right back into the set.
+    _unavailable_provider_ids: set[str] = set()
+
+    @staticmethod
+    def _stuck_status(provider: dict) -> dict:
+        """Stub status returned for providers in the skip set so the
+        UI still shows them (red dot) without re-probing the network."""
+        return {
+            "provider_id": provider["id"],
+            "name": provider["name"],
+            "type": provider["type"],
+            "display": "unavailable",
+            "value": None,
+            "raw": "上次检测失败 — 主页「刷新」可重试",
+        }
 
     async def get_quota(self, *, force: bool = False) -> list[dict]:
         """Per-provider quota status with three display modes (plan §11.2).
@@ -94,8 +117,8 @@ class LlmService:
           }
 
         Cached for 30s to avoid hammering provider endpoints. Pass
-        force=True to bypass the cache (the /llm/quota POST refresh
-        endpoint passes this).
+        force=True to bypass BOTH the cache AND the sticky-skip set —
+        the only path that re-probes a previously-failed provider.
         """
         import time
         now = time.time()
@@ -106,10 +129,29 @@ class LlmService:
         ):
             return self._quota_cache
 
+        # Force=True is the user clicking 刷新 — give every provider a
+        # second chance (and any that fail again will repopulate the
+        # skip set during the loop below).
+        if force:
+            if self._unavailable_provider_ids:
+                log.info("llm.quota_skip_reset",
+                         count=len(self._unavailable_provider_ids))
+            self._unavailable_provider_ids = set()
+
         providers = await crud.get_all("llm_providers")
         results = []
         for p in providers:
+            pid = p["id"]
+            if pid in self._unavailable_provider_ids:
+                # No network call — return the cached "stuck" stub.
+                results.append(self._stuck_status(p))
+                continue
             status = await self._probe_provider_quota(p)
+            if status.get("display") == "unavailable":
+                # First failure: mark for skip on the next cache miss.
+                self._unavailable_provider_ids.add(pid)
+                log.info("llm.quota_provider_marked_unavailable",
+                         provider_id=pid, name=p["name"])
             results.append(status)
 
         self._quota_cache = results
