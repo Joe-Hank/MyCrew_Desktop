@@ -6,7 +6,14 @@ export type TaskAction =
   | { kind: "edit"; task: Task }
   | { kind: "pause"; task: Task }
   | { kind: "retry"; task: Task }
+  // Legacy interactive diagnostic chat — kept for rollback. The live
+  // button no longer emits this; it emits view_failure_reason instead.
+  // Wire AgentChatDrawer back to this kind to roll back to v1 chat UX.
   | { kind: "agent_chat"; task: Task }
+  // Active diagnostic surface (2026-05-17): reads the precomputed
+  // tasks.failure_analysis text that failure_analyzer wrote on the
+  // failed/validation_failed transition. Opens a read-only drawer.
+  | { kind: "view_failure_reason"; task: Task }
   | { kind: "view_io"; task: Task; direction: "in" | "out" };
 
 const STATUS_DOT: Record<string, string> = {
@@ -204,14 +211,22 @@ function TaskNode({
           </svg>
         </IconBtn>
 
+        {/* Failure-reason viewer — replaces the old "对话" chat button.
+            Reads the LLM-precomputed diagnosis instead of opening a new
+            chat round-trip. Same slot, same gating (failure states only),
+            so visual layout is unchanged. */}
         <IconBtn
-          title="对话"
+          title="查看失败原因"
           disabled={!canChat}
-          onClick={() => onAction({ kind: "agent_chat", task })}
+          onClick={() => onAction({ kind: "view_failure_reason", task })}
         >
+          {/* Clipboard / report icon — visually distinct from speech bubble */}
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
             strokeLinecap="round" strokeLinejoin="round">
-            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+            <path d="M9 2h6a1 1 0 0 1 1 1v2H8V3a1 1 0 0 1 1-1z" />
+            <rect x="5" y="4" width="14" height="18" rx="2" />
+            <line x1="9" y1="11" x2="15" y2="11" />
+            <line x1="9" y1="15" x2="15" y2="15" />
           </svg>
         </IconBtn>
 
@@ -283,11 +298,11 @@ function buildWarningTooltip(task: Task): string {
     ?? "⚠️ 需要用户介入";
   const detail = (task.last_error ?? "").trim();
   if (!detail) {
-    return `${headline}\n\n点击卡片 → 💬 Agent 对话，让诊断助手解释。`;
+    return `${headline}\n\n点击卡片 → 📋 查看失败原因，读取自动诊断报告。`;
   }
   // Cap exception text so the native tooltip stays readable.
   const trimmed = detail.length > 240 ? detail.slice(0, 240) + "…" : detail;
-  return `${headline}\n\n${trimmed}\n\n点击卡片 → 💬 Agent 对话，可获取更详细的修复建议。`;
+  return `${headline}\n\n${trimmed}\n\n点击卡片 → 📋 查看失败原因，读取自动诊断报告。`;
 }
 
 export default TaskNode;

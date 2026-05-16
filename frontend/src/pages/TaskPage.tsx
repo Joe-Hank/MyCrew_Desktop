@@ -14,6 +14,7 @@ import TaskHeader from "../components/task/TaskHeader";
 import CanvasBlueprint from "../components/task/CanvasBlueprint";
 import TaskEditModal from "../components/task/TaskEditModal";
 import AgentChatDrawer from "../components/task/AgentChatDrawer";
+import FailureAnalysisDrawer from "../components/task/FailureAnalysisDrawer";
 import IoViewerDrawer from "../components/task/IoViewerDrawer";
 import { useDismissibleConfirm } from "../components/common/ConfirmDialog";
 import type { TaskAction } from "../components/task/TaskNode";
@@ -22,7 +23,13 @@ import type { SubStepAction } from "../components/task/SubAgentCard";
 type DrawerState =
   | null
   | { kind: "edit"; task: Task }
+  // Legacy interactive chat drawer state — retained for rollback. The
+  // live UI no longer opens this kind; switch the TaskNode/SubAgentCard
+  // emit back to agent_chat / sub_chat to re-enable it.
   | { kind: "agent_chat"; task: Task; stepIndex?: number; agentId?: string }
+  // Active failure-diagnosis drawer state (2026-05-17). Renders the
+  // failure_analyzer's precomputed report.
+  | { kind: "view_failure_reason"; task: Task }
   | { kind: "view_io"; task: Task; direction: "in" | "out"; stepIndex?: number };
 
 function TaskPage() {
@@ -103,6 +110,23 @@ function TaskPage() {
   useEvent("task.paused", handleWsTaskEvent);
   useEvent("task.blocked", handleWsTaskEvent);
   useEvent("task.validation.failed", handleWsTaskEvent);
+  // 2026-05-17: failure_analyzer fires this event when the LLM
+  // diagnosis finishes writing. Invalidate the per-task failureAnalysis
+  // query so the open drawer flips from "分析中..." to rendered text.
+  const handleFailureAnalyzed = useCallback(
+    (msg: { payload: Record<string, unknown> }) => {
+      const tid = typeof msg.payload?.task_id === "string"
+        ? msg.payload.task_id
+        : null;
+      if (tid) {
+        qc.invalidateQueries({ queryKey: ["failureAnalysis", tid] });
+      }
+      // Also refresh the project so the task row sees failure_analysis_at.
+      if (projectId) qc.invalidateQueries({ queryKey: ["project", projectId] });
+    },
+    [qc, projectId],
+  );
+  useEvent("task.failure_analyzed", handleFailureAnalyzed);
   useEvent("project.started", handleWsTaskEvent);
   useEvent("project.paused", handleWsTaskEvent);
   useEvent("project.resumed", handleWsTaskEvent);
@@ -291,7 +315,11 @@ function TaskPage() {
           void askRetryAndRun(action.task);
           break;
         case "agent_chat":
+          // Legacy: only reachable if someone wires TaskNode back to it.
           setDrawer({ kind: "agent_chat", task: action.task });
+          break;
+        case "view_failure_reason":
+          setDrawer({ kind: "view_failure_reason", task: action.task });
           break;
         case "view_io":
           setDrawer({ kind: "view_io", task: action.task, direction: action.direction });
@@ -324,12 +352,22 @@ function TaskPage() {
           // pause flag at every step boundary.
           break;
         case "sub_chat":
+          // Legacy sub-step chat — only reachable if SubAgentCard is
+          // wired back to emit sub_chat. Today it emits
+          // sub_view_failure_reason, which falls through to the
+          // task-level failure drawer below.
           setDrawer({
             kind: "agent_chat",
             task: action.task,
             stepIndex: action.stepIndex,
             agentId: action.agentId,
           });
+          break;
+        case "sub_view_failure_reason":
+          // Sub-cards share the parent task's failure_analysis (one
+          // analysis per task), so open the same drawer without a
+          // step filter.
+          setDrawer({ kind: "view_failure_reason", task: action.task });
           break;
         case "sub_view_io":
           setDrawer({
@@ -418,6 +456,9 @@ function TaskPage() {
 
         {/* Side drawer — width tuned to match the Plan Maker chat column
             so the two LLM-chat surfaces feel like the same product. */}
+        {/* Legacy chat drawer — retained behind a kind that the live
+            TaskNode/SubAgentCard no longer emits. Re-wire those
+            components to roll back to interactive diagnostic chat. */}
         {drawer?.kind === "agent_chat" && (
           <div className="w-[400px] shrink-0">
             <AgentChatDrawer
@@ -428,6 +469,15 @@ function TaskPage() {
               onApplyAndRetry={(userMessages) =>
                 void askApplyGuidanceAndRetry(drawer.task, userMessages)
               }
+            />
+          </div>
+        )}
+
+        {drawer?.kind === "view_failure_reason" && (
+          <div className="w-[400px] shrink-0">
+            <FailureAnalysisDrawer
+              task={drawer.task}
+              onClose={() => setDrawer(null)}
             />
           </div>
         )}

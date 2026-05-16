@@ -11,7 +11,13 @@ export type SubStepAction =
   | { kind: "edit"; task: Task; stepIndex: number }
   | { kind: "pause"; task: Task; stepIndex: number }
   | { kind: "retry"; task: Task; stepIndex: number }
+  // Legacy interactive sub-step chat — kept for rollback. Live button
+  // emits sub_view_failure_reason instead.
   | { kind: "sub_chat"; task: Task; stepIndex: number; agentId: string }
+  // Active sub-step diagnostic surface (2026-05-17). Sub-cards share
+  // the parent task's failure_analysis (one analysis per task), so the
+  // drawer is opened against the task without a stepIndex filter.
+  | { kind: "sub_view_failure_reason"; task: Task; stepIndex: number }
   | { kind: "sub_view_io"; task: Task; stepIndex: number };
 
 interface SubAgentCardProps {
@@ -180,12 +186,12 @@ function SubAgentCard({
           </>
         )}
         <MiniBtn
-          title="对话（限定到本步骤上下文）"
+          title="查看失败原因（任务级自动诊断）"
           disabled={!canChat}
           onClick={() =>
-            onAction({ kind: "sub_chat", task, stepIndex, agentId })
+            onAction({ kind: "sub_view_failure_reason", task, stepIndex })
           }
-          icon="chat"
+          icon="failure"
         />
         <MiniBtn
           title="查看本步骤输入/输出"
@@ -206,7 +212,9 @@ function MiniBtn({
   title: string;
   disabled?: boolean;
   onClick: () => void;
-  icon: "edit" | "pause" | "retry" | "chat" | "io";
+  // "chat" retained (unused in live UI) so AgentChatDrawer can be
+  // re-wired for rollback without re-introducing the type.
+  icon: "edit" | "pause" | "retry" | "chat" | "failure" | "io";
 }) {
   return (
     <button
@@ -221,7 +229,7 @@ function MiniBtn({
   );
 }
 
-function renderIcon(kind: "edit" | "pause" | "retry" | "chat" | "io") {
+function renderIcon(kind: "edit" | "pause" | "retry" | "chat" | "failure" | "io") {
   const common = {
     width: 12,
     height: 12,
@@ -258,6 +266,17 @@ function renderIcon(kind: "edit" | "pause" | "retry" | "chat" | "io") {
       return (
         <svg {...common}>
           <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+        </svg>
+      );
+    case "failure":
+      // Clipboard / report — matches the icon used by TaskNode's
+      // 查看失败原因 button so the two surfaces feel like the same affordance.
+      return (
+        <svg {...common}>
+          <path d="M9 2h6a1 1 0 0 1 1 1v2H8V3a1 1 0 0 1 1-1z" />
+          <rect x="5" y="4" width="14" height="18" rx="2" />
+          <line x1="9" y1="11" x2="15" y2="11" />
+          <line x1="9" y1="15" x2="15" y2="15" />
         </svg>
       );
     case "io":

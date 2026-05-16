@@ -610,6 +610,12 @@ class WorkflowService:
                     "last_error_kind": "validation",
                 })
                 events = harness.validation_fail_task(task_id, err_list)
+                # Auto-diagnosis: spawn the dedicated LLM to write a
+                # canonical "原因 + 介入方法" report into tasks.
+                # failure_analysis. Fire-and-forget — never blocks task
+                # state persistence.
+                from agents.failure_analyzer import spawn as spawn_analyzer
+                spawn_analyzer(task_id)
 
             await self._persist_task_state(project_id, task_id, harness)
             await self._persist_project_state(project_id, harness)
@@ -628,6 +634,10 @@ class WorkflowService:
                 "last_error_kind": kind,
             })
             events = harness.fail_task(task_id, err_msg)
+            # Same auto-diagnosis hook for runtime / exception failures.
+            # See validation branch above for rationale.
+            from agents.failure_analyzer import spawn as spawn_analyzer
+            spawn_analyzer(task_id)
             await self._persist_task_state(project_id, task_id, harness)
             await self._persist_project_state(project_id, harness)
             await event_bus.publish_all(events)

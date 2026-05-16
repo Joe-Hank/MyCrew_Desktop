@@ -122,6 +122,50 @@ async def task_guidance_chat(task_id: str, body: TaskGuidanceChatBody):
                                     "message": result.get("reply", "")}}
 
 
+@router.get("/tasks/{task_id}/failure_analysis")
+async def get_task_failure_analysis(task_id: str):
+    """Read the LLM-precomputed failure diagnosis for this task.
+
+    The failure_analyzer module writes this field the moment a task
+    transitions to failed / validation_failed. Returns:
+
+      - status: "ready"  + text + at  → diagnosis is available
+      - status: "pending"             → task is failure-y but the LLM
+                                        hasn't finished yet; frontend
+                                        shows a spinner until
+                                        task.failure_analyzed WS event
+      - status: "not_failed"          → task isn't in a failure state,
+                                        button shouldn't have rendered
+    """
+    task = await crud.get_by_id("tasks", task_id)
+    if not task:
+        raise HTTPException(404, detail="task not found")
+    status = task.get("status")
+    is_failurey = status in ("failed", "validation_failed", "stalled", "blocked")
+    text = task.get("failure_analysis")
+    if not is_failurey:
+        return {"ok": True, "data": {
+            "status": "not_failed",
+            "text": None,
+            "at": None,
+        }}
+    if not text:
+        return {"ok": True, "data": {
+            "status": "pending",
+            "text": None,
+            "at": None,
+            "validation_errors": task.get("validation_errors"),
+            "last_error": task.get("last_error"),
+        }}
+    return {"ok": True, "data": {
+        "status": "ready",
+        "text": text,
+        "at": task.get("failure_analysis_at"),
+        "validation_errors": task.get("validation_errors"),
+        "last_error": task.get("last_error"),
+    }}
+
+
 @router.get("/tasks/{task_id}/sub_io")
 async def get_task_sub_io(task_id: str, step_index: int = Query(..., ge=0)):
     """PM v4: read a single Crew sub-step's structured + markdown IO.

@@ -207,6 +207,38 @@ export interface RequiredMcp {
   missing_tools: string[];
 }
 
+export interface FailureAnalysis {
+  status: "ready" | "pending" | "not_failed";
+  text: string | null;
+  at: string | null;
+  validation_errors?: string | null;
+  last_error?: string | null;
+}
+
+/** Read the LLM-precomputed failure diagnosis for a task.
+ *
+ *  Backend's failure_analyzer.spawn(task_id) runs at the moment a task
+ *  transitions to failed / validation_failed, writes its output to
+ *  tasks.failure_analysis, then broadcasts task.failure_analyzed.
+ *  TaskPage subscribes to that event and invalidates this query so the
+ *  drawer flips from "分析中..." to the rendered diagnosis. */
+export function useFailureAnalysis(taskId: string | null) {
+  return useQuery({
+    queryKey: ["failureAnalysis", taskId],
+    queryFn: async () => {
+      if (!taskId) return null;
+      const res = await apiFetch<FailureAnalysis>(
+        `/workflow/tasks/${taskId}/failure_analysis`,
+      );
+      return res.data ?? null;
+    },
+    enabled: !!taskId,
+    // Short stale time so re-opening the drawer right after the WS
+    // event lands always shows fresh text.
+    staleTime: 1_000,
+  });
+}
+
 /** Computes which MCP servers a project's tasks actually need + their
  *  current connection status. Powers the TaskHeader right-side status
  *  row + the Start button's pre-flight gate.
