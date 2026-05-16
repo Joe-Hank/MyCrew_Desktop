@@ -1,6 +1,8 @@
 # MyCrew v3 — 架构文档
 
+> **最后更新**：2026-05-16（PM v4 落地 + Phase 1/2 安全加固完成）
 > 本文档是 MyCrew v3 的架构参考手册。设计决策的完整背景与权衡记录在 `docs/ADR/` 目录下。
+> 文档分类索引：`docs/README.md` —— spec / iterations / roadmap / archive 四档导航。
 
 ---
 
@@ -69,27 +71,49 @@
 | 层 | 模块 | 职责 |
 |---|---|---|
 | **api/** | `routes_project.py` `routes_task.py` `routes_mcp.py` `routes_llm.py` `routes_agent.py` `routes_config.py` `routes_log.py` `ws.py` | REST 路由 + WS Hub；只做参数校验与 service 调用 |
-| **services/** | `project_svc.py` | 项目 CRUD、复制、删除、卡片分页 |
-| | `inception_svc.py` | 建项目对话：管理立项会话、调用 LLM 拆解任务、文件索引、执行结构选择、动态资源生成 |
-| | `workflow_svc.py` | 启动/暂停/恢复 Harness；暂停语义：当前任务跑完后截断后续链 |
+| **services/** | `project_svc.py` | 项目 CRUD、复制、删除、卡片分页。`create_project_with_tasks` 用补偿事务（异常时 delete_project 回滚） |
+| | `inception_svc.py` | 建项目对话：管理立项会话、调用 LLM 拆解任务、文件索引、执行结构选择 |
+| | `workflow_svc.py` | 启动/暂停/恢复 Harness；**per-project asyncio.Lock 串行化** 同 project 的 start/pause/retry；PM v4 起按 `performer_kind` 路由到 `_run_agent` 或 `_run_crew` |
+| | `crewai_runner.py` | CrewAI 桥：`run_task_with_crewai`（单 agent）+ `run_crew_step_with_crewai`（PM v4 Crew 单步） |
 | | `mcp_svc.py` | MCP 服务器池：启动、心跳、工具列表缓存、全量重连 |
 | | `llm_svc.py` | LLM 配置、Token 用量轮询（百分比/M 数/可用性三态） |
 | | `agent_svc.py` | Agent 模板 CRUD：角色/目标/能力/工具绑定 |
-| | `crew_svc.py` | Crew CRUD：队名/过程/角色组合 |
+| | `crew_svc.py` | Crew CRUD：队名/过程/`agent_sequence`(JSON head→executors→QA)/`applicable_scenarios` |
 | | `tool_svc.py` | Tool CRUD：扫描 `src/tools/` 自动发现、签名校验、Agent 绑定 |
 | | `permission_svc.py` | 系统权限白名单：运行时拦截 |
+| | `permission_guard.py` | 工具执行前的 `require_permission(kind)` + 启发式工具名匹配 |
+| | `events_svc.py` | 审计事件持久化 + 周期 janitor（6h 一次，30 天/项目 10k 行保留） |
 | | `log_svc.py` | 日志查询、按 source 分流、归档 |
+| | `watchdog_svc.py` | 卡死探测 + orphan-running 项目启动时 reconcile |
+| | `planner_cache_svc.py` | PM v3/v4 5-phase 内存缓存（in-memory，进程级，"save to persist" 语义） |
+| | `planner_persist_svc.py` | PM v3/v4 草稿落地为真实项目（cache → DB + .mycrew/） |
+| | `blueprint_writer.py` | 把 blueprint dict 写入 `<root>/.mycrew/`（独立模块供 persist_svc 复用） |
+| **agents/sub_agents/** | `_planner_orchestrator.py` | PM v3/v4 5-phase 编排（完整度判定 → 主策划 → 系统策划 → 审核 → 项管 → 指挥员） |
+| | `_planner_models.py` | Pydantic 渐进式增强模型：ConceptDoc → AtomicTask → ReviewedTask → PathedTask + Assignment(PerformerRef) |
+| | `_planner_tools.py` | 5 个 phase-specific submit_xxx 工具（CrewAI BaseTool） |
+| | `_planner_prompts.py` | 5 个 phase 的 role/goal/backstory 模板 |
+| | `_list_performers_tool.py` | PM v4 Phase 5 `list_performers` 工具（返回 standalone agent + Crew 池） |
+| | `task_guidance.py` | 单任务诊断聊天（任务卡片右上对话按钮 / Crew sub-card 对话），可 scope 到单个 Crew step |
+| | `create_new.py` / `iterate_existing.py` | 创建模式 / 迭代模式入口（薄封装 `_planner_orchestrator.run_crew`） |
 | **domain/** | `harness/` | 项目运行状态机（纯领域逻辑、零 IO） |
 | | `qa/` | DAG 健壮性校验 + Task 输出 schema 校验调度 |
 | | `experience/` | 经验库读写、tag 相关性匹配（CrewAI long-term memory 抽象） |
 | | `events.py` | Domain Event 定义（dataclass） |
 | **ports/** | `llm_port.py` `mcp_port.py` `repo_port.py` `interaction_port.py` `event_bus_port.py` | Protocol 接口；领域/服务通过这些类型依赖 |
-| **infra/** | `llm/openai_adapter.py` `anthropic_adapter.py` `qwen_adapter.py` | LLM 实现 |
-| | `mcp/stdio_client.py` `http_client.py` `pool.py` | MCP 连接实现 |
-| | `repo/sqlite_repo.py` `file_repo.py` | 持久化实现 |
+| **infra/** | `llm/gateway.py` + provider adapter | LLM 实现（含 90s 硬超时） |
+| | `mcp/stdio_client.py` `http_client.py` `pool.py` | MCP 连接实现 + 心跳 + 指数退避重连 |
+| | `repo/sqlite_repo.py` | SQLite + WAL；连接时跑 `wal_checkpoint(TRUNCATE)` 防 WAL 累积 |
+| | `repo/crud.py` | 通用 CRUD + **SQL fragment 守卫**（表名/列名/WHERE/ORDER BY 白名单 + 黑名单 +param-count 检查） |
 | | `interaction/ws_interaction.py` | 通过 WS 收集用户回应（替代 input()） |
-| | `event_bus/inproc_bus.py` | 进程内 pub/sub |
-| **bootstrap/** | `container.py` `paths.py` `app.py` `main.py` | 依赖注入容器、路径常量、FastAPI 装配、uvicorn 入口 |
+| | `event_bus/in_memory_bus.py` | 进程内 pub/sub |
+| | `runtime.py` | 主事件循环引用（CrewAI worker thread 通过它 hop 回主 loop） |
+| | `request_context.py` | request_id contextvar + structlog 处理器 |
+| **bootstrap/** | `app.py` `main.py` `paths.py` | FastAPI 装配（含 CORS / audit / request_id 三层 middleware）、uvicorn 入口、路径常量 |
+| | `seed_builtin_tools.py` | 79 个 builtin tool 行的幂等 seed |
+| | `seed_plan_maker.py` | Plan Maker agent 行的幂等 seed（保留供 inception session 作 chat author tag） |
+| | `seed_planner_agents.py` | 项目初始化助手 agent seed（pinned 到 deepseek-flash） |
+| | `seed_crews.py` | PM v4 的 14 个 standalone-eligible agent + 8 个 Crew seed（**diff-then-update**：内容相同跳过 UPDATE） |
+| | `wipe_v4.py` | 一次性 PM v4 reset（守 `_v4_reset_done.flag`；备份 DB → 删老项目 + 12 个废 agent） |
 
 ### 2.3 Tauri 壳层模块（Rust）
 
@@ -109,6 +133,7 @@
 ### 3.1 REST
 
 - **基址**：`http://127.0.0.1:18321/api/v1/`（仅监听 loopback）
+- **请求/响应 header**：每个响应带 `X-Request-ID`（12 位 hex）；客户端可通过同名请求头自带 id 用于跨调用追踪。
 - **统一响应格式**：
 
 ```json
@@ -136,7 +161,14 @@
 | 任务 | `GET /tasks?project_id=` | 项目下任务列表 |
 | | `PUT /tasks/:id` | 编辑详情（仅非运行态） |
 | | `POST /tasks/:id/pause\|rerun\|intervene` | 任务控制 |
-| | `GET /tasks/:id/io?direction=in\|out` | 查看输入/输出 |
+| | `GET /workflow/tasks/:id/io?direction=in\|out` | 查看任务输入/输出 |
+| | `GET /workflow/tasks/:id/sub_io?step_index=N` | **PM v4**：查看 Crew 任务单步 IO |
+| | `POST /workflow/tasks/:id/guidance` | 任务诊断聊天（可带 `step_index` scope 到 Crew 单步） |
+| PM v3/v4 | `GET /pm/sessions/:session_id/state` | 5-phase 实时进度 + 草稿 |
+| | `POST /pm/sessions/:session_id/save` | 草稿落盘成真实项目（可附 `override_blueprint`） |
+| | `POST /pm/sessions/:session_id/restart` | 从断点重跑 |
+| | `POST /pm/sessions/:session_id/cancel` | 取消当前 round |
+| 鉴权 | `GET /auth/ws_token` | **新增**：返回 WS session token（localhost-only） |
 | MCP | `GET /mcp/servers` | 服务器列表 |
 | | `POST /mcp/servers` | 新增 |
 | | `POST /mcp/servers/:id/restart` | 重启单个 |
@@ -152,7 +184,8 @@
 
 ### 3.2 WebSocket
 
-- **端点**：`ws://127.0.0.1:18321/ws`，单连接、双向。
+- **端点**：`ws://127.0.0.1:18321/api/v1/ws?token=<session-token>`，单连接、双向。
+- **鉴权（新增 2026-05-16）**：每次后端启动生成一个随机 token，写到 `data/runtime/session.token` 并通过 stdout 打印 `MYCREW_WS_TOKEN=…`。前端通过 `GET /api/v1/auth/ws_token` 拿 token 后挂在 `?token=` 上。token 不匹配 → handshake 关闭码 `4401`，前端清缓存自动重连刷新 token。
 - **消息格式**：`{ "type": "string", "ts": "ISO8601", "payload": {} }`
 
 **事件类型**：
@@ -160,17 +193,21 @@
 | 分组 | 事件 | 说明 |
 |---|---|---|
 | `inception.*` | `inception.delta` | 流式 token |
-| | `inception.tasks_drafted` | AI 拆解结果 |
-| `project.*` | `project.state_changed` | 项目状态变化 |
-| | `project.progress` | 进度更新 |
-| `task.*` | `task.started` / `task.progress` / `task.completed` / `task.failed` / `task.paused` | 任务生命周期 |
-| | `task.validation_failed` | schema 校验失败（含错误详情） |
-| `mcp.*` | `mcp.connected` / `mcp.disconnected` / `mcp.tool_call` | MCP 连接状态 |
-| `llm.*` | `llm.quota_changed` | Token 用量变化 |
-| `tool.*` | `tool.scanned` | src/tools 目录变化 |
+| | `inception.message` | 单轮完整助手消息 |
+| | `inception.tasks_drafted` | AI 拆解结果（v2 兼容路径） |
+| | `inception.workflow_created` | 草稿保存成项目后广播 |
+| | `inception.sub_agent_io` | sub-agent 的输入/输出追踪 |
+| `pm.log` | `pm.log` | **PM v3/v4**：5-phase 实时进度日志 |
+| `project.*` | `project.started` / `project.paused` / `project.resumed` / `project.completed` / `project.aborted` / `project.progress` | 项目生命周期 |
+| `task.*` | `task.started` / `task.completed` / `task.failed` / `task.paused` / `task.blocked` | 任务生命周期 |
+| | `task.validation.failed` | schema 校验失败（含错误详情） |
+| | `task.sub_step` | **PM v4**：Crew 子步骤 `started`/`completed`/`failed`，前端 `CanvasCrewNode` sub-card 实时高亮 |
+| `mcp.*` | `mcp.status_changed` / `mcp.tool_call` | MCP 连接状态 |
+| `tool.invoked` | `tool.invoked` | 每次工具调用的 audit 事件（`started`/`completed`/`denied`/`failed`） |
+| `agent.output` | `agent.output` | CrewAI step callback 推送的中间输出（含 Crew 子步骤） |
 | `prompt.*` | `prompt.request` / `prompt.response` | 人工介入双向交互 |
-| `log.*` | `log.append` | 实时日志推送（带 source 区分终端 tab） |
 | `lifecycle.*` | `lifecycle.recovery_prompt` | 启动时恢复提示 |
+| `ws.*` | `ws.connected` / `ws.disconnected` | 前端本地合成（非后端推送），用于连接状态指示 |
 
 ### 3.3 InteractionPort 协议
 
@@ -195,13 +232,14 @@ class InteractionPort(Protocol):
 
 | 表 | 用途 | 关键字段 |
 |---|---|---|
-| `projects` | 项目元数据 | id, name, root_path, state, is_running(bool), progress_pct, execution_kind(sequential\|crew\|flow) |
-| `inception_sessions` | 立项对话 | id, llm_id, thinking_mode, system_prompt, indexed_paths(JSON) |
+| `projects` | 项目元数据 | id, name, root_path, state, is_running(bool), progress_pct, execution_kind(sequential\|crew\|flow), parent_project_id, iteration_index, template_id, favorited_at |
+| `inception_sessions` | 立项对话 | id, llm_id, thinking_mode, system_prompt, indexed_paths(JSON), template_id, mode(create\|iterate), last_activity_at, title |
 | `inception_messages` | 立项对话消息 | id, session_id, role, content, ts |
-| `tasks` | 项目下任务 | id, project_id, title, detail, agent_id, kind(regular\|final_qa), output_schema(JSON Schema), status, deps(JSON), io_in_ref, io_out_ref |
+| `tasks` | 项目下任务 | id, project_id, title, detail, agent_id, kind(regular\|final_qa\|setup), output_schema(JSON Schema), status, deps(JSON), io_in_ref, io_out_ref, position_x/y, last_activity_at, validation_errors, last_error, last_error_kind, **performer_kind(agent\|crew)**, **performer_id** (PM v4) |
 | `agents` | Agent 模板 | id, role, goal, backstory, reasoning, max_retry, memory_enabled, thinking_mode, tool_ids(JSON), llm_id, is_auto_generated |
-| `crews` | Crew 编排 | id, name, process(sequential\|hierarchical), agent_ids(JSON), is_auto_generated |
+| `crews` | Crew 编排 | id, name, process(sequential\|hierarchical), agent_ids(JSON), is_auto_generated, **applicable_scenarios** (PM v4 Phase 5 选 Crew 时读), **agent_sequence** (JSON head→executors→QA 链路) |
 | `tools` | Tool 注册 | id, name, script_path, source(builtin\|user), checksum, params_schema(JSON) |
+| `events` | 审计/事件日志 | id, ts, event_type, actor, project_id, task_id, session_id, payload(JSON)（6h janitor 30 天 / 项目 10k 行保留） |
 | `mcp_servers` | MCP 配置 | id, name, transport(stdio\|http), command/args/url, env_ref(JSON), discovered_tools(JSON) |
 | `llm_providers` | LLM 配置 | id, name, type(openai/anthropic/qwen/deepseek/gemini/ollama/custom), api_key_ref, base_url |
 | `llm_models` | 模型清单（provider 一对多） | id, provider_id, model_name, label, max_tokens, supports_thinking |
@@ -219,18 +257,29 @@ class InteractionPort(Protocol):
 
 ```
 data/
-├─ config/app.yaml            # 用户配置（含加密 LLM key 引用）
-├─ db/mycrew.db                # SQLite 主库
-├─ logs/{YYYYMMDD}.jsonl       # 滚动日志
-├─ cache/mcp_health/           # MCP 心跳缓存
-├─ secrets/keystore.json       # OS keychain 失败时的 DPAPI 加密回退
-└─ runtime/last_state.json     # 异常退出前的运行态快照
+├─ config/app.yaml             # 用户配置（theme, language, default model 等）
+├─ db/mycrew.db                 # SQLite 主库（WAL 模式）
+├─ db/mycrew.db.pre-v4.<ts>     # wipe_v4 留下的一次性备份（手动清理）
+├─ logs/{YYYYMMDD}.jsonl        # 滚动日志（如启用）
+├─ cache/mcp_health/            # MCP 心跳缓存
+├─ secrets/                     # （未来加密 keystore 占位；当前 LLM key 仍存 DB）
+└─ runtime/
+   ├─ last_state.json           # 异常退出前的运行态快照
+   ├─ session.token             # **WS session token**（每次启动重写）
+   └─ _v4_reset_done.flag       # wipe_v4 已运行标志（删除该文件可触发再 reset）
 
 output/
-└─ {YYYYMMDD_HHmm}_{Project}/  # CrewAI 运行产物
+└─ {project_id}/                # 项目级目录
    └─ {task_id}/
-      ├─ in.json / out.json    # 结构化输入/输出
-      └─ in.md / out.md        # 原始过程记录
+      ├─ in.json / in.md        # 任务输入（结构化 + 人类可读）
+      ├─ out.json / out.md      # 任务输出
+      └─ sub/                   # **PM v4** Crew 任务的 sub-step IO
+         ├─ 0_head_in.json
+         ├─ 0_head_out.json
+         ├─ 0_head_out.md
+         ├─ 1_executor_in.json
+         ├─ 1_executor_out.json / out.md
+         └─ N_qa_in.json / out.json / out.md
 ```
 
 ### 4.3 凭证管理
@@ -324,10 +373,14 @@ MyCrew_v3/
 │  ├─ secrets/keystore.json
 │  └─ runtime/last_state.json
 ├─ output/                      # 项目产物（gitignored）
-├─ docs/
-│  ├─ ARCHITECTURE.md           # 本文档
-│  ├─ API.md                    # OpenAPI 导出 + WS 事件清单
-│  └─ ADR/                      # 架构决策记录
+├─ docs/                        # 文档按四档分类（详见 docs/README.md）
+│  ├─ spec/                     #   稳态参考（ARCHITECTURE / API / STORAGE-MAP / DESIGN-SYSTEM / BUILD / USER_GUIDE）
+│  ├─ iterations/               #   按日期归档的迭代日志（含本轮 audit + followup）
+│  ├─ roadmap/                  #   未来规划 + 设计草案（含 MCP / OpenClaw 集成预案 + next-audit-prep）
+│  ├─ ADR/                      #   8 条架构决策记录
+│  ├─ archive/                  #   被替代的历史文档
+│  ├─ dev-notes/                #   开发笔记 / 调试踩坑
+│  └─ figma/                    #   设计稿引用
 ├─ scripts/                     # 启停 / 打包 / 数据库迁移
 ├─ .gitignore
 ├─ .env.example
@@ -492,6 +545,77 @@ POST /projects/:id/pause
 | MCP 故障隔离 | 单个 MCP 崩溃不影响其他；独立子进程 + 心跳超时强杀 |
 | 结构化日志 | 每条带 ts/level/source/project_id/task_id/event/message，JSON 行格式 |
 | 追踪 ID | Tauri Command → REST → WS 事件全程贯穿同一 request_id |
+
+---
+
+## 11. PM v4 — Crew-Native 执行架构（2026-05-16 落地）
+
+> **完整设计**：`docs/iterations/2026-05-16/pm-v4-plan.md` + 13 轮 grill 决策。
+> **落地报告**：`docs/iterations/2026-05-16/audit-followup-2026-05-16.md`。
+> **本节是稳态视角**：v4 跑通后系统长什么样。
+
+### 11.1 与 v3 的本质差异
+
+v3 假设「一个 task = 一个 agent」。v4 引入「Crew 任务」：一个 task 可以绑到一个 **Crew**，由多个 sub-agent 按 head → executors → QA 链路串行执行。
+
+| 维度 | v3 | v4 |
+|---|---|---|
+| 任务执行单位 | 单个 agent | agent（不变）**或** Crew |
+| `tasks.performer_kind` | NULL（旧字段 `agent_id`） | `agent` / `crew` |
+| `tasks.performer_id` | NULL | agent_id 或 crew_id |
+| Crew 内部协作 | — | `crews.agent_sequence` JSON 定义 head/executors/QA + 每步 `step_instructions` + `progress_template` |
+| 输出捕获 | 单个 emit_output 落 `out.json` | 每个 sub-step 落 `sub/<i>_<role>_*.json`；QA step 同时写到 task 级 `out.json` |
+| WS 事件 | `task.*` | `task.*` + 新增 `task.sub_step` |
+
+### 11.2 Phase 5 — Performer 池
+
+PM 工作流变成 5 phase：完整度判定 → 主策划 (ConceptDoc) → 系统策划 (AtomicTask) → 审核策划 (ReviewedTask) → 项管 (PathSpec/PathedTask) → **指挥员（Phase 5：从预设池选 performer）**。
+
+Phase 5 LLM 必须先调 `list_performers(kind="all")` 工具拿到当前可用 performer 真相，再调 `submit_assignments`。`submit_assignments` schema 不含 `new_agent` 字段，编造的 id 被 Pydantic + `_validate_assignments` 二次校验拦截。
+
+**Performer 池**：8 个预设 Crew（Art / 3D Asset / Animation / VFX / System Impl / UI Impl / Audio / Scene Assembly）+ 5 个 standalone agent（Narrative Designer / Level Designer / System Designer / Art Director / 项目初始化助手）。详见 `backend/bootstrap/seed_crews.py`。
+
+### 11.3 Crew 执行路径
+
+```
+workflow_svc._run_agent
+  ├─ task.performer_kind == "crew" → _run_crew
+  │     for step in agent_sequence:
+  │       ├─ 检查 paused flag（Q7 软暂停，step 边界检查）
+  │       ├─ run_crew_step_with_crewai(单 agent + 单 task 的 CrewAI kickoff)
+  │       ├─ pop emit_output capture (绑定 task_id#step{i})
+  │       ├─ 写 sub/<i>_<role>_{in,out}.{json,md}
+  │       ├─ broadcast task.sub_step started/completed/failed
+  │       └─ 把当前 step 的捕获 payload 注入下一步的 description
+  │     # QA step 的 emit_output 直接写到 task_id 槽位 → 走原有 post-process
+  └─ task.performer_kind != "crew" → 原 _run_agent_direct / run_task_with_crewai
+```
+
+### 11.4 任务卡片画布（前端）
+
+- `CanvasTaskNode` —— 普通 agent 任务（240px）
+- `CanvasCrewNode` —— Crew 任务（折叠时是 240px 普通卡片 + ⊕ 按钮；展开后是 header + 一排 `SubAgentCard`）
+- 展开时通过 `onWidthChange` 上报 delta，`CanvasBlueprint.offsetFor` 给下游节点加横向偏移（"自动平移下游"），收起复位
+- `SubAgentCard` 按 Q11 gating：Head 保留完整动作（edit/pause/retry/chat/IO），Executor + QA 只读（chat + IO）
+- 子卡片对话 / IO 查看通过 `step_index` 入参 scope 到单个 step（端点：`GET /workflow/tasks/{id}/sub_io` + `POST /workflow/tasks/{id}/guidance`）
+
+---
+
+## 12. 安全 / 鲁棒性加固模块（2026-05-16 Phase 1/2 落地）
+
+| 模块 | 位置 | 作用 |
+|---|---|---|
+| WS session token | `api/ws.py` + `api/routes_auth.py` + `bootstrap/app.py` lifespan | 每次启动生成随机 token；`?token=` 校验失败关闭码 4401；前端通过 `GET /auth/ws_token` 获取（localhost-only） |
+| WorkflowService per-project Lock | `services/workflow_svc.py` `_project_locks` | start/pause/resume/abort/retry 同 project 串行；不同 project 并行 |
+| 补偿事务 | `services/project_svc.py` `create_project_with_tasks` | 两遍插入中异常 → `delete_project` 回滚，无半成品残留 |
+| SQL fragment 守卫 | `infra/repo/crud.py` `_validate_table` / `_validate_where` / `_validate_order_by` + `SqlFragmentError` | 表/列名严格识别符；WHERE/ORDER BY 拒绝 `;` `--` `/*` `\x00`；`?` 数 = params 长度 |
+| request_id middleware | `bootstrap/app.py` `_request_id_middleware` | 每个 HTTP 请求 12 hex 字符 ID；structlog `merge_contextvars` 自动传播；响应头 `X-Request-ID` |
+| 异常分类 | `services/workflow_svc.py` `_classify_task_error` | 8 种 kind（quota/auth/mcp/network/validation/stalled/tool/unknown），前端用作错误 tooltip headline |
+| `_output_capture` TTL | `src/tools/builtin/local/_output_capture.py` `_evict_expired` | 任务 1h / planner 4h 摊销清理 |
+| WAL TRUNCATE | `infra/repo/sqlite_repo.py` `get_db` | 连接时强制 `wal_checkpoint(TRUNCATE)` 防 WAL 累积 |
+| Diff-then-update seed | `bootstrap/seed_crews.py` `_ensure_agent` | 内容相同跳过 UPDATE，避免启动时 14 行无意义写锁 |
+| watchdog orphan reconcile | `services/watchdog_svc.py` | 启动时把残留 `state=running` 项目按 task 终态推断到 STALLED / COMPLETED_WITH_ISSUES / PAUSED |
+| LLM 硬超时 | `infra/llm/gateway.py` `LLM_CALL_TIMEOUT_SECONDS=90` | 网络抖动场景的兜底，避免任务无限挂起 |
 
 ---
 

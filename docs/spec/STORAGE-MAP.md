@@ -3,6 +3,7 @@
 > **读者**：人类开发者 + 未来的 Core AI（Brain）
 > **目的**：一份"什么数据在哪里、为什么在那里、谁可以改"的权威说明
 > **更新策略**：新增表/字段/文件夹后必须同步更新本文档
+> **最后更新**：2026-05-16（PM v4 schema + sub-step IO + WS session token + capture TTL）
 
 本文档分四区：
 1. [关系数据库（SQLite）](#1-关系数据库sqlite)
@@ -20,25 +21,26 @@
 
 **单点**：`data/db/mycrew.db`
 **驱动**：aiosqlite（异步）+ Alembic（迁移）
-**WAL 模式**：开启
+**WAL 模式**：开启；连接时自动跑 `wal_checkpoint(TRUNCATE)`（防 WAL 累积）
 **访问层**：`infra.repo.crud` 提供 `insert / get_by_id / get_all / update_by_id / delete_by_id / paginate`
+**SQL 守卫（2026-05-16）**：表名 / 列名严格识别符；WHERE / ORDER BY 拒绝 `;` `--` `/*` `\x00`；`?` 数 = params 长度。违反抛 `SqlFragmentError`。
 
 ### 1.1 表分类总览
 
 按用途分四组，每组的"谁会读 / 谁会写"标注清楚。
 
 #### A. 项目工作流（最频繁变化的核心）
-| 表 | 行数（当前） | 写者 | 读者 | 关键字段 |
-|---|---|---|---|---|
-| `projects` | 0 | project_svc, inception_svc, workflow_svc, watchdog_svc | 几乎所有 service | id, name, root_path, state, is_running, progress_pct, execution_kind, parent_project_id, iteration_index, template_id, favorited_at |
-| `tasks` | 0 | workflow_svc, create_workflow tool | workflow_svc, crewai_runner, QA agent (via .mycrew/) | id, project_id, title, detail, agent_id, kind, output_schema, status, deps, io_in_ref, io_out_ref, started_at, finished_at, last_activity_at, validation_errors, position_x/y |
+| 表 | 写者 | 读者 | 关键字段 |
+|---|---|---|---|
+| `projects` | project_svc, inception_svc, workflow_svc, watchdog_svc | 几乎所有 service | id, name, root_path, state, is_running, progress_pct, execution_kind, parent_project_id, iteration_index, template_id, favorited_at |
+| `tasks` | workflow_svc, project_svc, create_workflow tool, planner_persist_svc | workflow_svc, crewai_runner, QA agent (via .mycrew/) | id, project_id, title, detail, agent_id, kind(regular\|final_qa\|setup), output_schema, status, deps, io_in_ref, io_out_ref, started_at, finished_at, last_activity_at, validation_errors, position_x/y, **last_error**, **last_error_kind** (0012), **performer_kind** / **performer_id** (0013 / PM v4) |
 
 #### B. Agent / Crew / Tool（团队页 + 执行体系）
-| 表 | 行数 | 写者 | 读者 | 关键字段 |
+| 表 | 行数（PM v4 wipe 后） | 写者 | 读者 | 关键字段 |
 |---|---|---|---|---|
-| `agents` | 17 | seed_plan_maker, assign_agents tool, agent_svc | crewai_runner, inception_svc | id, role, goal, backstory, llm_id, tool_ids (JSON), is_auto_generated, max_retry, memory_enabled |
-| `crews` | 8 | crew_svc | （未广泛使用） | id, name, process, agent_ids (JSON), is_auto_generated |
-| `tools` | 46 | seed_builtin_tools | crewai_runner._load_builtin_tools, assign_agents | id, name, script_path, source, params_schema |
+| `agents` | 17 | seed_plan_maker, seed_planner_agents, seed_crews（**diff-then-update**，内容相同跳过 UPDATE）, agent_svc | crewai_runner, inception_svc, list_performers tool | id, role, goal, backstory, llm_id, tool_ids (JSON), is_auto_generated, max_retry, memory_enabled |
+| `crews` | 8 | seed_crews, crew_svc | crewai_runner._run_crew, list_performers tool | id, name, process, agent_ids (JSON), is_auto_generated, **applicable_scenarios** (0013 / Phase 5 选 Crew 时读), **agent_sequence** (0013 / JSON head→executors→QA 链路 + step_instructions + progress_template) |
+| `tools` | 79 | seed_builtin_tools | crewai_runner._load_builtin_tools, assign_agents | id, name, script_path, source, params_schema |
 
 #### C. 立项会话（Plan Maker 对话历史）
 | 表 | 行数 | 写者 | 读者 | 关键字段 |
@@ -73,14 +75,17 @@
 | 版本 | 内容 |
 |---|---|
 | 0001 | baseline（projects/tasks/agents/...所有核心表） |
-| 0002 | 加索引 |
+| 0002 | 加索引（tasks/inception_messages/llm_models/projects.state） |
 | 0003 | experiences 表 |
 | 0004 | projects.favorited_at / unfavorited_at |
 | 0005 | tasks.position_x / position_y（画布拖拽） |
 | 0007 | tasks.last_activity_at + stall_timeout_minutes（卡死检测） |
 | 0008 | projects.parent_project_id / iteration_index / template_id；inception_sessions.template_id / mode |
 | 0009 | tasks.validation_errors |
-| 0010 | **events 表**（本次） |
+| 0010 | events 表 + ix_events_* 4 个索引 |
+| 0011 | inception_sessions.last_activity_at + title |
+| 0012 | tasks.last_error + last_error_kind |
+| **0013** | **crews.applicable_scenarios + crews.agent_sequence；tasks.performer_kind + performer_id**（PM v4） |
 
 > 注意：0006 跳号，与 plan 文件里的预留对齐，不影响生产。
 
@@ -93,28 +98,40 @@
 ```
 data/
 ├── db/
-│   └── mycrew.db                # SQLite 单文件，WAL 模式
+│   ├── mycrew.db                # SQLite 单文件，WAL 模式
+│   └── mycrew.db.pre-v4.<ts>    # wipe_v4 留下的一次性备份（手动清理）
 ├── config/
 │   ├── app.yaml                 # 应用启动配置（theme, default model 等）
 │   └── unity_mcp.yaml           # Unity MCP 专用配置
 ├── cache/
 │   └── mcp_health/              # MCP 健康探测短缓存
-├── secrets/                     # 加密 keystore（当前为空 stub）
-├── runtime/                     # 进程运行时状态（lock 文件等）
+├── secrets/                     # 加密 keystore（占位；LLM key 当前仍存 DB，待 Stronghold 接入）
+├── runtime/
+│   ├── last_state.json          # 异常退出前的运行态快照
+│   ├── session.token            # **WS session token**（每次后端启动重写）
+│   └── _v4_reset_done.flag      # PM v4 wipe 已运行标志（删除可触发再 reset）
 └── logs/                        # structlog 文件输出（如果配置启用）
 
 output/                          # 任务输出根目录（非 data/ 下）
-├── proj_<id>/
-│   ├── task_<id>/
-│   │   ├── out.json             # emit_output 捕获的结构化输出
-│   │   └── out.md               # 原始 raw text
-│   └── .mycrew_pending/         # 项目未设 root_path 时的 .mycrew/ 暂存
+├── <project_id>/
+│   └── <task_id>/
+│       ├── in.json / in.md      # 任务输入（结构化 + 人类可读）
+│       ├── out.json / out.md    # 任务输出（QA step 或单 agent 任务）
+│       └── sub/                 # **PM v4** Crew 任务的 sub-step IO
+│           ├── 0_head_in.json
+│           ├── 0_head_out.json
+│           ├── 0_head_out.md
+│           ├── 1_executor_in.json
+│           ├── 1_executor_out.json
+│           ├── 1_executor_out.md
+│           └── N_qa_*.json/.md
 └── …
 
 <用户项目 root_path>/.mycrew/    # Plan Maker 写入项目工程内
 ├── blueprint.json               # 项目元数据 + 完整任务图
 ├── architecture.md              # 人类可读架构说明
 ├── tasks/task_NN_*.md           # 每个任务的 detail + 验收要点
+├── _planner_trace.json          # PM v3/v4 5-phase 调试日志（每个项目一份）
 └── iter-NNN/                    # 迭代轮次独立命名空间
     ├── blueprint.json
     └── tasks/...
@@ -126,10 +143,14 @@ output/                          # 任务输出根目录（非 data/ 下）
 | `data/db/mycrew.db` | 所有 service | 所有 service |
 | `data/config/app.yaml` | 用户手工 / 设置页 | bootstrap |
 | `data/config/unity_mcp.yaml` | 用户手工 | mcp_svc |
-| `output/proj_*/task_*/out.json` | workflow_svc._save_task_output | IoViewerDrawer (frontend), QA agent |
-| `<root>/.mycrew/blueprint.json` | write_blueprint tool | QA agent (read_file_local) |
-| `<root>/.mycrew/architecture.md` | write_blueprint tool | 人类开发者 |
-| `<root>/.mycrew/tasks/task_NN.md` | write_blueprint tool | QA agent |
+| `data/runtime/session.token` | bootstrap/app.lifespan（每次启动） | api/routes_auth + WS handshake |
+| `data/runtime/_v4_reset_done.flag` | bootstrap/wipe_v4.run_v4_reset_once | bootstrap/wipe_v4 自身（决定跳过/执行） |
+| `output/<pid>/<tid>/out.json` | workflow_svc._save_task_output | IoViewerDrawer (frontend), QA agent |
+| `output/<pid>/<tid>/sub/<i>_*_*.json` | workflow_svc._save_sub_step_io | sub_io endpoint + task_guidance (step-scoped) |
+| `<root>/.mycrew/blueprint.json` | planner_persist_svc.save_draft_as_project / write_blueprint tool | QA agent (read_file_local) |
+| `<root>/.mycrew/architecture.md` | 同上 | 人类开发者 |
+| `<root>/.mycrew/tasks/task_NN.md` | 同上 | QA agent |
+| `<root>/.mycrew/_planner_trace.json` | planner_persist_svc.save_draft_as_project | 后人 debug |
 
 ### 2.2 清理
 - `output/` 在 `scripts/cleanup_residuals.py` 中跟随项目删除一起清
@@ -167,16 +188,21 @@ zustand persist。**仅前端可见**，后端读不到，AI Brain 也读不到�
 
 ## 4. 运行时内存
 
-| 实例 | 类型 | 在哪里 | 持久化？ |
-|---|---|---|---|
-| `workflow_svc._active` | dict[project_id → HarnessStateMachine] | services/workflow_svc.py | **否** — 后端重启即丢，由 watchdog 启动 reconcile 兜底 |
-| `workflow_svc._runners` | dict[project_id → TaskRunner] | 同上 | 否 |
-| `workflow_svc._outputs` | dict[project_id → dict[task_id → output]] | 同上 | 否，但 `tasks.io_out_ref` 有 |
-| `workflow_svc._run_tasks` | dict[key → asyncio.Task] | 同上 | 否 |
-| `_output_capture._outputs` | dict[task_id → payload] | src/tools/builtin/local/_output_capture.py | 否 —— Pop 后即清 |
-| `mcp_pool._processes` | dict[server_id → subprocess] | infra/mcp/pool.py | 否，进程级 |
-| `manager._connections` | list[WebSocket] | api/ws.py | 否 |
-| `inception_svc._session_locks` | defaultdict[session_id → asyncio.Lock] | services/inception_svc.py | 否 |
+| 实例 | 类型 | 在哪里 | 持久化？ | 清理 |
+|---|---|---|---|---|
+| `workflow_svc._active` | dict[project_id → HarnessStateMachine] | services/workflow_svc.py | **否** — 重启即丢，watchdog reconcile 兜底 | `_cleanup_project` |
+| `workflow_svc._runners` | dict[project_id → TaskRunner] | 同上 | 否 | 同上 |
+| `workflow_svc._outputs` | dict[project_id → dict[task_id → output]] | 同上 | 否，但 `tasks.io_out_ref` 有 | 同上 |
+| `workflow_svc._run_tasks` | dict[key → asyncio.Task] | 同上 | 否 | 同上 |
+| **`workflow_svc._project_locks`** | dict[project_id → asyncio.Lock] | 同上（2026-05-16 新增） | 否 | `_cleanup_project` |
+| `_output_capture._outputs` | dict[task_id → (payload, ts)] | src/tools/builtin/local/_output_capture.py | 否 | Pop 时清；摊销 `_evict_expired`（**TTL = 1h**） |
+| `_output_capture._planner_outputs` | dict[(session_id, phase) → (payload, ts)] | 同上 | 否 | `clear_planner_session` + 摊销 `_evict_expired`（**TTL = 4h**） |
+| **`planner_cache_svc._sessions`** | dict[session_id → dict] | services/planner_cache_svc.py | 否（"save to persist" 语义） | `clear(session_id)` 显式 |
+| `mcp_pool._processes` | dict[server_id → subprocess] | infra/mcp/pool.py | 否，进程级 | 关闭 / `disconnect_server` |
+| `manager._connections` | list[WebSocket] | api/ws.py | 否 | 客户端断开时 |
+| **`api/ws._SESSION_TOKEN`** | str（模块级单例） | api/ws.py | 否 | 仅启动时设置一次 |
+| `inception_svc._session_locks` | defaultdict[session_id → asyncio.Lock] | services/inception_svc.py | 否 | 进程退出 |
+| **request_id contextvar** | ContextVar[str] | infra/request_context.py + bootstrap/app.py 中间件 | 否（请求结束 unbind） | `try/finally` 中 unbind |
 
 > 运行时内存挂掉怎么办：
 > - workflow_svc 重启后 `reconcile_all_orphans_on_startup` 把残留 `is_running=1` 项目按 task 终态推断成 STALLED / COMPLETED_WITH_ISSUES / PAUSED
@@ -189,11 +215,16 @@ zustand persist。**仅前端可见**，后端读不到，AI Brain 也读不到�
 | 数据 | 保留时长 | 清理路径 |
 |---|---|---|
 | `events` 表 | 全局 30 天 / 单项目 ≤ 10000 行 | `services.events_svc.run_event_janitor`（6h 一次） |
-| `output/proj_*/` | 跟随项目删除 | `scripts/cleanup_residuals.py` 手工 / 未来加 UI |
+| `output/<pid>/` 主目录 | 跟随项目删除 | `scripts/cleanup_residuals.py` 手工 / 未来加 UI |
+| `output/<pid>/<tid>/sub/` | 跟随任务删除 | 同上 |
+| `_output_capture._outputs`（任务级） | TTL 1 小时（摊销） | `_evict_expired` 摊销清理 |
+| `_output_capture._planner_outputs`（phase 级） | TTL 4 小时（摊销） | `_evict_expired` + `clear_planner_session` |
 | 任务 `last_activity_at` | 无限（小） | 不清理 |
 | `inception_*` 表 | 无限 | 删项目时 cascade |
 | MCP `discovered_tools` JSON | 直到 MCP 配置改动 | `mcp_svc.refresh_tools` |
 | WS 连接 | 仅会话期 | 断线即清 |
+| `data/runtime/session.token` | 直到下次后端启动（每次重写） | 每次 lifespan 覆盖 |
+| `data/db/mycrew.db.pre-v4.<ts>` | 永久（除非手动删） | **无自动清理 — 占空间需关注** |
 | localStorage prefs | 永久（除非用户清浏览器） | 不清理 |
 | react-query 缓存 | tabClose / 主动 invalidate | 默认 5min staleTime |
 
