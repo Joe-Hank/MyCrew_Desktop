@@ -1148,5 +1148,110 @@ class WorkflowService:
         # process. New start() will allocate a fresh one.
         self._project_locks.pop(project_id, None)
 
+    # ── Project requirement queries ───────────────────────
+
+    async def required_mcps(self, project_id: str) -> list[dict]:
+        """Compute the MCP servers a project actually needs to run.
+
+        Walks: project tasks → bound performer (agent or crew) →
+        agent(s) → tool_ids → tool names → MCP servers whose
+        discovered_tools cover those names.
+
+        Returned shape per server:
+          { server_id, name, status, tools_used: [...], missing_tools: [...] }
+        `tools_used` are the tool names from this project that map to this
+        MCP. `missing_tools` are tool names the project needs but the
+        server can't currently provide (server disconnected, or the tool
+        isn't in the server's discovered set — usually means it dropped
+        between discovery and now).
+
+        TaskHeader renders this list as a "required MCP" status row +
+        uses it as a pre-flight gate on Start (blocks start if anything
+        in the list is not connected).
+        """
+        tasks = await self._load_tasks(project_id)
+        if not tasks:
+            return []
+
+        # Collect every agent_id this project touches (Crew members
+        # included). Setup tasks bind agent_id directly; Crew tasks
+        # bind via crews.agent_sequence[*].agent_id.
+        agent_ids: set[str] = set()
+        crew_ids: set[str] = set()
+        for t in tasks:
+            kind = t.get("performer_kind")
+            pid = t.get("performer_id") or t.get("agent_id")
+            if not pid:
+                continue
+            if kind == "crew":
+                crew_ids.add(pid)
+            else:
+                agent_ids.add(pid)
+        for crew_id in crew_ids:
+            crew = await crud.get_by_id("crews", crew_id)
+            if not crew:
+                continue
+            try:
+                seq = json.loads(crew.get("agent_sequence") or "[]")
+            except (json.JSONDecodeError, TypeError):
+                continue
+            for step in seq:
+                aid = step.get("agent_id") if isinstance(step, dict) else None
+                if aid:
+                    agent_ids.add(aid)
+
+        # Gather all tool_ids those agents reference.
+        tool_ids: set[str] = set()
+        for aid in agent_ids:
+            agent = await crud.get_by_id("agents", aid)
+            if not agent:
+                continue
+            try:
+                ids = json.loads(agent.get("tool_ids") or "[]")
+            except (json.JSONDecodeError, TypeError):
+                continue
+            tool_ids.update(t for t in ids if isinstance(t, str))
+
+        # Resolve tool ids → tool names.
+        tool_names: set[str] = set()
+        for tid in tool_ids:
+            row = await crud.get_by_id("tools", tid)
+            if row and row.get("name"):
+                tool_names.add(row["name"])
+
+        # Walk MCP servers; a server is "required" if any of its
+        # discovered_tools' names intersect our set. Pool status comes
+        # from the live MCP pool (in-memory) — what we ACTUALLY have.
+        from infra.mcp.pool import mcp_pool
+        live_status: dict[str, str] = {
+            s["server_id"]: s["status"]
+            for s in mcp_pool.get_all_statuses()
+        }
+
+        servers = await crud.get_all("mcp_servers")
+        required: list[dict] = []
+        for s in servers:
+            if not s.get("enabled"):
+                continue
+            try:
+                discovered = json.loads(s.get("discovered_tools") or "[]")
+            except (json.JSONDecodeError, TypeError):
+                discovered = []
+            offered = {
+                d.get("name") for d in discovered
+                if isinstance(d, dict) and d.get("name")
+            }
+            used = sorted(tool_names & offered)
+            if not used:
+                continue  # this server isn't relevant to the project
+            required.append({
+                "server_id": s["id"],
+                "name": s["name"],
+                "status": live_status.get(s["id"], "disconnected"),
+                "tools_used": used,
+                "missing_tools": [],  # reserved for future drift detection
+            })
+        return required
+
 
 workflow_svc = WorkflowService()

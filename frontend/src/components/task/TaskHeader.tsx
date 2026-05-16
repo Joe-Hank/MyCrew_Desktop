@@ -1,12 +1,35 @@
+import { useCallback } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import type { Project, Task } from "../../queries/useProjectQuery";
 import {
   useStartProject,
   usePauseProject,
   useResumeProject,
+  useRequiredMcps,
+  type RequiredMcp,
 } from "../../queries/useWorkflowQuery";
+import {
+  useConnectMcpServer,
+  useDisconnectMcpServer,
+} from "../../queries/useMcpQuery";
+import { useEvent } from "../../hooks/useEvent";
 import { apiFetch, ApiError } from "../../net/api";
 import { useDismissibleConfirm } from "../common/ConfirmDialog";
 import { askPauseConfirm } from "../../lib/pauseConfirm";
+
+const mcpDotColor: Record<string, string> = {
+  connected: "#10b981",
+  connecting: "#facc15",
+  error: "#ef4444",
+  disconnected: "#cbd5e1",
+};
+
+const mcpStatusLabel: Record<string, string> = {
+  connected: "在线",
+  connecting: "连接中",
+  error: "错误",
+  disconnected: "离线",
+};
 
 // Header redesign per Figma: NO background frame, NO border, info hugged
 // to the top-left of the page. Drop the breadcrumb/chip clutter; surface
@@ -42,6 +65,46 @@ function TaskHeader({ project, selectedTask }: Props) {
   const pause = usePauseProject();
   const resume = useResumeProject();
   const confirm = useDismissibleConfirm();
+  const connectMcp = useConnectMcpServer();
+
+  // MCP servers this project's tasks actually need (server-side walk
+  // through tasks → agents → tools → mcp_servers). Refetched on every
+  // mcp.status_changed WS event so the chips track real-time pool state.
+  const { data: requiredMcps = [] } = useRequiredMcps(project.id);
+  const qc = useQueryClient();
+  const handleMcpEvent = useCallback(() => {
+    qc.invalidateQueries({ queryKey: ["workflow", "requiredMcps", project.id] });
+  }, [qc, project.id]);
+  useEvent("mcp.status_changed", handleMcpEvent);
+
+  /** Walk the required-MCP list; for each offline one, call connect;
+   *  after all attempts settle, refetch and try again up to
+   *  `maxAttempts` rounds. Returns the names of the servers that are
+   *  STILL offline at the end. */
+  const connectOfflineMcps = useCallback(
+    async (maxAttempts = 2): Promise<string[]> => {
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        const fresh = await qc.fetchQuery<RequiredMcp[]>({
+          queryKey: ["workflow", "requiredMcps", project.id],
+        });
+        const offline = (fresh ?? []).filter((m) => m.status !== "connected");
+        if (offline.length === 0) return [];
+        const tryConnect = offline.map((m) =>
+          connectMcp.mutateAsync(m.server_id).catch(() => undefined),
+        );
+        await Promise.all(tryConnect);
+      }
+      // Final read after the last attempt's results have invalidated
+      // the cache (the useConnectMcpServer onSuccess invalidates).
+      const final = await qc.fetchQuery<RequiredMcp[]>({
+        queryKey: ["workflow", "requiredMcps", project.id],
+      });
+      return (final ?? [])
+        .filter((m) => m.status !== "connected")
+        .map((m) => m.name);
+    },
+    [qc, project.id, connectMcp],
+  );
 
   const isRunning = project.state === "running";
   const isPaused = project.state === "paused";
@@ -99,6 +162,22 @@ function TaskHeader({ project, selectedTask }: Props) {
         const lines = missing.map((t) => `· ${t.title || "未命名"}`).join("\n");
         alert(
           `以下任务尚未指定执行者（Agent/Crew），无法启动项目：\n\n${lines}\n\n请在画布上点击任务卡片 → 编辑 → 选择执行者。`,
+        );
+        return;
+      }
+
+      // Pre-flight: every required MCP must be connected before we
+      // kick off, otherwise each task that needs (say) ComfyUI fails
+      // one-by-one as it tries to call the tool — wasted tokens +
+      // opaque "tool not found" errors. Auto-retry the connect 2x
+      // before bothering the user — most "offline" cases are just
+      // "haven't been told to connect yet since boot".
+      const stillOffline = await connectOfflineMcps(2);
+      if (stillOffline.length > 0) {
+        alert(
+          "以下项目所需的 MCP 服务器尝试连接两次后仍未连上，无法启动：\n\n" +
+          stillOffline.map((n) => `· ${n}`).join("\n") +
+          "\n\n请检查对应服务的本地进程是否在运行（ComfyUI / Unity Editor / Blender 等）。",
         );
         return;
       }
@@ -272,7 +351,114 @@ function TaskHeader({ project, selectedTask }: Props) {
           迭代
         </button>
       </div>
+
+      {/* Right-aligned MCP status chips for the servers this project's
+          tasks actually need. ml-auto pushes the whole group to the
+          right edge so the title cluster on the left isn't shoved
+          around when the chip count grows. Same data the Start
+          pre-flight reads — clicking a grey/red chip toggles connect,
+          a green chip toggles disconnect. The whole row is hidden
+          when the project needs no MCPs (pure-text tasks etc). */}
+      {requiredMcps.length > 0 && (
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          <span
+            className="text-[11px]"
+            style={{ color: "var(--color-ink-faint)" }}
+            title="本项目运行所需的 MCP 服务器（任务用到的工具反推出来）"
+          >
+            所需 MCP
+          </span>
+          {requiredMcps.map((m) => (
+            <RequiredMcpChip key={m.server_id} server={m} />
+          ))}
+          <ConnectAllButton
+            disabled={requiredMcps.every((m) => m.status === "connected")}
+            pending={connectMcp.isPending}
+            onClick={async () => {
+              const stillOffline = await connectOfflineMcps(2);
+              if (stillOffline.length > 0) {
+                alert(
+                  "以下 MCP 尝试两次仍未连上：\n\n" +
+                  stillOffline.map((n) => `· ${n}`).join("\n") +
+                  "\n\n请检查对应服务的本地进程是否在运行。",
+                );
+              }
+            }}
+          />
+        </div>
+      )}
     </div>
+  );
+}
+
+function ConnectAllButton({
+  disabled,
+  pending,
+  onClick,
+}: {
+  disabled: boolean;
+  pending: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled || pending}
+      className="rounded-full px-3 py-0.5 text-[11px] transition-opacity hover:opacity-80 disabled:opacity-40"
+      style={{
+        backgroundColor: "var(--color-brand-500)",
+        color: "white",
+      }}
+      title={
+        disabled
+          ? "所有所需 MCP 已连接"
+          : "尝试连接所有未在线的 MCP（最多重试 2 次）"
+      }
+    >
+      {pending ? "连接中…" : "连接"}
+    </button>
+  );
+}
+
+function RequiredMcpChip({ server }: { server: RequiredMcp }) {
+  const connect = useConnectMcpServer();
+  const disconnect = useDisconnectMcpServer();
+  const isOnline = server.status === "connected";
+  const isPending = connect.isPending || disconnect.isPending;
+
+  const handleClick = () => {
+    if (isPending) return;
+    if (isOnline) disconnect.mutate(server.server_id);
+    else connect.mutate(server.server_id);
+  };
+
+  return (
+    <button
+      onClick={handleClick}
+      disabled={isPending}
+      title={
+        `${server.name} (${mcpStatusLabel[server.status] ?? server.status})` +
+        ` — 本项目用到 ${server.tools_used.length} 个工具` +
+        (server.tools_used.length
+          ? `: ${server.tools_used.slice(0, 5).join(", ")}` +
+            (server.tools_used.length > 5 ? "…" : "")
+          : "")
+      }
+      className="flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] transition-opacity hover:opacity-80 disabled:opacity-50"
+      style={{
+        backgroundColor: "var(--color-card)",
+        border: "1px solid var(--color-border-soft)",
+        color: "var(--color-ink-label)",
+      }}
+    >
+      <span className="max-w-[80px] truncate">{server.name}</span>
+      <span
+        className="inline-block h-2 w-2 rounded-full"
+        style={{
+          backgroundColor: mcpDotColor[server.status] ?? mcpDotColor.disconnected,
+        }}
+      />
+    </button>
   );
 }
 

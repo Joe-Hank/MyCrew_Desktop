@@ -193,3 +193,31 @@ export function useActiveProjects() {
     },
   });
 }
+
+export interface RequiredMcp {
+  server_id: string;
+  name: string;
+  status: "connected" | "connecting" | "error" | "disconnected" | string;
+  tools_used: string[];
+  missing_tools: string[];
+}
+
+/** Computes which MCP servers a project's tasks actually need + their
+ *  current connection status. Powers the TaskHeader right-side status
+ *  row + the Start button's pre-flight gate.
+ *
+ *  Refetched on mcp.status_changed so the chips flip green / grey as
+ *  the user (or autostart) toggles connections. */
+export function useRequiredMcps(projectId: string | undefined) {
+  return useQuery({
+    queryKey: ["workflow", "requiredMcps", projectId],
+    queryFn: async () => {
+      if (!projectId) return [] as RequiredMcp[];
+      const res = await apiFetch<{ servers: RequiredMcp[] }>(
+        `/workflow/projects/${projectId}/required-mcps`,
+      );
+      return res.data?.servers ?? [];
+    },
+    enabled: !!projectId,
+  });
+}

@@ -76,6 +76,21 @@ async def active_projects():
     return {"ok": True, "data": {"projects": workflow_svc.get_active_projects()}}
 
 
+@router.get("/projects/{project_id}/required-mcps")
+async def project_required_mcps(project_id: str):
+    """List MCP servers this project's tasks actually need + their
+    current connection status. Used by:
+      - TaskHeader's right-side status row (one chip per server)
+      - The Start button's pre-flight gate (refuse start if any
+        required server is not connected)
+    """
+    try:
+        servers = await workflow_svc.required_mcps(project_id)
+    except KeyError:
+        raise HTTPException(404, detail="project not found")
+    return {"ok": True, "data": {"servers": servers}}
+
+
 class TaskGuidanceChatBody(BaseModel):
     message: str
     # PM v4 sub-card chat: when set, the guidance helper scopes its
