@@ -56,6 +56,13 @@ class McpServerCreate(BaseModel):
     enabled: bool = True
     auto_start: bool = True
     timeout: int = 30
+    # Strategy C: when set, the backend assembles command/args/url/env_ref
+    # from services/mcp_templates by substituting template_values into
+    # the named template. Direct command/args/url/env_ref fields above
+    # are ignored in that case (except for "custom", which falls back
+    # to them).
+    template_id: str | None = None
+    template_values: dict = Field(default_factory=dict)
 
 
 class McpServerUpdate(BaseModel):
@@ -68,6 +75,8 @@ class McpServerUpdate(BaseModel):
     enabled: bool | None = None
     auto_start: bool | None = None
     timeout: int | None = None
+    template_id: str | None = None
+    template_values: dict | None = None
 
 
 # --- Agent ---

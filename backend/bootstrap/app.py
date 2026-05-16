@@ -178,6 +178,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from services.mcp_svc import mcp_svc
     from infra.mcp.pool import mcp_pool
 
+    # Tag any pre-template rows so the edit form has something to
+    # render. Idempotent + cheap (1 row UPDATE per untagged server).
+    try:
+        await mcp_svc.backfill_template_ids()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("startup.mcp_template_backfill_failed", error=str(exc))
+
     mcp_pool.set_broadcast(manager.broadcast)
     await mcp_svc.start_pool()
     log.info("startup.mcp_pool_ready")

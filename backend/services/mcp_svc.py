@@ -10,7 +10,7 @@ from infra.mcp.pool import mcp_pool
 
 log = structlog.get_logger()
 
-JSON_FIELDS = ["args", "env_ref", "discovered_tools"]
+JSON_FIELDS = ["args", "env_ref", "discovered_tools", "template_values"]
 
 
 class McpService:
@@ -35,22 +35,35 @@ class McpService:
         return result
 
     async def create_server(self, data: dict) -> dict:
+        merged = self._apply_template(data)
         row = await crud.insert("mcp_servers", self._serialize({
-            "name": data["name"],
-            "transport": data.get("transport", "stdio"),
-            "command": data.get("command"),
-            "args": data.get("args", []),
-            "url": data.get("url"),
-            "env_ref": data.get("env_ref", {}),
-            "enabled": 1 if data.get("enabled", True) else 0,
-            "auto_start": 1 if data.get("auto_start", True) else 0,
-            "timeout": data.get("timeout", 30),
+            "name": merged["name"],
+            "transport": merged.get("transport", "stdio"),
+            "command": merged.get("command"),
+            "args": merged.get("args", []),
+            "url": merged.get("url"),
+            "env_ref": merged.get("env_ref", {}),
+            "enabled": 1 if merged.get("enabled", True) else 0,
+            "auto_start": 1 if merged.get("auto_start", True) else 0,
+            "timeout": merged.get("timeout", 30),
             "discovered_tools": [],
+            "template_id": merged.get("template_id"),
+            "template_values": merged.get("template_values") or {},
         }), id_prefix="mcp_")
-        log.info("mcp.server_created", id=row["id"])
+        log.info("mcp.server_created", id=row["id"], template=merged.get("template_id"))
         return self._deserialize(row)
 
     async def update_server(self, server_id: str, data: dict) -> dict | None:
+        # If the patch carries template_id / template_values, re-derive
+        # command/args/url/env_ref from the template before persisting.
+        # Lets the frontend send just {template_id, template_values}
+        # and have the backend figure out everything else.
+        if "template_id" in data and data["template_id"]:
+            merged = self._apply_template(data)
+            for k in ("command", "args", "url", "env_ref",
+                      "transport", "template_values"):
+                if k in merged:
+                    data[k] = merged[k]
         fields = {k: v for k, v in data.items() if v is not None and k != "id"}
         if "enabled" in fields:
             fields["enabled"] = 1 if fields["enabled"] else 0
@@ -59,6 +72,34 @@ class McpService:
         serialized = self._serialize(fields)
         result = await crud.update_by_id("mcp_servers", server_id, serialized)
         return self._deserialize(result) if result else None
+
+    def _apply_template(self, data: dict) -> dict:
+        """Resolve template_id + template_values → concrete fields.
+
+        - When `template_id` is set (and not 'custom'), assemble the
+          command/args/url/env_ref from the template, raising
+          TemplateValidationError on missing / placeholder fields.
+        - When 'custom' or absent, pass the data through unchanged.
+        """
+        from services.mcp_templates import (
+            assemble, get_template, TemplateValidationError,
+        )
+
+        out = dict(data)
+        template_id = out.get("template_id")
+        if not template_id or template_id == "custom":
+            return out
+        template = get_template(template_id)
+        if not template:
+            raise ValueError(f"Unknown template_id: {template_id!r}")
+        values = out.get("template_values") or {}
+        try:
+            assembled = assemble(template, values)
+        except TemplateValidationError:
+            raise  # let the route layer surface field errors to the user
+        out.update(assembled)
+        out["template_values"] = values
+        return out
 
     async def delete_server(self, server_id: str) -> None:
         await self._pool.remove_server(server_id)
@@ -99,6 +140,30 @@ class McpService:
 
     async def shutdown_all(self) -> None:
         await self._pool.stop()
+
+    async def backfill_template_ids(self) -> int:
+        """One-shot at startup: for rows that don't yet have template_id,
+        detect it by command+args fingerprint and stamp the row.
+
+        Idempotent — rows already tagged are skipped. Returns the count
+        of rows newly tagged (informational).
+        """
+        from services.mcp_templates import detect_template
+        rows = await crud.get_all("mcp_servers")
+        tagged = 0
+        for r in rows:
+            if r.get("template_id"):
+                continue
+            detected = detect_template(r)
+            if not detected:
+                detected = "custom"
+            await crud.update_by_id("mcp_servers", r["id"], {
+                "template_id": detected,
+            })
+            tagged += 1
+        if tagged:
+            log.info("mcp.template_id_backfilled", rows=tagged)
+        return tagged
 
     async def get_status_summary(self) -> dict:
         total = await crud.count("mcp_servers")

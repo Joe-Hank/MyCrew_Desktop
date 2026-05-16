@@ -2,8 +2,19 @@ from fastapi import APIRouter, HTTPException
 
 from api.schemas import McpServerCreate, McpServerUpdate, McpToolCall
 from services.mcp_svc import mcp_svc
+from services.mcp_templates import TEMPLATES, TemplateValidationError
 
 router = APIRouter(prefix="/mcp", tags=["mcp"])
+
+
+@router.get("/templates")
+async def list_templates():
+    """Return the catalogue of MCP server templates the frontend uses
+    to render the create/edit form. Each template carries its field
+    schema (label / type / required / placeholder), so the UI doesn't
+    need any hard-coded knowledge of figma vs notion vs git.
+    """
+    return {"ok": True, "data": {"templates": TEMPLATES}}
 
 
 @router.get("/servers")
@@ -22,13 +33,41 @@ async def get_server(server_id: str):
 
 @router.post("/servers")
 async def create_server(body: McpServerCreate):
-    data = await mcp_svc.create_server(body.model_dump())
+    try:
+        data = await mcp_svc.create_server(body.model_dump())
+    except TemplateValidationError as exc:
+        # Surface field-level errors so the frontend can highlight
+        # specific inputs instead of showing a generic "save failed".
+        return {
+            "ok": False,
+            "error": {
+                "code": "template_validation",
+                "message": str(exc),
+                "field_errors": [
+                    {"field": k, "message": m} for k, m in exc.errors
+                ],
+            },
+        }
     return {"ok": True, "data": data}
 
 
 @router.put("/servers/{server_id}")
 async def update_server(server_id: str, body: McpServerUpdate):
-    data = await mcp_svc.update_server(server_id, body.model_dump(exclude_none=True))
+    try:
+        data = await mcp_svc.update_server(
+            server_id, body.model_dump(exclude_none=True),
+        )
+    except TemplateValidationError as exc:
+        return {
+            "ok": False,
+            "error": {
+                "code": "template_validation",
+                "message": str(exc),
+                "field_errors": [
+                    {"field": k, "message": m} for k, m in exc.errors
+                ],
+            },
+        }
     if not data:
         raise HTTPException(404, detail="server not found")
     return {"ok": True, "data": data}
