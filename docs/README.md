@@ -48,6 +48,7 @@
 
 | 文件 | 内容 |
 |---|---|
+| [`next-audit-prep.md`](./roadmap/next-audit-prep.md) | **下次技术审核的开局地图** — 60s 快照 / 应补维度 / 风险监视 / 下个 Top 5 候选 / 迭代草案 / 索引 |
 | [`phase2-backlog.md`](./roadmap/phase2-backlog.md) | 优化项的 backlog（已分本轮执行的 / 仍待办的 6 项） |
 | [`phase3-deferred-to-packaging.md`](./roadmap/phase3-deferred-to-packaging.md) | 跟打包/SaaS 化绑的延后事项（LLM key 加密、CSP、tenant_id 等） |
 | [`mcp-export-server-design.md`](./roadmap/mcp-export-server-design.md) | `mycrew-export-mcp` 设计草案（暴露 MyCrew 能力给外部 Agent） |
