@@ -133,22 +133,46 @@ async def _build_context(task: dict, step_index: int | None = None) -> str:
             except (json.JSONDecodeError, TypeError):
                 pass
 
-    agent_role = ""
-    agent_id = task.get("agent_id") or ""
-    if agent_id:
-        agent_row = await crud.get_by_id("agents", agent_id)
+    # PM v4: performer may be a Crew, in which case task.agent_id is NULL
+    # by design. Resolving via performer_kind/performer_id keeps the
+    # "agent 角色" line truthful for Crew tasks — otherwise the LLM
+    # latches onto "未分配" and tells the user to assign an agent
+    # (the bug reported on 2026-05-16).
+    performer_label = "（未分配）"
+    performer_kind = task.get("performer_kind")
+    performer_id = task.get("performer_id") or task.get("agent_id")
+    if performer_kind == "crew" and performer_id:
+        crew_row = await crud.get_by_id("crews", performer_id)
+        if crew_row:
+            performer_label = f"Crew: {crew_row.get('name', '')}"
+    elif performer_id:
+        agent_row = await crud.get_by_id("agents", performer_id)
         if agent_row:
-            agent_role = agent_row.get("role", "")
+            performer_label = f"Agent: {agent_row.get('role', '')}"
 
     parts = [
         "# 任务上下文",
         f"- **标题**: {task.get('title', '')}",
         f"- **状态**: `{task.get('status', '')}`",
-        f"- **agent 角色**: {agent_role or '（未分配）'}",
+        f"- **执行者**: {performer_label}",
         f"- **kind**: `{task.get('kind', 'regular')}`",
     ]
     if val_err:
         parts.append(f"- **validation_errors**: {val_err}")
+
+    # last_error / last_error_kind — the actual exception from the
+    # runner. Without this the diagnostic LLM is guessing.
+    last_error = (task.get("last_error") or "").strip()
+    last_error_kind = (task.get("last_error_kind") or "").strip()
+    if last_error or last_error_kind:
+        parts.extend([
+            "",
+            "## 执行失败原文（task.last_error）",
+            f"分类：`{last_error_kind or 'unknown'}`",
+            "```",
+            last_error[:2000] if last_error else "(无文字描述)",
+            "```",
+        ])
 
     detail = (task.get("detail") or "").strip()
     if detail:
@@ -163,7 +187,47 @@ async def _build_context(task: dict, step_index: int | None = None) -> str:
     else:
         parts.append("\n（任务还没产出任何输出）")
 
+    # For Crew tasks at task-level (no step_index), include a brief
+    # summary of which step's output is the last one on disk — that's
+    # usually the step that failed. Helps the LLM say "step 3 挂了"
+    # instead of "整体没产出".
+    if step_index is None and performer_kind == "crew":
+        sub_summary = _summarise_crew_subdir(
+            task.get("project_id", ""), task.get("id", ""),
+        )
+        if sub_summary:
+            parts.extend(["", "## Crew 各步落盘情况", sub_summary])
+
     return "\n".join(parts)
+
+
+def _summarise_crew_subdir(project_id: str, task_id: str) -> str:
+    """One-line per step: which step has out.json on disk = ran; which
+    doesn't = never started or crashed at instantiation. Lets the
+    diagnostic LLM pinpoint the failing step at task-level chat."""
+    from bootstrap.paths import OUTPUT_DIR
+    sub = OUTPUT_DIR / (project_id or "") / task_id / "sub"
+    if not sub.exists():
+        return ""
+    by_step: dict[int, list[str]] = {}
+    for f in sub.iterdir():
+        if not f.is_file():
+            continue
+        # Filenames: "<idx>_<role>_(in|out).(json|md)"
+        try:
+            idx = int(f.name.split("_", 1)[0])
+        except (ValueError, IndexError):
+            continue
+        by_step.setdefault(idx, []).append(f.name)
+    if not by_step:
+        return ""
+    rows = []
+    for idx in sorted(by_step):
+        files = sorted(by_step[idx])
+        has_out = any("_out.json" in n for n in files)
+        flag = "✓" if has_out else "✗"
+        rows.append(f"- step {idx + 1} {flag}  {', '.join(files)}")
+    return "\n".join(rows)
 
 
 async def chat(

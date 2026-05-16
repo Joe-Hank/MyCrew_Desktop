@@ -20,6 +20,58 @@ from services.permission_guard import PermissionDenied
 log = structlog.get_logger()
 
 
+# ── CrewStructuredTool → BaseTool adapter (2026-05-16) ────────────
+#
+# CrewAI 1.14's Agent has a strict Pydantic check on `tools`: every entry
+# must be an instance of `crewai.tools.BaseTool` (or a plain dict). Our
+# Unity MCP wrappers are built as `CrewStructuredTool` instances — a
+# sibling class that DOES NOT subclass BaseTool in this version. Result:
+# any agent with a Unity tool in its tool_ids crashes at Agent(...) with
+# "Input should be a valid dictionary or instance of BaseTool".
+#
+# Production trace: the 「祖玛」 Art Crew got to step 3 (Technical Artist
+# has 7 Unity tools); the first call to Agent(tools=[...]) raised
+# "7 validation errors for Agent: tools.5 ... CrewStructuredTool".
+#
+# Fix: a thin BaseTool subclass that delegates _run to the wrapped
+# CrewStructuredTool's invoke(). All metadata (name/description/
+# args_schema) is reused so the LLM sees the same surface. Idempotent —
+# wrapping an already-BaseTool instance returns it unchanged.
+
+def _adapt_to_base_tool(tool: Any) -> Any:
+    """Return `tool` unchanged when it's already a BaseTool. Otherwise
+    wrap it in a delegating subclass so Agent's Pydantic check passes."""
+    from crewai.tools import BaseTool
+    if isinstance(tool, BaseTool):
+        return tool
+    # Defensive — only adapt if it looks like a CrewStructuredTool
+    # (or compatible: has name/description/args_schema/invoke).
+    if not all(hasattr(tool, a) for a in ("name", "description", "invoke")):
+        return tool
+
+    class _Wrapped(BaseTool):
+        name: str = tool.name
+        description: str = tool.description
+        # args_schema may be a Pydantic model class; BaseTool accepts that
+        # exactly. None / falsy means "no schema" — leave it to BaseTool's
+        # default (the parent's annotation is `type[BaseModel] | None`).
+        args_schema: type | None = getattr(tool, "args_schema", None)
+
+        def _run(self, *args: Any, **kwargs: Any) -> Any:
+            # CrewStructuredTool.invoke takes a dict of args OR (per
+            # langchain convention) a single positional argument. Forward
+            # whichever shape we got — Agent always calls _run(**kwargs)
+            # in current CrewAI, so kwargs is the common path.
+            payload: dict[str, Any]
+            if args and not kwargs and isinstance(args[0], dict):
+                payload = args[0]
+            else:
+                payload = dict(kwargs)
+            return tool.invoke(payload)
+
+    return _Wrapped()
+
+
 # ── LLM construction ──────────────────────────────────────────────
 
 def _build_litellm_model_string(provider_type: str, model_name: str) -> str:
@@ -227,13 +279,15 @@ def _load_builtin_tools(tool_names: list[str], ctx: dict | None = None) -> list:
             continue
         try:
             if n in static_registry:
-                instances.append(static_registry[n]())
+                instances.append(_adapt_to_base_tool(static_registry[n]()))
             elif n in bound_registry:
-                instances.append(bound_registry[n]())
+                instances.append(_adapt_to_base_tool(bound_registry[n]()))
             elif n in UNITY_TOOL_MAP:
                 # Unity MCP tools are pre-instantiated singletons (stateless
-                # bridge wrappers — safe to share across agents).
-                instances.append(UNITY_TOOL_MAP[n])
+                # bridge wrappers — safe to share across agents). They're
+                # CrewStructuredTool instances; _adapt wraps them in a
+                # BaseTool delegate so Agent's Pydantic check passes.
+                instances.append(_adapt_to_base_tool(UNITY_TOOL_MAP[n]))
             else:
                 log.info("crewai_runner.tool_skipped", tool=n, reason="no_builtin")
         except Exception as exc:
