@@ -143,6 +143,58 @@ class TestWorkflowStart:
                 p.stop()
 
 
+class TestRetryAutoResume:
+    """retry_task on a project whose harness was lost (backend restart)
+    must rebuild the harness from DB instead of 404-ing. Reported
+    2026-05-16 after the 「祖玛」 task wouldn't restart post-bug-fix
+    deploy."""
+
+    async def test_retry_after_orphan_rebuilds_harness(self, env):
+        patches = _patch_deps(env)
+        for p in patches:
+            p.start()
+        try:
+            svc = env["svc"]
+            # Project is in the DB but NOT in svc._active — exactly the
+            # state after a backend restart.
+            env["crud"].seed("projects", [
+                make_project("proj_orphan", state="stalled"),
+            ])
+            env["crud"].seed("tasks", [
+                {**make_task("o1", deps=[], project_id="proj_orphan"),
+                 "status": "failed", "agent_id": "agent_1"},
+            ])
+            assert "proj_orphan" not in svc._active
+
+            # Stub the actual dispatch — we only care that retry no
+            # longer raises and that the harness is rebuilt.
+            with patch.object(svc, "_schedule_task"):
+                await svc.retry_task(
+                    "proj_orphan", "o1", cleanup_artifacts=False,
+                )
+
+            assert "proj_orphan" in svc._active
+            proj = await env["crud"].get_by_id("projects", "proj_orphan")
+            assert proj["state"] == "running"
+        finally:
+            for p in patches:
+                p.stop()
+
+    async def test_retry_missing_project_still_raises(self, env):
+        patches = _patch_deps(env)
+        for p in patches:
+            p.start()
+        try:
+            svc = env["svc"]
+            with pytest.raises(KeyError, match="not found"):
+                await svc.retry_task(
+                    "proj_nonexistent", "x", cleanup_artifacts=False,
+                )
+        finally:
+            for p in patches:
+                p.stop()
+
+
 class TestWorkflowPauseResume:
     async def test_pause_active_project(self, env):
         patches = _patch_deps(env)

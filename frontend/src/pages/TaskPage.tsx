@@ -177,11 +177,19 @@ function TaskPage() {
         allowDismiss: true,
       });
       if (!result.choice || result.choice === "cancel") return;
-      retryTask.mutate({
-        projectId,
-        taskId: task.id,
-        cleanupArtifacts: result.choice === "cleanup",
-      });
+      try {
+        // Use mutateAsync so we can surface the real backend error
+        // (previously .mutate() swallowed failures — the user saw
+        // the dialog close and assumed it worked).
+        await retryTask.mutateAsync({
+          projectId,
+          taskId: task.id,
+          cleanupArtifacts: result.choice === "cleanup",
+        });
+      } catch (exc) {
+        const msg = exc instanceof Error ? exc.message : String(exc);
+        alert(`重试失败：${msg}`);
+      }
     },
     [confirm, projectId, retryTask, project?.tasks],
   );

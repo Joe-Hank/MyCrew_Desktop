@@ -309,8 +309,15 @@ class WorkflowService:
         confirm dialog explicitly opt into "keep the residue and rerun
         anyway" — useful when the previous emit_output was correct but a
         downstream step failed.
+
+        Auto-resume: if the project's harness was lost (backend restart
+        after the original failure, project state `stalled` / `failed`),
+        we rebuild it from the DB instead of 404-ing. Previously a user
+        hitting Retry after a restart silently saw nothing happen because
+        the route raised KeyError("Project not active").
         """
         async with self._get_project_lock(project_id):
+            await self._ensure_active(project_id)
             harness = self._get_harness(project_id)
             runner = self._runners[project_id]
 
@@ -322,6 +329,68 @@ class WorkflowService:
             await event_bus.publish_all(events)
 
             self._schedule_task(project_id, task_id, harness, runner)
+
+    async def _ensure_active(self, project_id: str) -> None:
+        """Make sure `_active[project_id]` is populated; rebuild from DB
+        if not. Idempotent — already-active projects are a no-op.
+
+        Preserves on-disk task statuses (done / failed / etc) so the
+        rebuilt harness reflects reality, not a fresh start. We avoid
+        calling harness.start() here because that would broadcast
+        ProjectStarted and try to activate ready tasks; the caller
+        (retry_task, manual rerun, etc.) drives what gets scheduled.
+        """
+        if project_id in self._active:
+            return
+        project = await crud.get_by_id("projects", project_id)
+        if not project:
+            raise KeyError(f"Project {project_id} not found")
+        tasks = await self._load_tasks(project_id)
+        if not tasks:
+            raise ValueError(f"Project {project_id} has no tasks")
+
+        # Build harness in whatever state the project is currently in.
+        # If it was 'stalled' or 'failed', we flip to RUNNING below so
+        # the scheduler can fire — caller has decided this project is
+        # active again by virtue of asking to retry a task.
+        harness = HarnessStateMachine(
+            project_id=project_id,
+            state=ProjectState(project.get("state", "ready")),
+            tasks=tasks,
+        )
+        runner = TaskRunner(tasks)
+
+        # Rehydrate completed task outputs so downstream retries can
+        # find their upstream context (TaskInput.upstream_outputs).
+        outputs: dict[str, dict] = {}
+        from bootstrap.paths import OUTPUT_DIR
+        for t in tasks:
+            if t.get("status") != "done":
+                continue
+            out_path = OUTPUT_DIR / project_id / t["id"] / "out.json"
+            if not out_path.exists():
+                continue
+            try:
+                outputs[t["id"]] = json.loads(out_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+
+        # Flip project to RUNNING if it wasn't already — this is the
+        # implicit "resume" that gets us out of stalled/failed terminal-
+        # looking states without forcing the user to click Start.
+        if harness.state != ProjectState.RUNNING:
+            harness._transition_project(ProjectState.RUNNING)
+            await crud.update_by_id("projects", project_id, {
+                "state": "running",
+                "is_running": 1,
+            })
+
+        self._active[project_id] = harness
+        self._runners[project_id] = runner
+        self._outputs[project_id] = outputs
+        log.info("workflow.auto_resumed_for_retry",
+                 project_id=project_id,
+                 rehydrated_outputs=len(outputs))
 
     async def _cleanup_task_artifacts(
         self, project_id: str, task_id: str,

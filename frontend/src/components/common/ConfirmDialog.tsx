@@ -178,25 +178,47 @@ function ConfirmDialogView({
       onClick={() => onChoose(null)}
       role="presentation"
     >
+      {/* Modal — mirrors SideDrawer's theme-aware variables so dark mode
+          doesn't produce a white-on-dark eye-stab. All colors come from
+          the design-system CSS variables (defined in @theme + :root.dark
+          inside globals.css); none of the bg-white / text-gray-* classes
+          from the original draft survive. */}
       <div
-        className="flex w-[440px] max-w-[92vw] flex-col rounded-xl bg-white shadow-2xl"
+        className="flex w-[440px] max-w-[92vw] flex-col rounded-xl shadow-2xl"
+        style={{
+          backgroundColor: "var(--color-card)",
+          border: "1px solid var(--color-border-soft)",
+          color: "var(--color-ink)",
+        }}
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
         aria-label={request.title}
       >
-        <div className="border-b px-5 py-4">
-          <h3 className="text-base font-semibold text-gray-900">
+        <div
+          className="px-5 py-3"
+          style={{ borderBottom: "1px solid var(--color-border-soft)" }}
+        >
+          <h3
+            className="text-sm font-semibold"
+            style={{ color: "var(--color-ink-strong)" }}
+          >
             {request.title}
           </h3>
         </div>
         {request.body && (
-          <div className="px-5 py-4 text-sm leading-relaxed text-gray-700">
+          <div
+            className="px-5 py-4 text-sm leading-relaxed"
+            style={{ color: "var(--color-ink-soft)" }}
+          >
             {request.body}
           </div>
         )}
         {showDismiss && (
-          <label className="flex items-center gap-2 px-5 pb-3 text-xs text-gray-500">
+          <label
+            className="flex items-center gap-2 px-5 pb-3 text-xs"
+            style={{ color: "var(--color-ink-faint)" }}
+          >
             <input
               type="checkbox"
               checked={dontShowAgain}
@@ -205,13 +227,20 @@ function ConfirmDialogView({
             不再显示此提示（仍可在设置中重置）
           </label>
         )}
-        <div className="flex flex-row-reverse flex-wrap gap-2 border-t bg-gray-50 px-5 py-3">
+        <div
+          className="flex flex-row-reverse flex-wrap gap-2 px-5 py-3"
+          style={{
+            borderTop: "1px solid var(--color-border-soft)",
+            backgroundColor: "var(--color-card-alt)",
+          }}
+        >
           {request.options.map((opt) => (
             <button
               key={opt.value}
               type="button"
               onClick={() => onChoose(opt.value)}
-              className={buttonClass(opt)}
+              style={buttonStyle(opt)}
+              className="min-w-[88px] rounded-md px-3 py-1.5 text-xs font-medium transition-opacity hover:opacity-90"
             >
               {opt.label}
             </button>
@@ -222,19 +251,31 @@ function ConfirmDialogView({
   );
 }
 
-function buttonClass(opt: ConfirmOption): string {
-  const base =
-    "min-w-[88px] rounded-md px-3 py-1.5 text-sm font-medium transition-colors";
+function buttonStyle(opt: ConfirmOption): React.CSSProperties {
   if (opt.tone === "danger") {
-    return `${base} bg-red-600 text-white hover:bg-red-700`;
+    return {
+      backgroundColor: "#dc2626",  // red.600 — danger stays red across themes
+      color: "white",
+    };
   }
   if (opt.tone === "subtle") {
-    return `${base} text-gray-600 hover:bg-gray-200`;
+    return {
+      backgroundColor: "transparent",
+      color: "var(--color-ink-muted)",
+      border: "1px solid transparent",
+    };
   }
   if (opt.primary || opt.tone === "primary") {
-    return `${base} bg-indigo-600 text-white hover:bg-indigo-700`;
+    return {
+      backgroundColor: "var(--color-brand-500)",
+      color: "white",
+    };
   }
-  return `${base} border border-gray-300 bg-white text-gray-800 hover:bg-gray-100`;
+  return {
+    backgroundColor: "var(--color-card)",
+    color: "var(--color-ink-soft)",
+    border: "1px solid var(--color-border-soft)",
+  };
 }
 
 // ── Hooks ─────────────────────────────────────────────────────────
