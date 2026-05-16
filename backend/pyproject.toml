@@ -27,6 +27,7 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24.0",
     "pytest-cov>=6.0",
+    "pytest-timeout>=2.3.0",
     "ruff>=0.8.0",
     "pyinstaller>=6.0",
 ]
@@ -47,3 +48,10 @@ known-first-party = ["mycrew"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Hard kill any test that runs longer than 30s. Without this, an
+# accidental infinite loop (or an aiosqlite call waiting on a held
+# write lock) leaves a zombie pytest process holding the DB file —
+# which then blocks the next backend startup with "database is locked".
+# `method = thread` works on Windows where signal-based timeouts can't.
+timeout = 30
+timeout_method = "thread"
