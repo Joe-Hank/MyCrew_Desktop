@@ -200,8 +200,21 @@ function TaskHeader({ project, selectedTask }: Props) {
         runningTasks.length,
       );
       if (!shouldPause) return;
-      pause.mutate(project.id);
-    } else if (isPaused) resume.mutate(project.id);
+      try {
+        await pause.mutateAsync(project.id);
+      } catch (exc) {
+        alert((exc as Error).message ?? "暂停失败");
+      }
+    } else if (isPaused) {
+      // Surface resume failures — backend may 404 / 500 when state has
+      // drifted (e.g. project finalized in the meantime). Silent failure
+      // here looks like a dead button.
+      try {
+        await resume.mutateAsync(project.id);
+      } catch (exc) {
+        alert((exc as Error).message ?? "继续失败");
+      }
+    }
   }
 
   /** Open the project's root_path in the OS file explorer.

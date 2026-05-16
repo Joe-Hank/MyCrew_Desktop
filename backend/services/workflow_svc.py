@@ -241,17 +241,56 @@ class WorkflowService:
             await self._resume_locked(project_id)
 
     async def _resume_locked(self, project_id: str) -> None:
-        harness = self._get_harness(project_id)
+        # Live-harness path — normal in-session resume
+        harness = self._active.get(project_id)
+        if harness is not None:
+            events = harness.resume()
+
+            await self._persist_project_state(project_id, harness)
+            await self._persist_all_task_states(project_id, harness)
+            await event_bus.publish_all(events)
+
+            runner = self._runners[project_id]
+            self._schedule_ready_tasks(project_id, harness, runner)
+
+            log.info("workflow.resumed", project_id=project_id)
+            return
+
+        # Orphan path — symmetric with _pause_locked. After a backend
+        # restart (uvicorn --reload or a full kill) the harness is gone
+        # but the project row in DB still says paused. Without this
+        # branch the resume button 404s silently and the user thinks
+        # the button is broken. Rebuild the harness from DB the same
+        # way _start_locked does, then call harness.resume() to
+        # transition PAUSED → RUNNING and re-schedule ready tasks.
+        project = await crud.get_by_id("projects", project_id)
+        if not project:
+            raise KeyError(project_id)
+
+        tasks = await self._load_tasks(project_id)
+        if not tasks:
+            raise ValueError(f"Project {project_id} has no tasks")
+
+        harness = HarnessStateMachine(
+            project_id=project_id,
+            state=ProjectState(project.get("state", "paused")),
+            tasks=tasks,
+        )
+        runner = TaskRunner(tasks)
+
         events = harness.resume()
+
+        self._active[project_id] = harness
+        self._runners[project_id] = runner
+        self._outputs.setdefault(project_id, {})
 
         await self._persist_project_state(project_id, harness)
         await self._persist_all_task_states(project_id, harness)
         await event_bus.publish_all(events)
 
-        runner = self._runners[project_id]
         self._schedule_ready_tasks(project_id, harness, runner)
 
-        log.info("workflow.resumed", project_id=project_id)
+        log.info("workflow.resumed_orphan", project_id=project_id)
 
     async def abort(self, project_id: str, reason: str = "") -> None:
         async with self._get_project_lock(project_id):

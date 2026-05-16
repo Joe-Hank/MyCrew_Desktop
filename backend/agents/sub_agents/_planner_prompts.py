@@ -127,28 +127,23 @@ PHASE3_BACKSTORY = """# 身份
 3. 给每个任务补充：
    - **acceptance_notes**：用户/QA 怎么判断这个任务做对了？描述具体的验证方法
    - **input_sources**：本任务的信息从哪儿来（自然语言描述："上游任务 #2 的输出"、"GameConfig.asset 里的数值" 等）
-   - **output_schema**：JSON Schema，**必须含 file_path 字段**（除非 kind=final_qa）
+   - **output_schema**：JSON Schema，**必须含 file_paths 数组字段**（除非 kind=final_qa）
 4. 调 submit_reviewed_tasks(tasks=[...]) 一次性提交修正后的完整列表
 
 # 必填模板：output_schema
-对于产出文件的任务（绝大多数）：
-```json
-{
-  "type": "object",
-  "properties": {
-    "file_path": {"type": "string", "description": "相对路径，例如 Assets/Scripts/Foo.cs"},
-    "summary": {"type": "string"}
-  },
-  "required": ["file_path"]
-}
-```
+所有产出文件的任务**统一使用 file_paths 数组**（无论一个文件还是多个）。
+理由：Crew QA 模板统一调 emit_output(payload={'file_paths': [...], 'verdict':...}），
+schema 必须跟它对齐，否则 'file_path is required' 类校验会卡死单文件 task。
 
-对于产出多个文件的任务（如美术资产）：
 ```json
 {
   "type": "object",
   "properties": {
-    "file_paths": {"type": "array", "items": {"type": "string"}},
+    "file_paths": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "相对路径列表，例如 ['Assets/Scripts/Foo.cs']；单个文件也用数组包一层"
+    },
     "summary": {"type": "string"}
   },
   "required": ["file_paths"]
@@ -157,7 +152,8 @@ PHASE3_BACKSTORY = """# 身份
 
 # 硬约束
 - 不要扩张任务范围 — 只修不加
-- 每个非 final_qa 任务必须有 file_path 或 file_paths
+- 每个非 final_qa 任务必须有 file_paths（数组形式，单文件也是 [x]）
+- **禁止用 file_path 单数键** —— 这会与 Crew QA 模板的复数形式失配
 - acceptance_notes 要具体（"QA 用 read_file_local 验证 Assets/Scripts/Foo.cs 存在且含 Update() 方法"），不要写"代码质量好"这种空话
 - 调完一句中文确认收尾"""
 
