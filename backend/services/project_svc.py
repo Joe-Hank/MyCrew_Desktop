@@ -85,6 +85,15 @@ class ProjectService:
             # Pass 1: insert empty-dep tasks, build index → task_id map.
             index_to_id: dict[int, str] = {}
             for i, t in enumerate(tasks):
+                # PM v5: code_contract is a dict from the blueprint (or
+                # None for non-code tasks). Serialize once here; the
+                # crewai_runner pulls it back via crud.get_by_id when
+                # building Crew QA step bindings.
+                code_contract = t.get("code_contract")
+                contract_json = (
+                    json.dumps(code_contract, ensure_ascii=False)
+                    if isinstance(code_contract, dict) else None
+                )
                 row = await crud.insert("tasks", {
                     "project_id": project_id,
                     "title": t["title"],
@@ -99,6 +108,8 @@ class ProjectService:
                     # for iterate_existing + the team page tag.
                     "performer_kind": t.get("performer_kind"),
                     "performer_id": t.get("performer_id"),
+                    # PM v5: named-symbol contract for Crew QA verification.
+                    "code_contract": contract_json,
                 }, id_prefix="task_")
                 index_to_id[i] = row["id"]
 

@@ -27,6 +27,7 @@ from src.tools.builtin.local._output_capture import set_planner_output
 from agents.sub_agents._planner_models import (
     SubmitAssignmentsArgs,
     SubmitAtomicTasksArgs,
+    SubmitCodeContractsArgs,
     SubmitConceptArgs,
     SubmitPathedTasksArgs,
     SubmitReviewedTasksArgs,
@@ -184,10 +185,41 @@ def make_submit_assignments_tool(session_id: str) -> SubmitAssignments:
     return _Bound()
 
 
+# ── Phase 5 (PM v5): 代码契约设计师 ────────────────────────────────
+
+
+class SubmitCodeContracts(_PlannerSubmitTool):
+    name: str = "submit_code_contracts"
+    description: str = (
+        "提交每个上游 task 的代码契约（PM v5）。contracts 数组每条含 "
+        "task_index + code_contract（或 null）。"
+        "**只给会产 .cs 文件的 task 写 contract**（看 task.output_paths 是否含 "
+        ".cs 后缀）；产 PNG / wav / prefab / .unity 等非代码资产的 task，"
+        "code_contract 必须填 null。"
+        "contract.files[i].path 必须是该 task 的 output_paths 里某个 .cs 路径；"
+        "exports[i].signature 必须是单行规范 C# 签名（不允许多行 / 注释 / 嵌套泛型 > 2 层）。"
+        "imports[i].uses 引用的符号必须存在于 from_task_index 指向的 task 的 exports 池里 — "
+        "Pydantic 通过后还会做交叉校验，找不到 → 拒绝 → 你被要求修正后重提。"
+        "contracts 长度必须 == 上游 task 数；task_index 必须覆盖 0..N-1 不重不漏。"
+    )
+    args_schema: type[BaseModel] = SubmitCodeContractsArgs
+    _phase: ClassVar[str] = "code_contract"
+
+    def _run(self, contracts: list[dict]) -> str:
+        return self._capture({"contracts": contracts})
+
+
+def make_submit_code_contracts_tool(session_id: str) -> SubmitCodeContracts:
+    class _Bound(SubmitCodeContracts):
+        _bound_session_id: ClassVar[str] = session_id
+    return _Bound()
+
+
 __all__ = [
     "make_submit_concept_tool",
     "make_submit_atomic_tasks_tool",
     "make_submit_reviewed_tasks_tool",
     "make_submit_pathed_tasks_tool",
     "make_submit_assignments_tool",
+    "make_submit_code_contracts_tool",
 ]

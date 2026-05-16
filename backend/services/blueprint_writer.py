@@ -98,10 +98,99 @@ def write_blueprint_to_disk(
         ]
         (base / "tasks" / fname).write_text("\n".join(lines), encoding="utf-8")
 
+    # PM v5: code_contract.md — derived human-readable view of every
+    # task's code contract. Written only when at least one task has a
+    # non-null code_contract (so non-code projects don't pollute the
+    # .mycrew dir with an empty doc). Re-generated from scratch each
+    # time the blueprint is written — JSON in DB is the SSOT.
+    _write_code_contract_md(base, blueprint["tasks"])
+
     log.info("blueprint_writer.ok",
              project_id=project["id"], dir=str(base),
              task_count=len(blueprint["tasks"]), pending=pending)
     return base, pending
+
+
+def _write_code_contract_md(base: Path, tasks: list[dict]) -> None:
+    """Render .mycrew/code_contract.md from per-task code_contract dicts.
+
+    SSOT is the JSON in tasks.code_contract; this file is a derived
+    human-readable view for plan review + iterate flow (the user can
+    copy-paste a section back into Plan Maker to amend). Do NOT hand-
+    edit — next PM run overwrites.
+    """
+    has_any = any(
+        isinstance(t.get("code_contract"), dict) for t in tasks
+    )
+    target = base / "code_contract.md"
+    if not has_any:
+        # Clean up stale derived file from prior PM run that did have contracts
+        try:
+            if target.exists():
+                target.unlink()
+        except OSError:
+            pass
+        return
+
+    lines: list[str] = [
+        "# 项目代码契约（PM v5 自动生成，请勿手动编辑）",
+        "",
+        "> 每个产 .cs 文件的 task 都在 PM Phase 5 被钉死了它要暴露的公共符号。",
+        "> Crew Head **不能改**契约；Crew QA 用本文件逐条验收生成的 .cs。",
+        "> 想改任何契约 → 走「迭代」流程让 PM 重跑。",
+        "",
+    ]
+    # Collect namespace if any contract specifies one; use the most
+    # common one (assumes one project = one namespace in v5 MVP).
+    namespaces = [
+        t["code_contract"].get("namespace")
+        for t in tasks
+        if isinstance(t.get("code_contract"), dict)
+        and t["code_contract"].get("namespace")
+    ]
+    if namespaces:
+        lines.extend(["## Namespace", f"`{namespaces[0]}`", ""])
+
+    for i, t in enumerate(tasks, start=1):
+        contract = t.get("code_contract")
+        if not isinstance(contract, dict):
+            continue
+        lines.append(f"## Task {i} · {t.get('title','')}")
+        for f in contract.get("files") or []:
+            lines.extend([
+                "",
+                f"**文件**：`{f.get('path','')}`",
+                "",
+                "| Kind | Signature |",
+                "|---|---|",
+            ])
+            for exp in f.get("exports") or []:
+                kind = exp.get("kind", "?")
+                sig = (exp.get("signature") or "").replace("|", "\\|")
+                lines.append(f"| {kind} | `{sig}` |")
+        imports = contract.get("imports") or []
+        if imports:
+            lines.extend(["", "**依赖（imports）**："])
+            for imp in imports:
+                from_idx = imp.get("from_task_index")
+                # Translate index → human-readable task pointer; 1-based
+                # for display.
+                from_title = ""
+                if isinstance(from_idx, int) and 0 <= from_idx < len(tasks):
+                    from_title = tasks[from_idx].get("title", "")
+                uses = ", ".join(f"`{u}`" for u in imp.get("uses") or [])
+                lines.append(
+                    f"- Task {from_idx + 1 if isinstance(from_idx, int) else '?'}"
+                    f" ({from_title}) → {uses}"
+                )
+        lines.append("")
+
+    try:
+        target.write_text("\n".join(lines), encoding="utf-8")
+    except OSError as exc:
+        # Non-fatal — the JSON column is still SSOT; just log
+        log.warning("blueprint_writer.code_contract_md_failed",
+                    error=str(exc))
 
 
 __all__ = ["resolve_blueprint_dir", "write_blueprint_to_disk"]

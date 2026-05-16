@@ -170,6 +170,111 @@ class Assignment(BaseModel):
     reason: str = Field(..., description="一句话解释为什么选这个 performer")
 
 
+# ── Phase 5 (v5): 代码契约设计师 ──────────────────────────────────
+# Inserted between project_mgmt (Phase 4) and agent_assignment (renumbered
+# from Phase 5 to Phase 6 in human/log naming). The phase walks the
+# pathed task list, finds every task that produces .cs files, and writes
+# a per-task **named-symbol contract** the Crews must honour:
+#
+#   - Phase 5 LLM decides cross-task API names + signatures BEFORE
+#     any Crew runs, so when Crew A writes PlayerController.cs and
+#     Crew B writes EnemyAI.cs (which calls PlayerController.OnDeath),
+#     both reference the same canonical name.
+#   - Crew Head step CANNOT modify the contract (strict freeze, decision
+#     Q5). Head only refines step_instructions within the contract.
+#   - Crew QA step uses the contract to verify the generated .cs really
+#     contains the listed public class / method / event / field
+#     signatures (regex check + Unity console compile in v5 MVP).
+
+
+class CodeContractExport(BaseModel):
+    """One public symbol the task is contracted to produce."""
+    kind: Literal["class", "interface", "struct", "enum",
+                  "method", "field", "event", "property"] = Field(
+        ...,
+        description="符号种类。class/interface/struct/enum 是顶层声明；"
+                    "method/field/event/property 是 class 成员。",
+    )
+    signature: str = Field(
+        ...,
+        description="完整 C# 签名行（单行，规范化空白）。例如："
+                    "'public void Move(Vector2 direction)'、"
+                    "'public class PlayerController : MonoBehaviour'、"
+                    "'public event Action OnDeath'。"
+                    "**禁止多行 / 嵌套泛型超过 2 层 / partial class** —— "
+                    "v5 MVP regex 验证依赖单行规范格式。",
+    )
+
+
+class CodeContractFile(BaseModel):
+    """All exports grouped by their target .cs file path. Multi-file
+    tasks (e.g. "System Implementation Crew 产 Mineral.cs + MineralSpawner.cs")
+    list each file separately so Crew QA can verify per-file."""
+    path: str = Field(
+        ...,
+        description="相对路径，必须与该 task 的 output_paths 中的某条匹配。"
+                    "例如 'Assets/Scripts/PlayerController.cs'",
+    )
+    exports: list[CodeContractExport] = Field(
+        default_factory=list,
+        min_length=1,
+        description="该 .cs 文件必须包含的全部公共符号。Crew QA 验证时按"
+                    "这个清单 regex 抽签名后比对；少一个则 task 校验失败。",
+    )
+
+
+class CodeContractImport(BaseModel):
+    """A symbol this task depends on from another task's exports."""
+    from_task_index: int = Field(
+        ...,
+        description="上游 task 的 0-based 索引（必须是当前 task 在依赖链中可见"
+                    "的上游或同期 task，不允许向后引用）",
+    )
+    uses: list[str] = Field(
+        ...,
+        min_length=1,
+        description="引用的符号短名（不带签名），例如 ['PlayerController.OnDeath', "
+                    "'InventoryManager.AddItem']。验证时会与 from_task 的 "
+                    "contract.files[*].exports 做交叉匹配，找不到 → 重跑 Phase。",
+    )
+
+
+class CodeContract(BaseModel):
+    """The per-task code-level contract. Phase 5 emits one of these per
+    task that produces .cs files; tasks that produce only non-code assets
+    (sprites / wav / prefabs) get null (the field stays None).
+
+    Decision Q1: per-task contract with internal file grouping. Decision
+    Q5: strict freeze — Crew Head cannot mutate this; deviations cause
+    Crew QA to fail the task, escalating to iterate flow."""
+    namespace: str | None = Field(
+        default=None,
+        description="C# namespace 这些 export 都放在哪个 namespace 下。"
+                    "可为空（用 global namespace）。",
+    )
+    files: list[CodeContractFile] = Field(
+        ...,
+        min_length=1,
+        description="按目标 .cs 文件分组的 exports 清单",
+    )
+    imports: list[CodeContractImport] = Field(
+        default_factory=list,
+        description="依赖的上游 task 符号。可为空（task 不引用其他 task 的 API）。"
+                    "每条 uses 都会被验证：必须在某个 from_task 的 exports 池里找到。",
+    )
+
+
+class TaskCodeContract(BaseModel):
+    """Phase 5 输出的单条记录 — 把 contract 关联到一个 task_index。
+    null contract 表示该 task 不产 .cs 文件，无契约。"""
+    task_index: int = Field(..., description="0-based 任务索引")
+    code_contract: CodeContract | None = Field(
+        default=None,
+        description="该任务的代码契约；null = 该任务不产 .cs 文件（如美术 / 音频 / "
+                    "纯 prefab 任务），不需要约束符号。",
+    )
+
+
 # ── 工具 args schema ───────────────────────────────────────────────
 
 
@@ -209,6 +314,13 @@ class SubmitAssignmentsArgs(BaseModel):
     assignments: list[Assignment] = Field(..., min_length=1)
 
 
+class SubmitCodeContractsArgs(BaseModel):
+    """Phase 5 (PM v5) 一次性提交全部 task 的 code_contract。
+    覆盖率要求：list 长度 == 上游 task 数；每个 task_index 0..N-1 恰好
+    出现一次（顺序不强求）。Pydantic 之后由 orchestrator 做交叉验证。"""
+    contracts: list[TaskCodeContract] = Field(..., min_length=1)
+
+
 __all__ = [
     "CompletenessLabel",
     "ConceptDoc",
@@ -219,9 +331,15 @@ __all__ = [
     "PathedTask",
     "PerformerRef",
     "Assignment",
+    "CodeContractExport",
+    "CodeContractFile",
+    "CodeContractImport",
+    "CodeContract",
+    "TaskCodeContract",
     "SubmitConceptArgs",
     "SubmitAtomicTasksArgs",
     "SubmitReviewedTasksArgs",
     "SubmitPathedTasksArgs",
     "SubmitAssignmentsArgs",
+    "SubmitCodeContractsArgs",
 ]

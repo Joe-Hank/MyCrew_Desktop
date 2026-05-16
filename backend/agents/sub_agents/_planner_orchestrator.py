@@ -43,8 +43,11 @@ from agents.sub_agents._planner_prompts import (
     PHASE4_ROLE,
     PHASE5_GOAL,
     PHASE5_ROLE,
+    PHASE_CC_GOAL,
+    PHASE_CC_ROLE,
     phase4_backstory,
     phase5_backstory,
+    phase_cc_backstory,
 )
 from agents.sub_agents._list_performers_tool import (
     make_list_performers_tool,
@@ -52,6 +55,7 @@ from agents.sub_agents._list_performers_tool import (
 from agents.sub_agents._planner_tools import (
     make_submit_assignments_tool,
     make_submit_atomic_tasks_tool,
+    make_submit_code_contracts_tool,
     make_submit_concept_tool,
     make_submit_pathed_tasks_tool,
     make_submit_reviewed_tasks_tool,
@@ -71,7 +75,14 @@ log = structlog.get_logger()
 # ── Per-phase config ────────────────────────────────────────────────
 
 
-PHASES = ("concept", "system_design", "review", "project_mgmt", "agent_assignment")
+PHASES = (
+    "concept",
+    "system_design",
+    "review",
+    "project_mgmt",
+    "code_contract",      # PM v5: 代码契约设计师 (between Phase 4 and assignment)
+    "agent_assignment",
+)
 
 
 # ── Public entry ────────────────────────────────────────────────────
@@ -246,7 +257,48 @@ async def run_crew(session: dict, user_message: str, start_from: str | None = No
             if _check_cancelled(session_id):
                 return planner_cache_svc.get(session_id) or {}
 
-        # ── Phase 5: Agent 指挥员 (PM v4) ──────────────────────────
+        # ── Phase 5 (PM v5): 代码契约设计师 ────────────────────────
+        # Decides the public-symbol contract for every task that
+        # produces .cs files BEFORE Crews run. Crew Head cannot mutate
+        # the contract; Crew QA verifies regex-match against generated
+        # .cs and fails the task if any contract'd symbol is missing.
+        # Non-code tasks (PNG / wav / prefab) get null contracts.
+        if _need_run("code_contract", start_from) and not _has_phase_output(session_id, "code_contract"):
+            planner_cache_svc.update(session_id, current_phase="code_contract")
+            pathed = planner_cache_svc.get_phase_output(session_id, "project_mgmt")
+            cc_dict = await _run_phase(
+                session_id=session_id,
+                phase="code_contract",
+                role=PHASE_CC_ROLE, goal=PHASE_CC_GOAL,
+                backstory=phase_cc_backstory(),
+                description=(
+                    "# 上游带路径的任务列表（Phase 4 产物）\n"
+                    "```json\n"
+                    f"{json.dumps(pathed, ensure_ascii=False, indent=2)}\n"
+                    "```\n\n"
+                    f"上游共 {len(pathed or [])} 个 task（含 setup）。请逐个判断："
+                    "task.output_paths 含 .cs → 需要写 code_contract；其他全为非代码资产 → "
+                    "code_contract 必须填 null。contracts 数组长度必须 == "
+                    f"{len(pathed or [])}，task_index 必须覆盖 0..{len(pathed or []) - 1}。"
+                ),
+                expected_output=(
+                    "调一次 submit_code_contracts，覆盖全部 task；然后一句中文确认。"
+                ),
+                tools=[make_submit_code_contracts_tool(session_id)],
+                provider=pro_provider, model_name=pro_model,
+                temperature=0.25, max_tokens=4000,
+                validator=lambda payload: _validate_code_contracts(
+                    payload, pathed or [],
+                ),
+            )
+            planner_cache_svc.set_phase_output(
+                session_id, "code_contract",
+                cc_dict.get("contracts", []),
+            )
+            if _check_cancelled(session_id):
+                return planner_cache_svc.get(session_id) or {}
+
+        # ── Phase 6 (renumbered, internal key unchanged): Agent 指挥员 ─
         # Phase 5 LLM picks each task's performer from the live pool that
         # list_performers exposes. It is *required* to call list_performers
         # before submit_assignments — submit_assignments now has zero
@@ -292,7 +344,7 @@ async def run_crew(session: dict, user_message: str, start_from: str | None = No
             draft_blueprint=draft_blueprint,
         )
         await _broadcast(session_id, "complete", "PM 工作流",
-                         "phase_completed", "全部 5 个 phase 完成，草稿已就绪")
+                         "phase_completed", "全部 6 个 phase 完成，草稿已就绪")
         return planner_cache_svc.get(session_id) or {}
 
     except asyncio.CancelledError:
@@ -576,6 +628,193 @@ def _validate_path_specs(
     return errors
 
 
+def _validate_code_contracts(
+    payload: dict,
+    pathed_tasks: list[dict],
+) -> list[str]:
+    """V5 cross-record validation for Phase 5 code_contract output.
+
+    Beyond Pydantic field-level checks, verify:
+        1. Coverage: contracts length == pathed_tasks length; indices
+           cover 0..N-1 exactly once.
+        2. Type-correctness: a task's contract must be null iff its
+           output_paths contains zero .cs files. Mismatch in either
+           direction is wrong (forgot a code task / wrote a contract
+           for an asset task).
+        3. Path alignment: every contract.files[i].path must appear in
+           that task's output_paths (no new files, no missing files).
+        4. Cross-task symbol resolution: every imports.uses[k] must
+           match some export.signature inside the from_task_index'd
+           task's contract — short-name match, e.g.
+           "PlayerController.OnDeath" resolves to a class export named
+           PlayerController containing an event export named OnDeath.
+
+    Errors are returned as plain strings the LLM can read and self-
+    correct against (Layer 2 focused repair will include them in the
+    prompt).
+    """
+    errors: list[str] = []
+    contracts = payload.get("contracts") or []
+    n = len(pathed_tasks)
+
+    # 1. coverage
+    indices = [c.get("task_index") for c in contracts]
+    expected = set(range(n))
+    got = {i for i in indices if isinstance(i, int)}
+    missing = sorted(expected - got)
+    extra = sorted(got - expected)
+    if missing:
+        errors.append(f"contracts 漏掉了 task_index：{missing}")
+    if extra:
+        errors.append(f"contracts 含越界 task_index（上游 {n} 个任务）：{extra}")
+    dup_counts: dict[int, int] = {}
+    for i in indices:
+        if isinstance(i, int):
+            dup_counts[i] = dup_counts.get(i, 0) + 1
+    dups = [i for i, c in dup_counts.items() if c > 1]
+    if dups:
+        errors.append(f"contracts 含重复 task_index：{dups}")
+    if errors:
+        return errors  # Early-out — further checks need clean indexing
+
+    # Build index → (task, contract) map for O(1) lookups
+    by_idx: dict[int, tuple[dict, dict | None]] = {}
+    for c in contracts:
+        idx = c["task_index"]
+        if 0 <= idx < n:
+            by_idx[idx] = (pathed_tasks[idx], c.get("code_contract"))
+
+    # 2. type-correctness: contract presence vs .cs presence
+    for idx, (task, contract) in by_idx.items():
+        output_paths = task.get("output_paths") or []
+        has_cs = any(
+            isinstance(p, str) and p.lower().endswith(".cs")
+            for p in output_paths
+        )
+        if has_cs and contract is None:
+            errors.append(
+                f"task_index={idx} 的 output_paths 含 .cs 文件但 contract 为 null —— "
+                "必须为产 .cs 的 task 写 contract"
+            )
+        elif not has_cs and contract is not None:
+            errors.append(
+                f"task_index={idx} 的 output_paths 没有 .cs 文件但写了 contract —— "
+                "请把 code_contract 改为 null"
+            )
+
+    # 3. path alignment
+    for idx, (task, contract) in by_idx.items():
+        if not contract:
+            continue
+        cs_paths_in_task = {
+            p for p in (task.get("output_paths") or [])
+            if isinstance(p, str) and p.lower().endswith(".cs")
+        }
+        contract_paths = {
+            f.get("path", "") for f in (contract.get("files") or [])
+        }
+        unknown = contract_paths - cs_paths_in_task
+        forgotten = cs_paths_in_task - contract_paths
+        if unknown:
+            errors.append(
+                f"task_index={idx} contract.files 含 task.output_paths 没列的路径："
+                f"{sorted(unknown)[:5]}"
+            )
+        if forgotten:
+            errors.append(
+                f"task_index={idx} task.output_paths 有 .cs 但 contract.files 没覆盖："
+                f"{sorted(forgotten)[:5]}"
+            )
+
+    # 4. cross-task symbol resolution
+    # Build exports index: task_idx → set[short_symbol_names]
+    # Short symbol name for a class export = class name from signature
+    # For a method/event/field on a class file, short name = ClassName.MemberName
+    exports_index: dict[int, set[str]] = {}
+    for idx, (_task, contract) in by_idx.items():
+        if not contract:
+            continue
+        names: set[str] = set()
+        for f in contract.get("files") or []:
+            # find the class name within this file (first class-kind export)
+            class_name: str | None = None
+            for exp in f.get("exports") or []:
+                if exp.get("kind") in ("class", "interface", "struct", "enum"):
+                    class_name = _extract_type_name(exp.get("signature", ""))
+                    if class_name:
+                        names.add(class_name)
+                        break
+            for exp in f.get("exports") or []:
+                kind = exp.get("kind")
+                sig = exp.get("signature", "")
+                if kind in ("class", "interface", "struct", "enum"):
+                    continue  # already added
+                member = _extract_member_name(sig)
+                if member and class_name:
+                    names.add(f"{class_name}.{member}")
+        exports_index[idx] = names
+
+    for idx, (_task, contract) in by_idx.items():
+        if not contract:
+            continue
+        for imp in contract.get("imports") or []:
+            from_idx = imp.get("from_task_index")
+            uses = imp.get("uses") or []
+            if not isinstance(from_idx, int) or not (0 <= from_idx < n):
+                errors.append(
+                    f"task_index={idx} 的 import.from_task_index={from_idx!r} 越界"
+                )
+                continue
+            available = exports_index.get(from_idx, set())
+            for sym in uses:
+                if sym not in available:
+                    errors.append(
+                        f"task_index={idx} 引用 task_index={from_idx} 的 `{sym}`，"
+                        f"但 {from_idx} 没声明这个符号"
+                        f"（exports 实际有：{sorted(available)[:8]}）"
+                    )
+
+    return errors
+
+
+def _extract_type_name(signature: str) -> str | None:
+    """从 'public class Foo : Bar' 抽 'Foo'；'public interface IBaz' → 'IBaz'。
+    单行规范签名假设（v5 MVP 约束）。"""
+    import re
+    m = re.search(
+        r"\b(?:class|interface|struct|enum)\s+(\w+)",
+        signature,
+    )
+    return m.group(1) if m else None
+
+
+def _extract_member_name(signature: str) -> str | None:
+    """从成员签名抽短名：
+       'public void Move(Vector2 d)'    → 'Move'
+       'public event Action OnDeath'    → 'OnDeath'
+       'public Transform CachedTransform' → 'CachedTransform'
+       'public int Health { get; set; }' → 'Health'
+    """
+    import re
+    # method:   public <RET> <NAME>(
+    m = re.search(r"\b\w[\w<>,\s]*\s+(\w+)\s*\(", signature)
+    if m:
+        return m.group(1)
+    # event:    public event <TYPE> <NAME>(...) | <NAME>;? | <NAME>$
+    m = re.search(r"\bevent\s+\S+\s+(\w+)", signature)
+    if m:
+        return m.group(1)
+    # property: public <TYPE> <NAME> { ... }
+    m = re.search(r"\b\w+\s+(\w+)\s*\{", signature)
+    if m:
+        return m.group(1)
+    # field:    public <TYPE> <NAME>;?  (trailing word)
+    m = re.search(r"\b(\w+)\s*;?\s*$", signature.strip())
+    if m:
+        return m.group(1)
+    return None
+
+
 def _assemble_pathed_tasks(
     reviewed: list[dict],
     path_specs: list[dict],
@@ -852,6 +1091,11 @@ def _assemble_draft_blueprint(session_id: str) -> dict:
     assignments: list[dict] = planner_cache_svc.get_phase_output(
         session_id, "agent_assignment",
     ) or []
+    # PM v5: contracts are an N-element list aligned 1:1 with pathed_tasks
+    # by task_index. Each entry's code_contract may be None (non-code task).
+    code_contracts: list[dict] = planner_cache_svc.get_phase_output(
+        session_id, "code_contract",
+    ) or []
     concept: dict | None = planner_cache_svc.get_phase_output(session_id, "concept")
 
     # PM v4: assignments carry performer_ref={kind, id}. For 'agent' kind
@@ -859,6 +1103,7 @@ def _assemble_draft_blueprint(session_id: str) -> dict:
     # and the team page still find a row. For 'crew' kind agent_id stays
     # null — workflow_svc._run_agent looks at performer_kind first.
     assignment_by_idx = {a["task_index"]: a for a in assignments}
+    contract_by_idx = {c["task_index"]: c.get("code_contract") for c in code_contracts}
     final_tasks = []
     for i, t in enumerate(pathed_tasks):
         merged = dict(t)
@@ -875,6 +1120,10 @@ def _assemble_draft_blueprint(session_id: str) -> dict:
         elif t.get("agent_id"):
             merged["performer_kind"] = "agent"
             merged["performer_id"] = t["agent_id"]
+        # PM v5: attach code_contract (may be None for non-code tasks).
+        # Stored on merged['code_contract'] as a dict; persist_svc will
+        # json.dumps when writing to the DB column.
+        merged["code_contract"] = contract_by_idx.get(i)
         final_tasks.append(merged)
 
     title = (concept or {}).get("title") if isinstance(concept, dict) else None
