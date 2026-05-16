@@ -1,5 +1,5 @@
 import type { Task } from "../../queries/useProjectQuery";
-import { useAgents } from "../../queries/useTeamQuery";
+import { useAgents, useCrews } from "../../queries/useTeamQuery";
 
 export type TaskAction =
   | { kind: "edit"; task: Task }
@@ -35,13 +35,28 @@ function TaskNode({
   onAction: (action: TaskAction) => void;
 }) {
   const dotColor = STATUS_DOT[task.status] ?? STATUS_DOT.pending;
-  // Resolve agent_id → role for display. Uses the full agents list
-  // (not the assignable-filtered one) so even auto-generated agents
-  // surface their real role instead of a truncated id slice.
+  // Resolve the assigned performer for the bottom-row label.
+  // PM v4 tasks are bound either to a single agent (legacy + setup
+  // tasks) or to a Crew (most production tasks). The DB column
+  // `agent_id` is null for Crew rows by design — they route through
+  // workflow_svc._run_crew on performer_kind="crew". So we must check
+  // performer_kind first and only fall through to agent_id for the
+  // legacy single-agent path. Without this branch every Crew task on
+  // the canvas reads "待指定" even when Phase 5 picked one.
   const { data: agents } = useAgents();
-  const agentLabel = task.agent_id
-    ? (agents ?? []).find((a) => a.id === task.agent_id)?.role ?? task.agent_id.slice(-8)
-    : "待指定";
+  const { data: crews } = useCrews();
+  const performerLabel = (() => {
+    if (task.performer_kind === "crew") {
+      const pid = task.performer_id;
+      if (!pid) return "Crew: 待指定";
+      const c = (crews ?? []).find((x) => x.id === pid);
+      return c ? `Crew: ${c.name}` : `Crew: ${pid.slice(-8)}`;
+    }
+    // performer_kind === "agent" or undefined (legacy / setup task)
+    const pid = task.performer_id ?? task.agent_id;
+    if (!pid) return "待指定";
+    return (agents ?? []).find((a) => a.id === pid)?.role ?? pid.slice(-8);
+  })();
 
   const canEdit = !projectRunning && task.status !== "running";
   const canPause = task.status === "running";
@@ -150,7 +165,7 @@ function TaskNode({
           <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
           <circle cx="12" cy="7" r="4" />
         </svg>
-        <span className="truncate">{agentLabel}</span>
+        <span className="truncate">{performerLabel}</span>
       </div>
 
       {/* Detail */}
