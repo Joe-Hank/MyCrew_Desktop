@@ -69,44 +69,121 @@ QA_TASK_DETAIL = """对整个项目进行最终质量审查 — 必须基于真�
 调 `emit_output` 提交 {verdict, overall_score, issues, summary}。"""
 
 
-def _normalize_tasks(tasks: list[dict]) -> list[dict]:
-    """Ensure a final_qa task exists; auto-append one depending on all terminal nodes.
+# Bounded auto-repair contract. The Debugger only runs when final_qa
+# reported verdict != "pass". Centralised here so Plan Maker's prompt
+# can't widen the scope by accident.
+DEBUGGER_TASK_DETAIL = """读 final_qa 的产物（`.mycrew/tasks/` 里 final_qa 那一行对应的 out.json），
+拿到 issues 列表后**在白名单作用域内**逐条尝试修复。
 
-    Also forces the canonical QA detail onto whichever task is final_qa —
-    Plan Maker tends to write vague verification instructions that miss
-    the .mycrew/ + file-existence check. Centralizing here means the QA
-    contract is enforced regardless of what Plan Maker wrote.
+# 白名单（你可以修的）
+1. **Unity 编译错** — typo / 缺 using / 命名空间错 / 缺分号。用 `read_console` + `validate_script` + `script_apply_edits`。
+2. **Missing Reference** — scene 里 prefab 引用没绑上。用 `find_gameobjects` 定位 + `manage_components` 重绑。
+3. **资产导入设置错** — TextureType / pixel-per-unit / sprite mode 配错。用 `manage_asset` 改导入参数。
+4. **路径大小写 / 平台分隔符** — Unity 跨平台敏感。检查后改文件名。
+5. **emit_output payload 格式错** — agent 提交了 dict 没 wrap 成 schema 要求的形状。修对应 sub/*_out.json 文件。
+
+# 严禁（不在你作用域里）
+- ❌ 生成新文件来填补缺失产出（让原 Crew 重跑去，不是你的事）
+- ❌ 动业务逻辑（"为什么吃豆人不吃豆子"是设计问题，不是 bug）
+- ❌ 跨 task 改设计 / 改架构
+- ❌ 改 task.output_paths / output_schema / acceptance_notes
+
+# 流程
+1. `read_file_local` 读 final_qa 的 out.json，拿到 issues
+2. 对每条 issue 判断：在白名单内 → 尝试修复 + 调 git_diff_* 看自己改了什么
+3. 不在白名单 → 不动，归到 `issues_escalated`
+4. 修完调 `manage_editor` (Refresh) + `read_console` 确认没引入新错误
+5. 调 emit_output 提交 {verdict, fixes_applied, issues_escalated, summary}
+
+# 输出契约
+- `verdict`: "fixed"（白名单内全修了）/ "partial"（部分修了部分升级）/ "escalated"（全升级，没修）
+- `fixes_applied`: [{issue: str, files: [path...], action: str}]
+- `issues_escalated`: [{issue: str, reason: "out of scope"|"not safely fixable"}]
+- `summary`: 一段中文，告诉用户改了什么 + 还剩什么需要人工
+
+# 一轮就停
+不要试图重跑 final_qa，也不要循环修复。修一轮 → emit → 由用户决定是否再来一轮。"""
+
+DEBUGGER_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "verdict": {"type": "string", "enum": ["fixed", "partial", "escalated"]},
+        "fixes_applied": {"type": "array", "items": {"type": "object"}},
+        "issues_escalated": {"type": "array", "items": {"type": "object"}},
+        "summary": {"type": "string"},
+    },
+    "required": ["verdict", "fixes_applied", "issues_escalated", "summary"],
+}
+
+
+def _normalize_tasks(tasks: list[dict]) -> list[dict]:
+    """Ensure a final_qa task exists + auto-append a Debugger task after it.
+
+    Also forces the canonical QA + Debugger detail strings onto whichever
+    tasks have the matching kind — Plan Maker tends to write vague
+    verification instructions that miss the .mycrew/ + file-existence
+    check; same applies to debugger. Centralising here means both
+    contracts are enforced regardless of what Plan Maker wrote.
     """
     out = [dict(t) for t in tasks]
 
+    # ── final_qa ──────────────────────────────────────────────────
     qa_idx = next(
         (i for i, t in enumerate(out) if t.get("kind") == "final_qa"),
         None,
     )
-    if qa_idx is not None:
-        out[qa_idx]["detail"] = QA_TASK_DETAIL
-        return out
-
-    terminal = [
-        i for i in range(len(out))
-        if not any(i in t.get("deps", []) for t in out)
-    ]
-    out.append({
-        "title": "质量检查",
-        "detail": QA_TASK_DETAIL,
-        "deps": terminal,
-        "kind": "final_qa",
-        "output_schema": {
-            "type": "object",
-            "properties": {
-                "verdict": {"type": "string", "enum": ["pass", "warn", "fail"]},
-                "overall_score": {"type": "number"},
-                "issues": {"type": "array", "items": {"type": "object"}},
-                "summary": {"type": "string"},
+    if qa_idx is None:
+        terminal = [
+            i for i in range(len(out))
+            if not any(i in t.get("deps", []) for t in out)
+        ]
+        out.append({
+            "title": "质量检查",
+            "detail": QA_TASK_DETAIL,
+            "deps": terminal,
+            "kind": "final_qa",
+            "output_schema": {
+                "type": "object",
+                "properties": {
+                    "verdict": {"type": "string", "enum": ["pass", "warn", "fail"]},
+                    "overall_score": {"type": "number"},
+                    "issues": {"type": "array", "items": {"type": "object"}},
+                    "summary": {"type": "string"},
+                },
+                "required": ["verdict", "overall_score", "issues", "summary"],
             },
-            "required": ["verdict", "overall_score", "issues", "summary"],
-        },
-    })
+        })
+        qa_idx = len(out) - 1
+    else:
+        out[qa_idx]["detail"] = QA_TASK_DETAIL
+
+    # ── debugger (depends on final_qa) ─────────────────────────────
+    # Always appended; the dispatch layer skips it when final_qa
+    # reports verdict="pass" (no issues to fix). Scheduling it as a
+    # real DAG node — instead of a conditional callback — keeps the
+    # canvas honest about what's planned and gives the user a card to
+    # rerun / inspect / chat with.
+    dbg_idx = next(
+        (i for i, t in enumerate(out) if t.get("kind") == "debugger"),
+        None,
+    )
+    if dbg_idx is None:
+        out.append({
+            "title": "自动修复（受限）",
+            "detail": DEBUGGER_TASK_DETAIL,
+            "deps": [qa_idx],
+            "kind": "debugger",
+            "output_schema": DEBUGGER_OUTPUT_SCHEMA,
+        })
+    else:
+        out[dbg_idx]["detail"] = DEBUGGER_TASK_DETAIL
+        out[dbg_idx]["output_schema"] = DEBUGGER_OUTPUT_SCHEMA
+        # ensure dep on final_qa even if Plan Maker omitted it
+        deps = list(out[dbg_idx].get("deps") or [])
+        if qa_idx not in deps:
+            deps.append(qa_idx)
+            out[dbg_idx]["deps"] = deps
+
     return out
 
 

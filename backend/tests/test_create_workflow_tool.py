@@ -59,27 +59,55 @@ def patched_tool(env):
 # ── _normalize_tasks ─────────────────────────────────────────────
 
 class TestNormalize:
-    def test_final_qa_present_unchanged(self):
+    def test_final_qa_present_keeps_one_qa(self):
+        """When the planner already wrote a final_qa task we don't add
+        a second one, but the canonical QA_TASK_DETAIL still overwrites
+        whatever vague verification text the LLM wrote. A debugger task
+        is also appended (depends on the QA)."""
         tasks = [
             {"title": "t1", "deps": [], "kind": "regular"},
             {"title": "qa", "deps": [0], "kind": "final_qa"},
         ]
         out = _normalize_tasks(tasks)
-        assert len(out) == 2
+        # 1 regular + 1 final_qa (kept) + 1 debugger (auto-appended)
+        assert len(out) == 3
         assert sum(1 for t in out if t.get("kind") == "final_qa") == 1
+        assert sum(1 for t in out if t.get("kind") == "debugger") == 1
 
-    def test_final_qa_auto_appended_with_terminal_deps(self):
+    def test_final_qa_and_debugger_auto_appended(self):
         tasks = [
             {"title": "t1", "deps": []},
             {"title": "t2", "deps": []},
         ]
         out = _normalize_tasks(tasks)
-        assert len(out) == 3
-        qa = out[-1]
-        assert qa["kind"] == "final_qa"
+        # 2 user + 1 final_qa + 1 debugger
+        assert len(out) == 4
+        qa = next(t for t in out if t.get("kind") == "final_qa")
         assert set(qa["deps"]) == {0, 1}
         for f in ("verdict", "overall_score", "issues", "summary"):
             assert f in qa["output_schema"]["properties"]
+
+        dbg = next(t for t in out if t.get("kind") == "debugger")
+        # debugger depends on final_qa (whichever index that landed at)
+        qa_idx = out.index(qa)
+        assert qa_idx in dbg["deps"]
+        for f in ("verdict", "fixes_applied", "issues_escalated", "summary"):
+            assert f in dbg["output_schema"]["properties"]
+
+    def test_existing_debugger_keeps_canonical_detail_and_dep(self):
+        """Planner-written debugger task: detail overwritten, dep on
+        final_qa enforced even if planner forgot it."""
+        tasks = [
+            {"title": "t1", "deps": []},
+            {"title": "qa", "deps": [0], "kind": "final_qa"},
+            {"title": "dbg", "deps": [], "kind": "debugger"},  # missing dep!
+        ]
+        out = _normalize_tasks(tasks)
+        assert sum(1 for t in out if t.get("kind") == "debugger") == 1
+        dbg = next(t for t in out if t.get("kind") == "debugger")
+        qa = next(t for t in out if t.get("kind") == "final_qa")
+        qa_idx = out.index(qa)
+        assert qa_idx in dbg["deps"]
 
 
 # ── _run() behaviour with patched I/O ────────────────────────────
@@ -98,7 +126,8 @@ class TestRun:
         assert isinstance(result, str)
         assert "Workflow created" in result
         assert len(env["crud"]._tables["projects"]) == 1
-        assert len(env["crud"]._tables["tasks"]) == 3  # 2 user + 1 final_qa
+        # 2 user + 1 auto-appended final_qa + 1 auto-appended debugger
+        assert len(env["crud"]._tables["tasks"]) == 4
 
     def test_session_bound_to_project(self, env, patched_tool):
         tool = make_create_workflow_tool("incep_test")

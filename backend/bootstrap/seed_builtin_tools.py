@@ -17,9 +17,11 @@ log = structlog.get_logger()
 
 # (name, script_path_hint) — script_path is informational; not loaded
 BUILTIN_TOOLS: list[tuple[str, str]] = [
-    # Filesystem MCP
-    ("read_file", "src/tools/builtin/mcp_filesystem/read_file.py"),
-    ("list_directory", "src/tools/builtin/mcp_filesystem/list_directory.py"),
+    # Filesystem: only the local-fs versions are wired up to agents
+    # (read_file_local / list_directory_local further down). The
+    # mcp_filesystem variants duplicated the same surface area without
+    # being used by anyone; removed 2026-05-16 after the agent-tool
+    # audit. The old DB rows are cleaned up by scripts/cleanup_orphan_tools.py.
     # Blender MCP — base + extended (8 extra)
     ("execute_blender_code", "src/tools/builtin/mcp_blender/execute_code.py"),
     ("get_scene_info", "src/tools/builtin/mcp_blender/get_scene_info.py"),

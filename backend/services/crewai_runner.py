@@ -157,8 +157,10 @@ def _load_builtin_tools(tool_names: list[str], ctx: dict | None = None) -> list:
 
     try:
         # MCP-backed
-        from src.tools.builtin.mcp_filesystem.read_file import ReadFile
-        from src.tools.builtin.mcp_filesystem.list_directory import ListDirectory
+        # NOTE: mcp_filesystem.read_file / list_directory removed
+        # 2026-05-16 — overlapped with local versions
+        # (read_file_local / list_directory_local) which everyone uses;
+        # no agent was assigned the MCP variants. Drop the imports too.
         from src.tools.builtin.mcp_blender.execute_code import ExecuteBlenderCode
         from src.tools.builtin.mcp_blender.get_scene_info import GetSceneInfo
         from src.tools.builtin.mcp_blender.more_tools import (
@@ -192,9 +194,6 @@ def _load_builtin_tools(tool_names: list[str], ctx: dict | None = None) -> list:
 
     # MCP / context-free tool classes — instantiate per-call
     static_registry = {
-        # filesystem
-        "read_file": ReadFile,
-        "list_directory": ListDirectory,
         # blender
         "execute_blender_code": ExecuteBlenderCode,
         "get_scene_info": GetSceneInfo,

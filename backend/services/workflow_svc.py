@@ -418,6 +418,36 @@ class WorkflowService:
             completed_outputs = self._outputs.get(project_id, {})
             task_input = runner.prepare_input(task_id, completed_outputs)
 
+            # Debugger short-circuit: when final_qa already reported
+            # verdict="pass" there's nothing to debug, so we skip the
+            # LLM call entirely and mark the task done with a
+            # synthesised summary. Saves a Crew-budget round of tokens
+            # on every clean project. Implemented here (not in
+            # prepare_input) so the IO viewer still has a real in.md.
+            if task_input.kind == "debugger":
+                fast_path = await self._maybe_skip_debugger(task_input)
+                if fast_path is not None:
+                    if project_id not in self._outputs:
+                        self._outputs[project_id] = {}
+                    self._outputs[project_id][task_id] = fast_path
+                    await self._save_task_input(project_id, task_id, task_input)
+                    await self._save_task_output(
+                        project_id, task_id,
+                        TaskOutput(task_id=task_id, raw_text="",
+                                   structured=fast_path),
+                    )
+                    await crud.update_by_id("tasks", task_id, {
+                        "validation_errors": None,
+                        "last_error": None,
+                        "last_error_kind": None,
+                    })
+                    events = harness.complete_task(task_id)
+                    await self._persist_task_state(project_id, task_id, harness)
+                    await self._persist_project_state(project_id, harness)
+                    await event_bus.publish_all(events)
+                    self._schedule_ready_tasks(project_id, harness, runner)
+                    return
+
             # Persist the prepared input next to the future output so the
             # IO viewer / agent guidance chat can read what the task was
             # actually told to do (previously the input panel was always
@@ -495,6 +525,35 @@ class WorkflowService:
             await event_bus.publish_all(events)
         finally:
             self._run_tasks.pop(key, None)
+
+    async def _maybe_skip_debugger(self, task_input: Any) -> dict | None:
+        """Return a synthesised debugger output if final_qa already passed
+        (so the LLM call can be skipped), or None if the debugger needs
+        to actually run.
+
+        The debugger task depends on final_qa (set up by
+        create_workflow._normalize_tasks). We look at the final_qa
+        output in the upstream_outputs the runner built — if its
+        verdict is "pass", no issues exist to fix.
+        """
+        for dep_id, dep_output in (task_input.upstream_outputs or {}).items():
+            if not isinstance(dep_output, dict):
+                continue
+            dep_row = await crud.get_by_id("tasks", dep_id)
+            if not dep_row or dep_row.get("kind") != "final_qa":
+                continue
+            if dep_output.get("verdict") == "pass":
+                return {
+                    "verdict": "fixed",
+                    "fixes_applied": [],
+                    "issues_escalated": [],
+                    "summary": (
+                        "final_qa 报告 verdict=pass，没有 issue 需要修复；"
+                        "Debugger 自动跳过 LLM 调用。"
+                    ),
+                }
+            break
+        return None
 
     async def _run_agent(self, project_id: str, task_id: str,
                           task_input: Any) -> str:

@@ -57,6 +57,13 @@ def _resolve_tools(tool_name_to_id: dict[str, str], names: list[str]) -> list[st
 #   - QA agents only read + emit_output verdict.
 
 _UNIVERSAL = ["write_file", "read_file_local", "list_directory_local", "emit_output", "mkdir"]
+# Git tools — Unity projects are git repos; the implementing developer
+# needs status / log / diff to know what they changed and add/commit
+# to checkpoint progress.
+_GIT = [
+    "git_status", "git_log", "git_diff_unstaged", "git_diff_staged",
+    "git_add", "git_commit",
+]
 _UNITY_FULL = [
     "manage_scene", "find_gameobjects", "manage_gameobject", "manage_components",
     "create_script", "script_apply_edits", "apply_text_edits", "validate_script",
@@ -65,6 +72,11 @@ _UNITY_FULL = [
     "execute_menu_item", "read_console", "find_in_file", "execute_custom_tool",
     "manage_camera", "manage_graphics", "manage_packages", "manage_physics",
     "refresh_unity", "batch_execute",
+    # Added 2026-05-16 (P1 audit): Unity docs / reflection / test runner.
+    # Doc lookup + reflection let the dev answer "how do I use this API"
+    # without hallucinating; the test runner is how the Crew validates
+    # a checkpoint or QA proves a Crew's work actually compiles+runs.
+    "unity_docs", "unity_reflect", "run_tests", "get_test_job",
 ]
 _UNITY_ASSET_SUBSET = [
     "manage_asset", "manage_material", "manage_texture", "manage_graphics",
@@ -114,7 +126,11 @@ SEED_AGENTS: list[dict] = [
         "role": "Level Designer",
         "goal": "扫描上游已完成 task 的产物，生成场景装配清单（prefab/位置/层级/脚本挂载/引用）。",
         "backstory": "你是 Scene Assembly Crew 的 Head；也可以作为单 agent 出关卡设计文档。",
-        "tools": _UNIVERSAL + ["read_file_local", "list_directory_local"],
+        # _UNIVERSAL already includes read_file_local + list_directory_local;
+        # listing them again here produced duplicate tool instances at
+        # runtime (the original "ensure they're really there" intent
+        # was a copy-paste from before _UNIVERSAL grew those entries).
+        "tools": _UNIVERSAL,
     },
     # ── Executors ─────────────────────────────────────────────────
     {
@@ -145,7 +161,8 @@ SEED_AGENTS: list[dict] = [
         "role": "Animator",
         "goal": "按 Head spec 在 Blender 制作动画关键帧，导出 .anim 到 task.output_paths。",
         "backstory": "Animation Crew 的动画 Executor。",
-        "tools": _UNIVERSAL + _BLENDER + ["import_generated_asset"],
+        # _BLENDER already includes import_generated_asset.
+        "tools": _UNIVERSAL + _BLENDER,
     },
     {
         "role": "VFX Artist",
@@ -157,7 +174,8 @@ SEED_AGENTS: list[dict] = [
         "role": "Unity Developer",
         "goal": "按 Head spec 用 Unity MCP 实装：写脚本 / 装配场景 / 配引用。task.output_paths 是必产清单。",
         "backstory": "System Impl / UI Impl / Audio / Scene Assembly Crew 共用的实装 Executor。",
-        "tools": _UNIVERSAL + _UNITY_FULL,
+        # +_GIT (2026-05-16 P1): checkpoint progress + diff own changes.
+        "tools": _UNIVERSAL + _UNITY_FULL + _GIT,
     },
     {
         "role": "Audio Synthesizer",
@@ -170,7 +188,15 @@ SEED_AGENTS: list[dict] = [
         "role": "QA Engineer",
         "goal": "对照 PM 契约（task.output_paths / task.acceptance_notes）验收：文件存在 + 合法格式 + .meta 齐全。",
         "backstory": "所有 Crew 的最后一站。**不参考 Head spec 作为补充验收**；只看 PM 给的契约。",
-        "tools": _UNIVERSAL + ["find_in_file", "read_console", "manage_editor"],
+        # +run_tests/get_test_job (P1): when a Crew claims it produced
+        # a runnable artifact (script / scene), QA can fire Unity's
+        # test runner to confirm — much stronger signal than "file
+        # exists + size > 0".
+        "tools": (
+            _UNIVERSAL
+            + ["find_in_file", "read_console", "manage_editor"]
+            + ["run_tests", "get_test_job"]
+        ),
     },
     # ── Standalone single agents (not part of any Crew) ────────────
     # Phase 5 can pick these directly when a task is pure documentation
@@ -180,6 +206,33 @@ SEED_AGENTS: list[dict] = [
         "goal": "产出叙事 / 文案 / 剧情设计文档。",
         "backstory": "纯文档输出的单 agent。不实装、不画图。",
         "tools": _UNIVERSAL,
+    },
+    # Debugger — runs after final_qa when verdict != pass, attempts
+    # *bounded* automated repair. See create_workflow._normalize_tasks
+    # for the canonical task detail + scope guard. Tool set mirrors
+    # Unity Developer + git so it can: read console errors, inspect
+    # missing references, edit C# scripts, re-import assets, and diff
+    # its own work before / after. NO Blender, NO ComfyUI — Debugger
+    # is not allowed to regenerate missing assets (that's a Crew job).
+    {
+        "role": "Debugger",
+        "goal": (
+            "读 final_qa 的 issue 列表，在白名单作用域内（编译错 / "
+            "Missing Reference / 资产导入设置 / 路径大小写 / "
+            "emit_output payload 格式）逐条尝试修复；超出作用域的升级到 "
+            "issues_escalated，由用户人工处理。"
+        ),
+        "backstory": (
+            "你是项目尾的受限修复 agent。**严禁**：①生成新文件来填补缺失产出（让原 "
+            "Crew 重跑去）；②动业务逻辑（'为什么吃豆人不吃豆子'是设计问题，不是 bug）；"
+            "③跨 task 改设计。**只做明显的低风险修复**。每个修复完成调 emit_output "
+            "报告改了什么文件、为什么。"
+        ),
+        "tools": (
+            _UNIVERSAL
+            + _UNITY_FULL
+            + _GIT
+        ),
     },
 ]
 
