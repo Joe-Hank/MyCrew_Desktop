@@ -59,6 +59,10 @@ function InceptionDrawer() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [createdProjectId, setCreatedProjectId] = useState<string | null>(null);
   const [lastPrompt, setLastPrompt] = useState<string>("");
+  // Surface backend / network failures from the pre-session template
+  // picker — without this, mutateAsync errors silently and the confirm
+  // button looks "unresponsive" (user report 2026-05-16).
+  const [templateError, setTemplateError] = useState<string>("");
 
   // Active-round streaming state — accumulates `inception.delta` deltas.
   const [streamingText, setStreamingText] = useState("");
@@ -777,21 +781,42 @@ function InceptionDrawer() {
                   // so the user doesn't have to type a dummy message just
                   // to trigger the choice flow. On confirm we create the
                   // session with template_id pre-baked.
+                  //
+                  // Error UX (added 2026-05-16 after the "确认 button doesn't
+                  // respond" report): the previous version silently swallowed
+                  // mutateAsync failures, so a backend 500 / connection drop
+                  // would look like "button is dead". We now surface the
+                  // exception via the templateError state below.
                   <InitialTemplateChoice
+                    isCreating={createSession.isPending}
+                    error={templateError}
                     onConfirm={async (templateId) => {
-                      if (!selectedLlm) return;
+                      setTemplateError("");
+                      if (!selectedLlm) {
+                        setTemplateError("请先在顶部下拉里选一个 LLM 提供方再点确认。");
+                        return;
+                      }
                       const fullLlmId = selectedModel
                         ? `${selectedLlm}:${selectedModel}`
                         : selectedLlm;
-                      const res = await createSession.mutateAsync({
-                        llm_id: fullLlmId,
-                        thinking_mode: thinking,
-                        mode: "create",
-                        template_id: templateId,
-                      });
-                      if (res.ok && res.data) {
-                        const id = (res.data as { id: string }).id;
-                        setActiveSession(id);
+                      try {
+                        const res = await createSession.mutateAsync({
+                          llm_id: fullLlmId,
+                          thinking_mode: thinking,
+                          mode: "create",
+                          template_id: templateId,
+                        });
+                        if (res.ok && res.data) {
+                          const id = (res.data as { id: string }).id;
+                          setActiveSession(id);
+                        } else {
+                          setTemplateError(
+                            `后端拒绝创建会话：${(res as unknown as { error?: { message?: string } }).error?.message ?? "未知错误"}`,
+                          );
+                        }
+                      } catch (err) {
+                        const msg = err instanceof Error ? err.message : String(err);
+                        setTemplateError(`创建会话失败：${msg}`);
                       }
                     }}
                   />
@@ -1387,8 +1412,18 @@ function summariseRound(bp: Blueprint | null, fallback: string): string {
  *  user lands on something immediately. */
 function InitialTemplateChoice({
   onConfirm,
+  isCreating = false,
+  error = "",
 }: {
   onConfirm: (templateId: string) => void;
+  /** Pending state of the upstream createSession mutation. While true,
+   *  the ChoicePanel's 确认 button below is disabled with a spinner-ish
+   *  label so a slow backend doesn't make the click look like a no-op. */
+  isCreating?: boolean;
+  /** Inline error rendered above the prompt — surfaces network /
+   *  backend failures from the parent's mutateAsync. Empty string =
+   *  no error banner. */
+  error?: string;
 }) {
   const { data: templates, isLoading } = useTemplates();
   if (isLoading || !templates) {
@@ -1409,10 +1444,28 @@ function InitialTemplateChoice({
   return (
     <div className="flex h-full items-start justify-center p-2">
       <div className="w-full max-w-2xl">
+        {error && (
+          <div
+            className="mb-3 rounded-md px-3 py-2 text-xs"
+            style={{
+              backgroundColor: "rgba(239, 68, 68, 0.10)",
+              color: "#b91c1c",
+              border: "1px solid rgba(239, 68, 68, 0.30)",
+            }}
+            role="alert"
+          >
+            {error}
+          </div>
+        )}
         <ChoicePanel
-          prompt="你想做什么类型的 Unity 游戏？选一个模板，我会基于它的目录结构来设计任务。"
+          prompt={
+            isCreating
+              ? "正在创建会话，请稍候…"
+              : "你想做什么类型的 Unity 游戏？选一个模板，我会基于它的目录结构来设计任务。"
+          }
           options={options}
           onConfirm={onConfirm}
+          confirmDisabled={isCreating}
         />
       </div>
     </div>

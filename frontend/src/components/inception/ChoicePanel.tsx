@@ -14,6 +14,10 @@ interface Props {
   /** Once confirmed the panel turns to a read-only history bubble. */
   readOnly?: boolean;
   confirmedValue?: string;
+  /** Lock the 确认 button (e.g. while the upstream createSession
+   *  mutation is in flight). Card preview still works so the user can
+   *  switch their pick while waiting. */
+  confirmDisabled?: boolean;
 }
 
 /** Two-step card selector: click to preview → "确认" button appears →
@@ -21,6 +25,7 @@ interface Props {
  *  and the template-selection step. */
 function ChoicePanel({
   prompt, options, onConfirm, readOnly = false, confirmedValue,
+  confirmDisabled = false,
 }: Props) {
   const [selected, setSelected] = useState<string | null>(
     confirmedValue ?? null,
@@ -99,10 +104,11 @@ function ChoicePanel({
         <div className="mt-3 flex justify-end">
           <button
             onClick={() => onConfirm(selected)}
-            className="rounded-md px-4 py-1.5 text-xs font-medium text-white"
+            disabled={confirmDisabled}
+            className="rounded-md px-4 py-1.5 text-xs font-medium text-white transition-opacity disabled:cursor-not-allowed disabled:opacity-50"
             style={{ backgroundColor: "var(--color-brand-500)" }}
           >
-            确认
+            {confirmDisabled ? "处理中…" : "确认"}
           </button>
         </div>
       )}
