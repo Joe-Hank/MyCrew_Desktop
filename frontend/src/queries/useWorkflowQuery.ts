@@ -54,8 +54,22 @@ export function useAbortProject() {
 export function useRetryTask() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ projectId, taskId }: { projectId: string; taskId: string }) =>
-      apiFetch(`/workflow/projects/${projectId}/tasks/${taskId}/retry`, { method: "POST" }),
+    mutationFn: ({
+      projectId,
+      taskId,
+      cleanupArtifacts = true,
+    }: {
+      projectId: string;
+      taskId: string;
+      // When false, preserves the previous run's sub/ + out.* on disk —
+      // user opt-out from the retry confirm dialog. Backend default is
+      // also true; the param is explicit for symmetry with the dialog.
+      cleanupArtifacts?: boolean;
+    }) =>
+      apiFetch(
+        `/workflow/projects/${projectId}/tasks/${taskId}/retry?cleanup_artifacts=${cleanupArtifacts}`,
+        { method: "POST" },
+      ),
     onSuccess: (_d, { projectId }) => {
       qc.invalidateQueries({ queryKey: ["project", projectId] });
     },

@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useProject, type Task } from "../queries/useProjectQuery";
-import { useRetryTask } from "../queries/useWorkflowQuery";
+import { useRetryTask, useUpdateTask } from "../queries/useWorkflowQuery";
 import { useEvent } from "../hooks/useEvent";
 import { useQueryClient } from "@tanstack/react-query";
 import { usePrefsStore } from "../stores/usePrefsStore";
@@ -10,6 +10,7 @@ import CanvasBlueprint from "../components/task/CanvasBlueprint";
 import TaskEditModal from "../components/task/TaskEditModal";
 import AgentChatDrawer from "../components/task/AgentChatDrawer";
 import IoViewerDrawer from "../components/task/IoViewerDrawer";
+import { useDismissibleConfirm } from "../components/common/ConfirmDialog";
 import type { TaskAction } from "../components/task/TaskNode";
 import type { SubStepAction } from "../components/task/SubAgentCard";
 
@@ -26,9 +27,10 @@ function TaskPage() {
   const setLastProjectId = usePrefsStore((s) => s.setLastProjectId);
   const { data: project, isLoading } = useProject(projectId);
   const retryTask = useRetryTask();
+  const updateTask = useUpdateTask();
   const qc = useQueryClient();
+  const confirm = useDismissibleConfirm();
   const [drawer, setDrawer] = useState<DrawerState>(null);
-  const [retryConfirm, setRetryConfirm] = useState<Task | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
 
   // ── Last-opened project persistence ────────────────────────────
@@ -106,71 +108,205 @@ function TaskPage() {
   // on every parent re-render (a WS event firing in the background was
   // re-creating onSelect/onAction → cascading through ReactFlow and
   // briefly disconnecting edges during a drag).
-  const handleAction = useCallback((action: TaskAction) => {
-    switch (action.kind) {
-      case "edit":
-        setDrawer({ kind: "edit", task: action.task });
-        break;
-      case "retry":
-        setRetryConfirm(action.task);
-        break;
-      case "agent_chat":
-        setDrawer({ kind: "agent_chat", task: action.task });
-        break;
-      case "view_io":
-        setDrawer({ kind: "view_io", task: action.task, direction: action.direction });
-        break;
-      case "pause":
-        break;
-    }
-  }, []);
+  // Shared confirm flow used by both task-level and sub-card retry
+  // actions. Stage B (2026-05-16) replaces the old inline modal with
+  // the dismissible-dialog framework: the user picks whether to wipe
+  // the previous run's sub/ + out.* on disk, and may tick "不再显示"
+  // to lock in that choice for future retries.
+  const askRetryAndRun = useCallback(
+    async (task: Task) => {
+      if (!projectId) return;
+
+      // Stage D: if this task already finished cleanly AND has done
+      // downstream tasks, warn that the downstream will keep using its
+      // pre-retry artifacts (we intentionally don't cascade-reset them
+      // — user said: 不用管它，只重做指定任务，给用户弹窗提醒).
+      // Read project.tasks lazily — `const tasks` is declared after
+      // this useCallback, so we resolve it from `project` directly.
+      const allTasks = project?.tasks ?? [];
+      const downstreamDoneCount =
+        task.status === "done"
+          ? allTasks.filter(
+              (t) => t.status === "done" && (t.deps || []).includes(task.id),
+            ).length
+          : 0;
+      if (downstreamDoneCount > 0) {
+        const downstreamRes = await confirm({
+          dialogId: "retry.downstream_warning",
+          title: "下游任务已完成，仍要重做当前任务？",
+          body: (
+            <>
+              <p>
+                有 {downstreamDoneCount} 个下游任务已经 done。重做
+                「{task.title}」<strong>只会跑当前任务</strong>，
+                下游不会自动重跑，它们引用的还是当前任务上一轮的产物。
+              </p>
+              <p className="mt-2 text-xs text-gray-500">
+                如果你只是想换个产物给下游用，没问题；如果下游也要按新产物重新跑，
+                请到下游任务卡上分别点击重试。
+              </p>
+            </>
+          ),
+          options: [
+            { value: "proceed", label: "知道了，继续", primary: true },
+            { value: "cancel", label: "取消", tone: "subtle" },
+          ],
+          allowDismiss: true,
+        });
+        if (!downstreamRes.choice || downstreamRes.choice === "cancel") return;
+      }
+
+      const result = await confirm({
+        dialogId: "retry.cleanup_artifacts",
+        title: `重新执行「${task.title}」？`,
+        body: (
+          <>
+            <p>下游依赖任务可能也会受影响。</p>
+            <p className="mt-2 text-xs text-gray-500">
+              产物清除：会删掉本任务上一轮的 <code>sub/</code> + <code>out.json/md</code>，
+              避免下次校验把残留文件当成「已生成」。如果你确认上轮输出本身没问题、只是下游挂了，
+              可以选保留。
+            </p>
+          </>
+        ),
+        options: [
+          { value: "cleanup", label: "清除产物并重试（推荐）", primary: true },
+          { value: "keep", label: "保留产物直接重试" },
+          { value: "cancel", label: "取消", tone: "subtle" },
+        ],
+        allowDismiss: true,
+      });
+      if (!result.choice || result.choice === "cancel") return;
+      retryTask.mutate({
+        projectId,
+        taskId: task.id,
+        cleanupArtifacts: result.choice === "cleanup",
+      });
+    },
+    [confirm, projectId, retryTask, project?.tasks],
+  );
+
+  // Stage C: AgentChatDrawer hands us the user's guidance messages
+  // ("用 64x64 不是 32x32" etc). We offer to append them to the task's
+  // detail (so the retry prompt actually sees them) before triggering
+  // the same retry flow as a plain retry click.
+  const askApplyGuidanceAndRetry = useCallback(
+    async (task: Task, userMessages: string[]) => {
+      if (!projectId || userMessages.length === 0) return;
+
+      const guidanceBlock = formatGuidanceAppendix(userMessages);
+      const result = await confirm({
+        dialogId: "retry.guidance_to_detail",
+        title: "把对话反馈写进任务详情？",
+        body: (
+          <>
+            <p>下面这段会追加到任务详情末尾，下次重试时 Agent 就能看到：</p>
+            <pre
+              className="mt-2 max-h-48 overflow-auto rounded-md bg-gray-50 p-2 text-[11px] leading-relaxed text-gray-700"
+              style={{ whiteSpace: "pre-wrap" }}
+            >
+              {guidanceBlock}
+            </pre>
+          </>
+        ),
+        options: [
+          { value: "append", label: "追加并重试（推荐）", primary: true },
+          { value: "skip", label: "不追加直接重试" },
+          { value: "cancel", label: "取消", tone: "subtle" },
+        ],
+        allowDismiss: true,
+      });
+      if (!result.choice || result.choice === "cancel") return;
+
+      if (result.choice === "append") {
+        // The Task type stores `detail` as nullable; existing content
+        // is preserved with a blank-line separator so successive rounds
+        // accumulate readably instead of running together.
+        const merged = task.detail
+          ? `${task.detail.trimEnd()}\n\n${guidanceBlock}`
+          : guidanceBlock;
+        try {
+          await updateTask.mutateAsync({ taskId: task.id, detail: merged });
+        } catch (err) {
+          // Surface but don't block — the user still wanted to retry.
+          console.warn("failed to append guidance to task.detail", err);
+        }
+      }
+
+      // Close the chat drawer + invoke the existing cleanup confirm.
+      setDrawer(null);
+      await askRetryAndRun({ ...task, detail: result.choice === "append"
+        ? formatGuidanceAppendix(userMessages)
+        : task.detail });
+    },
+    [confirm, projectId, updateTask, askRetryAndRun],
+  );
+
+  const handleAction = useCallback(
+    (action: TaskAction) => {
+      switch (action.kind) {
+        case "edit":
+          setDrawer({ kind: "edit", task: action.task });
+          break;
+        case "retry":
+          void askRetryAndRun(action.task);
+          break;
+        case "agent_chat":
+          setDrawer({ kind: "agent_chat", task: action.task });
+          break;
+        case "view_io":
+          setDrawer({ kind: "view_io", task: action.task, direction: action.direction });
+          break;
+        case "pause":
+          break;
+      }
+    },
+    [askRetryAndRun],
+  );
 
   // PM v4: sub-card actions route through the same drawer machinery as
   // task-level actions, but carry an extra stepIndex so the backend
   // scopes guidance / IO viewer to a single Crew step.
-  const handleSubStepAction = useCallback((action: SubStepAction) => {
-    switch (action.kind) {
-      case "edit":
-        // Edit-from-step is a Head-only Q6 path: open the Head's spec
-        // (sub/0_head_out.json) for direct JSON editing. For now route
-        // to the same TaskEditModal — Stage G will refine.
-        setDrawer({ kind: "edit", task: action.task });
-        break;
-      case "retry":
-        setRetryConfirm(action.task);
-        break;
-      case "pause":
-        // Pause the Crew (task-level). Backend's _run_crew checks the
-        // pause flag at every step boundary.
-        break;
-      case "sub_chat":
-        setDrawer({
-          kind: "agent_chat",
-          task: action.task,
-          stepIndex: action.stepIndex,
-          agentId: action.agentId,
-        });
-        break;
-      case "sub_view_io":
-        setDrawer({
-          kind: "view_io",
-          task: action.task,
-          direction: "out",
-          stepIndex: action.stepIndex,
-        });
-        break;
-    }
-  }, []);
+  const handleSubStepAction = useCallback(
+    (action: SubStepAction) => {
+      switch (action.kind) {
+        case "edit":
+          // Edit-from-step is a Head-only Q6 path: open the Head's spec
+          // (sub/0_head_out.json) for direct JSON editing. For now route
+          // to the same TaskEditModal — Stage G will refine.
+          setDrawer({ kind: "edit", task: action.task });
+          break;
+        case "retry":
+          void askRetryAndRun(action.task);
+          break;
+        case "pause":
+          // Pause the Crew (task-level). Backend's _run_crew checks the
+          // pause flag at every step boundary.
+          break;
+        case "sub_chat":
+          setDrawer({
+            kind: "agent_chat",
+            task: action.task,
+            stepIndex: action.stepIndex,
+            agentId: action.agentId,
+          });
+          break;
+        case "sub_view_io":
+          setDrawer({
+            kind: "view_io",
+            task: action.task,
+            direction: "out",
+            stepIndex: action.stepIndex,
+          });
+          break;
+      }
+    },
+    [askRetryAndRun],
+  );
 
   const handleSelect = useCallback((task: Task) => {
     setSelectedTaskId(task.id);
   }, []);
-
-  function handleRetryConfirmed() {
-    if (!retryConfirm || !projectId) return;
-    retryTask.mutate({ projectId, taskId: retryConfirm.id });
-    setRetryConfirm(null);
-  }
 
   if (!projectId) {
     return (
@@ -249,6 +385,9 @@ function TaskPage() {
               stepIndex={drawer.stepIndex}
               agentId={drawer.agentId}
               onClose={() => setDrawer(null)}
+              onApplyAndRetry={(userMessages) =>
+                void askApplyGuidanceAndRetry(drawer.task, userMessages)
+              }
             />
           </div>
         )}
@@ -270,38 +409,23 @@ function TaskPage() {
         <TaskEditModal task={drawer.task} onClose={() => setDrawer(null)} />
       )}
 
-      {/* Retry confirmation */}
-      {retryConfirm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
-          <div
-            className="w-full max-w-xs rounded-lg bg-white p-5 shadow-xl"
-            style={{ border: "1px solid var(--color-border-soft)" }}
-          >
-            <h3 className="mb-2 text-sm font-semibold">确认重新执行</h3>
-            <p className="mb-4 text-xs" style={{ color: "var(--color-ink-faint)" }}>
-              确定要重新执行任务「{retryConfirm.title}」吗？下游依赖任务可能也会受影响。
-            </p>
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={() => setRetryConfirm(null)}
-                className="rounded-lg border px-3 py-1.5 text-xs"
-                style={{ borderColor: "var(--color-border-soft)" }}
-              >
-                取消
-              </button>
-              <button
-                onClick={handleRetryConfirmed}
-                disabled={retryTask.isPending}
-                className="rounded-lg bg-orange-500 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
-              >
-                确认重跑
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* Retry uses the dismissible ConfirmDialog (Stage B, 2026-05-16);
+          the previous inline modal was removed in favor of the shared
+          provider mounted at app root. */}
     </div>
   );
+}
+
+// Stable header used to fence guidance appendices written by Stage C.
+// Future passes can grep for it to strip the block when running an
+// "undo guidance" action, or to dedupe across multiple chat rounds.
+const GUIDANCE_HEADER = "--- 用户补充指导（来自任务诊断对话） ---";
+
+function formatGuidanceAppendix(userMessages: string[]): string {
+  const body = userMessages
+    .map((m) => `- ${m.replace(/\s+/g, " ").trim()}`)
+    .join("\n");
+  return `${GUIDANCE_HEADER}\n${body}`;
 }
 
 export default TaskPage;

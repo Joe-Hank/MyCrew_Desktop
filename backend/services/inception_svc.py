@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
+import uuid
 from collections import defaultdict
 
 import structlog
@@ -10,9 +12,114 @@ import structlog
 from infra.llm.base import LlmMessage
 from infra.llm.gateway import llm_gateway
 from infra.repo import crud
+from infra.repo.sqlite_repo import get_db
 from api.ws import manager
 
 log = structlog.get_logger()
+
+
+# ── Streaming partial-message persistence (Stage F, 2026-05-16) ────
+#
+# The frontend used to lose context when the user refreshed mid-stream
+# because the assistant message wasn't persisted until the LLM finished.
+# This writer creates an empty row at stream start and flushes the
+# accumulated text to disk no more than once per second; if the user
+# refreshes, GET /inceptions/sessions/{id} sees the partial content and
+# the chat looks like it was just paused. WS deltas continue normally —
+# the only on-disk write is the periodic UPDATE.
+#
+# Per-message TTL is just the lifetime of the streaming call; nothing
+# persists about the throttle state across requests.
+_PARTIAL_FLUSH_INTERVAL_S = 1.0
+
+
+class _StreamingAssistantMessage:
+    """One-shot helper that owns the assistant row for a streaming round.
+
+    Usage:
+        writer = _StreamingAssistantMessage(session_id)
+        await writer.start()
+        async for delta in llm_gateway.stream(...):
+            full_text += delta.text
+            await writer.note(full_text)
+        await writer.finalise(full_text)
+    """
+
+    def __init__(self, session_id: str) -> None:
+        self.session_id = session_id
+        self._msg_id = f"msg_{uuid.uuid4().hex[:12]}"
+        self._last_flush_ts: float = 0.0
+        self._last_flushed_len: int = 0
+        self._started = False
+
+    @property
+    def message_id(self) -> str:
+        return self._msg_id
+
+    async def start(self) -> None:
+        """Insert an empty assistant row so a refresh-mid-stream client
+        can see the chat layout even before any tokens arrive."""
+        await crud.insert("inception_messages", {
+            "id": self._msg_id,
+            "session_id": self.session_id,
+            "role": "assistant",
+            "content": "",
+        })
+        self._started = True
+
+    async def note(self, full_text: str) -> None:
+        """Throttled UPDATE — call after every delta. Writes at most
+        once per ``_PARTIAL_FLUSH_INTERVAL_S`` seconds, and only when
+        the text actually grew since the last flush."""
+        if not self._started:
+            return
+        now = time.monotonic()
+        if (now - self._last_flush_ts) < _PARTIAL_FLUSH_INTERVAL_S:
+            return
+        if len(full_text) == self._last_flushed_len:
+            return
+        await self._flush(full_text)
+        self._last_flush_ts = now
+
+    async def finalise(self, full_text: str) -> None:
+        """Force a write of the complete text (bypasses the throttle)."""
+        if not self._started:
+            # Caller never started a stream — fall back to an INSERT so
+            # downstream behaviour matches the pre-Stage-F shape.
+            await crud.insert("inception_messages", {
+                "id": self._msg_id,
+                "session_id": self.session_id,
+                "role": "assistant",
+                "content": full_text,
+            })
+            return
+        await self._flush(full_text)
+
+    async def abort(self) -> None:
+        """Drop the reserved row — caller is bailing to a fallback path
+        that will create its own message. Prevents the partial+fallback
+        double-message bug when Plan Maker fails and we drop into
+        _legacy_stream."""
+        if not self._started:
+            return
+        try:
+            await crud.delete_by_id("inception_messages", self._msg_id)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("inception.partial_abort_failed",
+                        msg_id=self._msg_id, error=str(exc))
+        self._started = False
+
+    async def _flush(self, full_text: str) -> None:
+        # Use raw db.execute so we don't tickle update_by_id's get_by_id
+        # round-trip on every flush — this runs ~1Hz and we want the
+        # smallest write footprint we can get away with.
+        db = await get_db()
+        await db.execute(
+            "UPDATE inception_messages SET content = ? WHERE id = ?",
+            (full_text, self._msg_id),
+        )
+        await db.commit()
+        self._last_flushed_len = len(full_text)
 
 SYSTEM_PROMPT = """你是 MyCrew 项目立项助手。唯一职责：把用户的**项目设计需求**拆解为可执行任务。
 
@@ -539,6 +646,12 @@ class InceptionService:
         provider_id, model_name = await self._resolve_llm(llm_id)
         thinking_mode = bool(session.get("thinking_mode", 0))
 
+        # Stage F: persist the partial message ~1Hz so refresh-mid-stream
+        # recovers without polling. The assistant row is created upfront
+        # and UPDATEd as tokens arrive.
+        writer = _StreamingAssistantMessage(session_id)
+        await writer.start()
+
         full_text = ""
         async for delta in llm_gateway.stream(
             provider_id, model_name, messages,
@@ -550,12 +663,9 @@ class InceptionService:
                     "session_id": session_id,
                     "text": delta.text,
                 })
+                await writer.note(full_text)
 
-        await crud.insert("inception_messages", {
-            "session_id": session_id,
-            "role": "assistant",
-            "content": full_text,
-        }, id_prefix="msg_")
+        await writer.finalise(full_text)
         await manager.broadcast("inception.message", {
             "session_id": session_id,
             "role": "assistant",
@@ -921,6 +1031,15 @@ class InceptionService:
         main_loop = asyncio.get_running_loop()
         step_count = {"n": 0}
 
+        # Stage F: persist partial assistant text per CrewAI step so a
+        # refresh mid-Plan-Maker keeps the chat readable. Granularity is
+        # one flush per step (coarser than _legacy_stream's per-second
+        # cadence) — CrewAI doesn't expose token-level streaming so
+        # there's nothing finer to capture here.
+        partial_writer = _StreamingAssistantMessage(session_id)
+        await partial_writer.start()
+        partial_text = {"buf": ""}
+
         def _step_cb(step: object) -> None:
             step_count["n"] += 1
             text = self._extract_text_from_step(step)
@@ -944,6 +1063,15 @@ class InceptionService:
                             "session_id": session_id,
                             "text": text + "\n\n",
                         }),
+                        main_loop,
+                    )
+                    # Stage F: stretch the partial buffer + schedule a
+                    # flush on the main loop. The throttle in note() keeps
+                    # the disk write rate sane even if CrewAI fires many
+                    # steps in quick succession.
+                    partial_text["buf"] += text + "\n\n"
+                    asyncio.run_coroutine_threadsafe(
+                        partial_writer.note(partial_text["buf"]),
                         main_loop,
                     )
             except Exception as exc:
@@ -971,12 +1099,21 @@ class InceptionService:
             await self._probe(session_id, "kickoff_failed", error=str(exc)[:200])
             log.warning("inception.crewai_failed_falling_back_to_legacy",
                         session_id=session_id, error=str(exc))
+            # Stage F: either we finalise the partial row with whatever
+            # the step buffer accumulated, or we abort it so the fallback
+            # path doesn't produce a duplicate assistant bubble. Workflow-
+            # already-created → finalise with whatever we got + return;
+            # otherwise abort and let _legacy_stream insert fresh.
             early = await self._finish_if_workflow_created_this_round(
                 session_id, had_project_before,
                 reason=f"Plan Maker 中断（{exc}）",
             )
             if early is not None:
+                await partial_writer.finalise(
+                    partial_text["buf"].strip() or f"⚠️ Plan Maker 中断（{exc}）"
+                )
                 return early
+            await partial_writer.abort()
             await manager.broadcast("inception.delta", {
                 "session_id": session_id,
                 "text": (
@@ -989,12 +1126,11 @@ class InceptionService:
         full_text = str(getattr(result, "raw", result) or "").strip()
         await self._probe(session_id, "result_unpacked", text_chars=len(full_text))
 
-        # Persist assistant message + broadcast final message event
-        await crud.insert("inception_messages", {
-            "session_id": session_id,
-            "role": "assistant",
-            "content": full_text,
-        }, id_prefix="msg_")
+        # Stage F: finalise the partial row created at stream start with
+        # the LLM's authoritative output (not the step-buffer guess). If
+        # CrewAI never fired step_cb, the writer still started — finalise
+        # writes the full text into the prereserved row.
+        await partial_writer.finalise(full_text)
         await manager.broadcast("inception.message", {
             "session_id": session_id,
             "role": "assistant",

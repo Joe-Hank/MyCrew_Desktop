@@ -203,6 +203,7 @@ def _load_builtin_tools(tool_names: list[str], ctx: dict | None = None) -> list:
             ctx.get("task_id") or "",
             ctx.get("output_schema") or {},
             ctx.get("project_root"),
+            ctx.get("output_paths") or None,
         ),
         # 8-bit audio synthesis (Audio Crew executor)
         "synth_8bit_sfx": lambda: make_synth_8bit_sfx_tool(ctx.get("project_root")),
@@ -334,6 +335,10 @@ async def run_task_with_crewai(
         "project_root": project_root,
         "task_id": task_input.task_id,
         "output_schema": task_input.output_schema or {},
+        # Stage E: forward the PM's must-produce file list (may be None)
+        # so emit_output can verify each entry exists regardless of
+        # which schema field the agent puts them in.
+        "output_paths": task_input.output_paths,
     }
     tools = await _resolve_agent_tools(agent_row, tool_ctx)
 
@@ -503,12 +508,21 @@ async def run_crew_step_with_crewai(
     # For QA we honour the full task.output_schema (PM contract). For
     # head/executors the schema is loose (Q4: dict accepted) — pass {}.
     bound_schema = parent_output_schema if step_role == "qa" else {}
+    # Stage E: the QA step is the only one bound to the parent task_id
+    # (its emit_output is what workflow_svc reads downstream), so it's
+    # the right place to enforce the parent's output_paths contract.
+    # Intermediate steps emit into per-step namespaces and aren't held
+    # to the parent's file list.
+    bound_expected_paths = (
+        parent_output_paths if step_role == "qa" else None
+    )
 
     tool_ctx = {
         "project_id": project_id,
         "project_root": project_root,
         "task_id": step_task_key,
         "output_schema": bound_schema,
+        "output_paths": bound_expected_paths,
     }
     tools = await _resolve_agent_tools(agent_row, tool_ctx)
 

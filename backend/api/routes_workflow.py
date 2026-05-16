@@ -49,9 +49,23 @@ async def abort_project(project_id: str, reason: str = ""):
 
 
 @router.post("/projects/{project_id}/tasks/{task_id}/retry")
-async def retry_task(project_id: str, task_id: str):
+async def retry_task(
+    project_id: str,
+    task_id: str,
+    cleanup_artifacts: bool = Query(True),
+):
+    """Re-run a failed task.
+
+    `cleanup_artifacts=true` (default) wipes the task's previous outputs
+    (sub/ dir + out.json/md) before the rerun. The frontend's confirm
+    dialog drives this flag from the user's choice; setting it false
+    preserves residue for the cases where the user knows the prior run
+    only failed downstream of emit_output.
+    """
     try:
-        await workflow_svc.retry_task(project_id, task_id)
+        await workflow_svc.retry_task(
+            project_id, task_id, cleanup_artifacts=cleanup_artifacts,
+        )
         return {"ok": True, "data": {"task_id": task_id, "state": "running"}}
     except KeyError:
         raise HTTPException(404, detail="project or task not found")

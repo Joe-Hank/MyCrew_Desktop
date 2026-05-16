@@ -282,16 +282,81 @@ class WorkflowService:
                  project_id=project_id, tasks_aborted=len(non_terminal),
                  reason=reason)
 
-    async def retry_task(self, project_id: str, task_id: str) -> None:
+    async def retry_task(
+        self,
+        project_id: str,
+        task_id: str,
+        cleanup_artifacts: bool = True,
+    ) -> None:
+        """Re-run a failed task.
+
+        ``cleanup_artifacts`` (Stage B, 2026-05-16): when true (the
+        default), wipe ``<OUTPUT_DIR>/<pid>/<tid>/{sub,out.json,out.md}``
+        before re-scheduling. Without cleanup, the previous run's residue
+        can pass emit_output's path-existence check (the agent claims new
+        paths that *happen* to still be on disk) — that's the stale-state
+        trap Stage B is built to close. Users who set this false from the
+        confirm dialog explicitly opt into "keep the residue and rerun
+        anyway" — useful when the previous emit_output was correct but a
+        downstream step failed.
+        """
         async with self._get_project_lock(project_id):
             harness = self._get_harness(project_id)
             runner = self._runners[project_id]
+
+            if cleanup_artifacts:
+                await self._cleanup_task_artifacts(project_id, task_id)
 
             events = harness.retry_task(task_id)
             await self._persist_task_state(project_id, task_id, harness)
             await event_bus.publish_all(events)
 
             self._schedule_task(project_id, task_id, harness, runner)
+
+    async def _cleanup_task_artifacts(
+        self, project_id: str, task_id: str,
+    ) -> None:
+        """Remove a task's previous outputs so the next run starts clean.
+
+        Wipes the per-task output dir's ``sub/`` directory plus the
+        top-level ``out.json`` / ``out.md`` ; leaves ``in.md`` / ``in.json``
+        intact because those describe the *task itself* (PM contract +
+        upstream context), not the previous run's outputs. The task row's
+        ``io_out_ref`` column is cleared in the same pass so the IO viewer
+        doesn't display a path that no longer exists.
+        """
+        import shutil
+        from bootstrap.paths import OUTPUT_DIR
+
+        task_dir = OUTPUT_DIR / project_id / task_id
+        removed: list[str] = []
+        sub_dir = task_dir / "sub"
+        if sub_dir.exists():
+            try:
+                shutil.rmtree(sub_dir)
+                removed.append("sub/")
+            except OSError as exc:
+                log.warning("retry.cleanup_sub_failed",
+                            task_id=task_id, error=str(exc))
+        for name in ("out.json", "out.md"):
+            f = task_dir / name
+            if f.exists():
+                try:
+                    f.unlink()
+                    removed.append(name)
+                except OSError as exc:
+                    log.warning("retry.cleanup_file_failed",
+                                task_id=task_id, file=name, error=str(exc))
+
+        # Clear the DB pointer so the IO viewer doesn't tease a stale file.
+        try:
+            await crud.update_by_id("tasks", task_id, {"io_out_ref": None})
+        except Exception as exc:  # noqa: BLE001
+            log.warning("retry.cleanup_db_clear_failed",
+                        task_id=task_id, error=str(exc))
+
+        log.info("retry.artifacts_cleaned",
+                 task_id=task_id, removed=removed or ["(nothing)"])
 
     async def recover(self) -> list[str]:
         rows = await crud.get_all("projects", "state = ?", (ProjectState.RUNNING,))

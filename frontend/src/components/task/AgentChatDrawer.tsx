@@ -25,6 +25,7 @@ function AgentChatDrawer({
   stepIndex,
   agentId,
   onClose,
+  onApplyAndRetry,
 }: {
   task: Task;
   /** PM v4: when set, the chat is scoped to a single Crew step. */
@@ -33,6 +34,12 @@ function AgentChatDrawer({
    *  guidance helper so it can mention the agent role in its replies. */
   agentId?: string;
   onClose: () => void;
+  /** Stage C (2026-05-16): the parent owns the "append guidance to
+   *  task.detail + trigger retry" flow because it needs the confirm
+   *  dialog provider and the retry mutation. The drawer hands it the
+   *  joined-user-message string; parent decides whether to write it
+   *  back and how to phrase the prompt. */
+  onApplyAndRetry?: (userMessages: string[]) => void;
 }) {
   const [input, setInput] = useState("");
   const introContent = stepIndex !== undefined
@@ -122,6 +129,15 @@ function AgentChatDrawer({
     messages.filter((m) => m.role === "user").slice(-8).map((m) => m.content),
   );
   const visiblePending = chat.pending.filter((p) => !recentUserContents.has(p.content));
+
+  // Stage C: enable the "应用并重试" button only when the user has
+  // actually said something. The intro bubble is from the agent and
+  // doesn't count.
+  const userMessages = messages
+    .filter((m) => m.role === "user")
+    .map((m) => m.content.trim())
+    .filter((s) => s.length > 0);
+  const canApply = !!onApplyAndRetry && userMessages.length > 0 && !chat.thinking;
 
   return (
     <div
@@ -240,6 +256,30 @@ function AgentChatDrawer({
           </div>
         )}
       </div>
+
+      {/* Apply-and-retry — only when the user has typed at least once
+          and we have a handler from the parent. Hidden during a step-
+          scoped chat because step-level retry isn't supported yet
+          (see audit P0 #1). */}
+      {canApply && stepIndex === undefined && (
+        <div
+          className="flex items-center justify-end gap-2 px-3 py-2 text-xs"
+          style={{
+            backgroundColor: "var(--color-card)",
+            borderTop: "1px solid var(--color-border-soft)",
+            color: "var(--color-ink-muted)",
+          }}
+        >
+          <span>聊完了？</span>
+          <button
+            onClick={() => onApplyAndRetry?.(userMessages)}
+            className="rounded-md px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90"
+            style={{ backgroundColor: "var(--color-brand-500)" }}
+          >
+            应用反馈并重试
+          </button>
+        </div>
+      )}
 
       {/* Composer */}
       <div

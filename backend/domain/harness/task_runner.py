@@ -17,6 +17,10 @@ class TaskInput:
     output_schema: dict
     upstream_outputs: dict[str, Any]
     kind: str = "regular"
+    # Stage E (2026-05-16): PM's must-produce file list, decoupled from
+    # the output_schema's free-form field names. Empty list = "no files
+    # expected"; None = legacy task with no contract (skip the check).
+    output_paths: list[str] | None = None
 
 
 @dataclass
@@ -57,6 +61,27 @@ class TaskRunner:
             except (json.JSONDecodeError, TypeError):
                 output_schema = {}
 
+        # output_paths is stored as a JSON string when present; null
+        # means "no PM contract on file list" (legacy / iterate tasks).
+        raw_paths = task.get("output_paths")
+        output_paths: list[str] | None
+        if raw_paths is None:
+            output_paths = None
+        elif isinstance(raw_paths, str):
+            try:
+                parsed = json.loads(raw_paths)
+                output_paths = (
+                    [p for p in parsed if isinstance(p, str)]
+                    if isinstance(parsed, list)
+                    else None
+                )
+            except (json.JSONDecodeError, TypeError):
+                output_paths = None
+        elif isinstance(raw_paths, list):
+            output_paths = [p for p in raw_paths if isinstance(p, str)]
+        else:
+            output_paths = None
+
         return TaskInput(
             task_id=task_id,
             title=task.get("title", ""),
@@ -65,6 +90,7 @@ class TaskRunner:
             output_schema=output_schema,
             upstream_outputs=upstream,
             kind=task.get("kind", "regular"),
+            output_paths=output_paths,
         )
 
     def process_output(self, task_id: str, raw_text: str,

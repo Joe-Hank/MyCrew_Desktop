@@ -104,6 +104,11 @@ class EmitOutput(GuardedLocalTool):
     # Project root for path-existence checks. Set by the factory; empty
     # disables the check (creation-mode tasks where root isn't bound yet).
     _bound_root: ClassVar[str] = ""
+    # Stage E (2026-05-16): explicit list of files this task is contracted
+    # to produce. Independent of payload field names — the agent could
+    # report them under any key (or omit them) and this still verifies.
+    # Empty list = "no files expected"; default empty disables the check.
+    _bound_expected_paths: ClassVar[tuple[str, ...]] = ()
 
     def _run(self, payload: dict) -> str:
         task_id = self._bound_task_id
@@ -133,15 +138,44 @@ class EmitOutput(GuardedLocalTool):
                 "Please correct the payload and call emit_output again."
             )
 
-        # Path-existence check: any string under a *_path / path field is
-        # treated as a project-relative path the agent claims to have
-        # written. If the file isn't actually on disk, reject — this is
-        # the wall against "described but never built" outputs.
+        # Path-existence check: agents must not claim files that aren't
+        # really on disk. Two layers:
+        #
+        #   1. Bound contract (Stage E, 2026-05-16) — when the PM declared
+        #      task.output_paths, every one of those paths must exist
+        #      regardless of where the agent put them in the payload.
+        #      This catches the schema-field-name bypass: the old
+        #      heuristic walked payload looking for keys in a hard-coded
+        #      whitelist; an agent using a custom field (e.g.
+        #      "generated_files") could ship phantom paths past it.
+        #
+        #   2. Heuristic — recursively scan payload for whitelisted path
+        #      fields. Still useful as defence in depth for tasks with
+        #      no PM-declared output_paths (iterate flow, legacy rows).
         if self._bound_root:
-            missing = self._verify_paths(payload)
-            if missing:
-                listed = ", ".join(missing[:6])
-                more = f" (and {len(missing) - 6} more)" if len(missing) > 6 else ""
+            missing_contract = self._verify_expected_paths()
+            if missing_contract:
+                listed = ", ".join(missing_contract[:6])
+                more = (
+                    f" (and {len(missing_contract) - 6} more)"
+                    if len(missing_contract) > 6 else ""
+                )
+                return (
+                    f"[ValidationError] task.output_paths declares files "
+                    f"that do not exist on disk yet: {listed}{more}. The "
+                    "PM contract says these must be produced before you "
+                    "call emit_output — actually create them first (use "
+                    "write_file / unity_write_file / comfy_enqueue_workflow "
+                    "etc.) and try again."
+                )
+
+            missing_payload = self._verify_paths(payload)
+            if missing_payload:
+                listed = ", ".join(missing_payload[:6])
+                more = (
+                    f" (and {len(missing_payload) - 6} more)"
+                    if len(missing_payload) > 6 else ""
+                )
                 return (
                     f"[ValidationError] payload references file_path(s) that "
                     f"do not exist on disk: {listed}{more}. You must actually "
@@ -161,11 +195,24 @@ class EmitOutput(GuardedLocalTool):
         were declared)."""
         candidates: list[str] = []
         _gather_paths(payload, candidates)
+        return self._missing_paths(candidates)
+
+    def _verify_expected_paths(self) -> list[str]:
+        """Same shape as _verify_paths but reads from the PM-declared
+        ``task.output_paths`` contract bound by the factory. Empty
+        contract = nothing to check."""
+        if not self._bound_expected_paths:
+            return []
+        return self._missing_paths(list(self._bound_expected_paths))
+
+    def _missing_paths(self, candidates: list[str]) -> list[str]:
         if not candidates:
             return []
         root_p = Path(self._bound_root)
         missing: list[str] = []
         for rel in candidates:
+            if not isinstance(rel, str) or not rel.strip():
+                continue
             p = Path(rel)
             absolute = p if p.is_absolute() else (root_p / p)
             try:
@@ -180,23 +227,28 @@ def make_emit_output_tool(
     task_id: str,
     output_schema: dict | None,
     project_root: str | None = None,
+    expected_paths: list[str] | None = None,
 ) -> EmitOutput:
-    """Factory: bind a task_id + output_schema (+ project root) to a fresh
-    tool subclass.
+    """Factory: bind a task_id + output_schema (+ project root + PM's
+    must-produce file list) to a fresh tool subclass.
 
-    The LLM sees only `payload` in the function signature; task_id, schema
-    and project_root are closure-bound so the model can't spoof them.
+    The LLM sees only `payload` in the function signature; everything
+    else is closure-bound so the model can't spoof them.
 
-    project_root is used to verify any file_path/path values in the
-    payload actually exist on disk before accepting the output.
+    ``expected_paths`` (Stage E, 2026-05-16) is the PM's explicit
+    must-produce list (task.output_paths). When provided, every entry
+    is verified to exist on disk before emit_output succeeds — the
+    payload field-name whitelist is no longer the sole defence.
     """
     schema = output_schema or {}
     root = project_root or ""
+    expected = tuple(expected_paths or ())
 
     class _Bound(EmitOutput):
         _bound_task_id: ClassVar[str] = task_id
         _bound_schema: ClassVar[dict] = schema
         _bound_root: ClassVar[str] = root
+        _bound_expected_paths: ClassVar[tuple[str, ...]] = expected
 
     return _Bound()
 
