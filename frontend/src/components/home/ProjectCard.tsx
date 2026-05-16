@@ -12,6 +12,7 @@ import {
 } from "../../queries/useProjectQuery";
 import { useCreateTask } from "../../queries/useWorkflowQuery";
 import { useAgents, useCrews } from "../../queries/useTeamQuery";
+import { performerLabel } from "../../lib/performer";
 import { useCreateInceptionSession } from "../../queries/useInceptionQuery";
 import { useInceptionStore } from "../../stores/useInceptionStore";
 import { usePrefsStore } from "../../stores/usePrefsStore";
@@ -583,25 +584,14 @@ function TaskStatusIndicator({ status }: { status: string }) {
  *  feedback: 仅展开详情 / 不重复标题 / 不再可编辑. */
 function TaskPill({ task, index }: { task: Task; index: number }) {
   const [expanded, setExpanded] = useState(false);
-  // Resolve the assigned performer (agent OR crew). PM v4 tasks bind
-  // by performer_kind/performer_id; the legacy agent_id column is
-  // null for Crew rows, so a plain agent lookup would render every
-  // Crew task as "待指定". Same shape as TaskNode.performerLabel —
-  // kept inline here because the home card is a smaller surface and
-  // doesn't import any task-page code.
+  // Performer resolution shared with TaskNode / TaskBlueprintEditor
+  // — see lib/performer.ts. Centralising stops the "fixed in one
+  // surface, forgotten in another" drift that bit us on the
+  // 2026-05-16 audit (three near-identical implementations with
+  // different fallback strings).
   const { data: agents } = useAgents();
   const { data: crews } = useCrews();
-  const performerLabel = (() => {
-    if (task.performer_kind === "crew") {
-      const pid = task.performer_id;
-      if (!pid) return "Crew: 待指定";
-      const c = (crews ?? []).find((x) => x.id === pid);
-      return c ? `Crew: ${c.name}` : `Crew: ${pid.slice(-8)}`;
-    }
-    const pid = task.performer_id ?? task.agent_id;
-    if (!pid) return "待指定";
-    return (agents ?? []).find((a) => a.id === pid)?.role ?? pid.slice(-8);
-  })();
+  const performer = performerLabel(task, { agents, crews });
 
   return (
     <div
@@ -626,7 +616,7 @@ function TaskPill({ task, index }: { task: Task; index: number }) {
               <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
               <circle cx="12" cy="7" r="4" />
             </svg>
-            <span className="truncate">{performerLabel}</span>
+            <span className="truncate">{performer}</span>
           </div>
         </div>
         <span className="mt-1 shrink-0">

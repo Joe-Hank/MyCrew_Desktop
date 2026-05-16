@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { Blueprint } from "../../queries/useInceptionQuery";
 import { useAssignableAgents } from "../../queries/useAgentQuery";
 import { useCrews } from "../../queries/useTeamQuery";
+import { performerLabel } from "../../lib/performer";
 
 interface Props {
   blueprint: Blueprint;
@@ -50,22 +51,8 @@ function TaskBlueprintEditor({
     setEditingIndex(tasks.length - 1);
   }
 
-  // PM v4: prefer performer_kind/performer_id when set (filled by
-  // planner_orchestrator._assemble_draft_blueprint). Fall back to
-  // legacy agent_id for PM v3 / iterate / setup tasks.
-  function performerLabel(task: BpTask): string {
-    const kind = task.performer_kind;
-    const pid = task.performer_id ?? task.agent_id;
-    if (kind === "crew") {
-      if (!pid) return "Crew: 待指定";
-      const c = crewList.find((x) => x.id === pid);
-      return c ? `Crew: ${c.name}` : "Crew: 未知";
-    }
-    // kind === "agent" or undefined (legacy)
-    if (!pid) return task.kind === "final_qa" ? "QA-Agent" : "待指定";
-    const a = agentList.find((x) => x.id === pid);
-    return a?.role ?? "未知 Agent";
-  }
+  // Performer label resolution lives in lib/performer.ts so the three
+  // surfaces (canvas / inception draft / home card) stay consistent.
 
   return (
     <div className="flex h-full flex-col">
@@ -88,8 +75,12 @@ function TaskBlueprintEditor({
         <button
           onClick={onReEvaluate}
           disabled={reEvaluating}
-          className="rounded-lg border bg-white px-3 py-1 text-xs transition-colors hover:bg-zinc-50 disabled:opacity-50"
-          style={{ borderColor: "var(--color-border-soft)", color: "var(--color-ink-label)" }}
+          className="rounded-lg border px-3 py-1 text-xs transition-opacity hover:opacity-90 disabled:opacity-50"
+          style={{
+            backgroundColor: "var(--color-card)",
+            borderColor: "var(--color-border-soft)",
+            color: "var(--color-ink-label)",
+          }}
         >
           {reEvaluating ? "评估中..." : "AI 复核"}
         </button>
@@ -99,22 +90,35 @@ function TaskBlueprintEditor({
         {blueprint.tasks.map((task, i) => (
           <div
             key={i}
-            className="rounded-lg bg-white p-3"
-            style={{ border: "1px solid var(--color-border-soft)" }}
+            className="rounded-lg p-3"
+            style={{
+              backgroundColor: "var(--color-card)",
+              border: "1px solid var(--color-border-soft)",
+            }}
           >
             {editingIndex === i ? (
               <div className="space-y-2">
                 <input
                   value={task.title}
                   onChange={(e) => updateTask(i, { title: e.target.value })}
-                  className="w-full rounded-md bg-zinc-50 px-2 py-1.5 text-sm outline-none"
+                  className="w-full rounded-md px-2 py-1.5 text-sm outline-none"
+                  style={{
+                    backgroundColor: "var(--color-card-alt)",
+                    color: "var(--color-ink)",
+                    border: "1px solid var(--color-border-soft)",
+                  }}
                   placeholder="任务标题"
                 />
                 <textarea
                   value={task.detail}
                   onChange={(e) => updateTask(i, { detail: e.target.value })}
                   rows={3}
-                  className="w-full resize-none rounded-md bg-zinc-50 px-2 py-1.5 text-xs outline-none"
+                  className="w-full resize-none rounded-md px-2 py-1.5 text-xs outline-none"
+                  style={{
+                    backgroundColor: "var(--color-card-alt)",
+                    color: "var(--color-ink)",
+                    border: "1px solid var(--color-border-soft)",
+                  }}
                   placeholder="详细描述"
                 />
                 <div className="flex items-center gap-2 text-xs">
@@ -128,7 +132,12 @@ function TaskBlueprintEditor({
                         .filter((n) => !isNaN(n) && n >= 0 && n < blueprint.tasks.length && n !== i);
                       updateTask(i, { deps });
                     }}
-                    className="flex-1 rounded-md bg-zinc-50 px-2 py-1 text-xs outline-none"
+                    className="flex-1 rounded-md px-2 py-1 text-xs outline-none"
+                    style={{
+                      backgroundColor: "var(--color-card-alt)",
+                      color: "var(--color-ink)",
+                      border: "1px solid var(--color-border-soft)",
+                    }}
                     placeholder="如: 1,2"
                   />
                 </div>
@@ -170,7 +179,12 @@ function TaskBlueprintEditor({
                         });
                       }
                     }}
-                    className="flex-1 rounded-md bg-zinc-50 px-2 py-1 text-xs outline-none"
+                    className="flex-1 rounded-md px-2 py-1 text-xs outline-none"
+                    style={{
+                      backgroundColor: "var(--color-card-alt)",
+                      color: "var(--color-ink)",
+                      border: "1px solid var(--color-border-soft)",
+                    }}
                   >
                     <option value="">
                       {task.kind === "final_qa" ? "（默认 QA-Agent）" : "（待指定）"}
@@ -261,7 +275,7 @@ function TaskBlueprintEditor({
                       <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
                       <circle cx="12" cy="7" r="4" />
                     </svg>
-                    {performerLabel(task)}
+                    {performerLabel(task, { agents: agentList, crews: crewList })}
                   </span>
                   {task.deps.length > 0 && (
                     <span>依赖: {task.deps.map((d) => `#${d + 1}`).join(", ")}</span>
@@ -274,7 +288,7 @@ function TaskBlueprintEditor({
 
         <button
           onClick={addTask}
-          className="flex w-full items-center justify-center gap-1 rounded-lg border border-dashed py-2 text-xs transition-colors hover:bg-white/60"
+          className="flex w-full items-center justify-center gap-1 rounded-lg border border-dashed py-2 text-xs transition-opacity hover:opacity-70"
           style={{ borderColor: "var(--color-border-strong)", color: "var(--color-ink-muted)" }}
         >
           + 添加任务

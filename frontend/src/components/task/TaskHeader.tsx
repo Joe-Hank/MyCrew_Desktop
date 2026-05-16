@@ -295,7 +295,7 @@ async function askPauseConfirm(
           点击暂停后，<strong>正在执行的 LLM 调用不会被打断</strong>，
           要等本步骤跑完才真正停下来。下一个任务/步骤就不会再启动了。
         </p>
-        <p className="mt-2 text-xs text-gray-500">
+        <p className="mt-2 text-xs" style={{ color: "var(--color-ink-faint)" }}>
           这是 PM v4 软暂停的设计——避免把 LLM 半途砍掉留下半成品。
           如果想立刻终止整个项目，使用「终止」而不是「暂停」。
         </p>

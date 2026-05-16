@@ -141,7 +141,7 @@ function TaskPage() {
                 「{task.title}」<strong>只会跑当前任务</strong>，
                 下游不会自动重跑，它们引用的还是当前任务上一轮的产物。
               </p>
-              <p className="mt-2 text-xs text-gray-500">
+              <p className="mt-2 text-xs" style={{ color: "var(--color-ink-faint)" }}>
                 如果你只是想换个产物给下游用，没问题；如果下游也要按新产物重新跑，
                 请到下游任务卡上分别点击重试。
               </p>
@@ -162,7 +162,7 @@ function TaskPage() {
         body: (
           <>
             <p>下游依赖任务可能也会受影响。</p>
-            <p className="mt-2 text-xs text-gray-500">
+            <p className="mt-2 text-xs" style={{ color: "var(--color-ink-faint)" }}>
               产物清除：会删掉本任务上一轮的 <code>sub/</code> + <code>out.json/md</code>，
               避免下次校验把残留文件当成「已生成」。如果你确认上轮输出本身没问题、只是下游挂了，
               可以选保留。
@@ -210,8 +210,13 @@ function TaskPage() {
           <>
             <p>下面这段会追加到任务详情末尾，下次重试时 Agent 就能看到：</p>
             <pre
-              className="mt-2 max-h-48 overflow-auto rounded-md bg-gray-50 p-2 text-[11px] leading-relaxed text-gray-700"
-              style={{ whiteSpace: "pre-wrap" }}
+              className="mt-2 max-h-48 overflow-auto rounded-md p-2 text-[11px] leading-relaxed"
+              style={{
+                whiteSpace: "pre-wrap",
+                backgroundColor: "var(--color-surface-alt)",
+                color: "var(--color-ink-soft)",
+                border: "1px solid var(--color-border-soft)",
+              }}
             >
               {guidanceBlock}
             </pre>
