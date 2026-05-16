@@ -1,7 +1,12 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useProject, type Task } from "../queries/useProjectQuery";
-import { useRetryTask, useUpdateTask } from "../queries/useWorkflowQuery";
+import {
+  useRetryTask,
+  useUpdateTask,
+  usePauseProject,
+} from "../queries/useWorkflowQuery";
+import { askPauseConfirm } from "../lib/pauseConfirm";
 import { useEvent } from "../hooks/useEvent";
 import { useQueryClient } from "@tanstack/react-query";
 import { usePrefsStore } from "../stores/usePrefsStore";
@@ -28,6 +33,7 @@ function TaskPage() {
   const { data: project, isLoading } = useProject(projectId);
   const retryTask = useRetryTask();
   const updateTask = useUpdateTask();
+  const pauseProject = usePauseProject();
   const qc = useQueryClient();
   const confirm = useDismissibleConfirm();
   const [drawer, setDrawer] = useState<DrawerState>(null);
@@ -255,6 +261,26 @@ function TaskPage() {
     [confirm, projectId, updateTask, askRetryAndRun],
   );
 
+  // Per-task pause maps to project-level pause because the backend has
+  // no smaller cancellation unit — the workflow_svc walker pauses at
+  // step boundaries, not mid-LLM-call. Same dismissible confirm as the
+  // TaskHeader's pause button so the user only sees the explanation
+  // once across the whole UI surface.
+  const askPauseAndRun = useCallback(async () => {
+    if (!projectId) return;
+    const runningCount = (project?.tasks ?? []).filter(
+      (t) => t.status === "running",
+    ).length;
+    const ok = await askPauseConfirm(confirm, runningCount);
+    if (!ok) return;
+    try {
+      await pauseProject.mutateAsync(projectId);
+    } catch (exc) {
+      const msg = exc instanceof Error ? exc.message : String(exc);
+      alert(`暂停失败：${msg}`);
+    }
+  }, [confirm, projectId, project?.tasks, pauseProject]);
+
   const handleAction = useCallback(
     (action: TaskAction) => {
       switch (action.kind) {
@@ -271,10 +297,11 @@ function TaskPage() {
           setDrawer({ kind: "view_io", task: action.task, direction: action.direction });
           break;
         case "pause":
+          void askPauseAndRun();
           break;
       }
     },
-    [askRetryAndRun],
+    [askRetryAndRun, askPauseAndRun],
   );
 
   // PM v4: sub-card actions route through the same drawer machinery as

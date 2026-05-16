@@ -91,56 +91,63 @@ function SubAgentCard({
 
   return (
     <div
-      className="relative w-[150px] shrink-0 rounded-lg p-2.5"
+      // Match TaskNode's 240px width + p-3 padding + halo treatment so
+      // expanded Crew children look like miniature task cards rather
+      // than a separate compact list. User audit 2026-05-16: the
+      // 150px-wide variant felt disconnected from the rest of the canvas.
+      className={
+        "relative w-[240px] shrink-0 cursor-default rounded-lg p-3 transition-shadow " +
+        (status === "started" ? "task-halo-running " : "") +
+        (status === "failed" ? "task-halo-stalled " : "")
+      }
       style={{
         backgroundColor: "var(--color-card)",
         border: `1px solid ${status === "started" ? "var(--color-brand-500)" : "var(--color-border-soft)"}`,
-        boxShadow: status === "started"
-          ? "0 0 0 2px rgba(12, 140, 233, 0.10)"
+        boxShadow: status === "started" || status === "failed"
+          ? undefined
           : "0 1px 2px rgba(0, 0, 0, 0.04)",
       }}
       title={errorText || ""}
     >
-      {/* Role + step index header */}
-      <div className="mb-1.5 flex items-center justify-between gap-1">
+      {/* Role + step index header — same row layout as TaskNode's
+          top-row index pill + title pair. */}
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <span
+            className="flex h-5 items-center justify-center rounded-full px-1.5 text-[10px] font-semibold"
+            style={{
+              backgroundColor: ROLE_BADGE_BG[stepRole],
+              color: ROLE_BADGE_FG[stepRole],
+            }}
+          >
+            {ROLE_LABEL_ZH[stepRole]}
+          </span>
+          <span
+            className="text-sm font-medium truncate"
+            style={{ color: "var(--color-ink-soft)" }}
+            title={agentLabel}
+          >
+            {agentLabel}
+          </span>
+        </div>
         <span
-          className="rounded px-1.5 py-0.5 text-[9px] font-semibold"
-          style={{
-            backgroundColor: ROLE_BADGE_BG[stepRole],
-            color: ROLE_BADGE_FG[stepRole],
-          }}
-        >
-          {ROLE_LABEL_ZH[stepRole]}
-        </span>
-        <span
-          className="text-[10px]"
+          className="shrink-0 text-[10px]"
           style={{ color: "var(--color-ink-faint)" }}
         >
           {stepIndex + 1}/{totalSteps}
         </span>
       </div>
 
-      {/* Agent role */}
-      <div className="mb-1 flex items-center gap-1">
+      {/* Progress / status line — mirrors TaskNode's status row */}
+      <div
+        className="mb-3 flex items-center gap-1.5 text-[11px]"
+        style={{ color: "var(--color-ink-faint)" }}
+      >
         <span
           className="inline-block h-1.5 w-1.5 shrink-0 rounded-full"
           style={{ backgroundColor: STATUS_DOT[status] }}
         />
-        <span
-          className="truncate text-[11px] font-medium"
-          style={{ color: "var(--color-ink-soft)" }}
-          title={agentLabel}
-        >
-          {agentLabel}
-        </span>
-      </div>
-
-      {/* Progress / status line */}
-      <div
-        className="mb-2 text-[10px]"
-        style={{ color: "var(--color-ink-faint)" }}
-      >
-        {progressText}
+        <span className="truncate">{progressText}</span>
       </div>
 
       {/* Action bar */}
@@ -206,7 +213,7 @@ function MiniBtn({
       onClick={onClick}
       disabled={disabled}
       title={title}
-      className="rounded p-1 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-30"
+      className="rounded p-1 transition-opacity hover:opacity-70 disabled:cursor-not-allowed disabled:opacity-30"
       style={{ color: "var(--color-ink-muted)" }}
     >
       {renderIcon(icon)}

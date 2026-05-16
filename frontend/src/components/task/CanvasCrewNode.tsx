@@ -24,9 +24,10 @@ export interface CanvasCrewNodeData extends Record<string, unknown> {
 const HANDLE_HIT_SIZE = 20;
 const HANDLE_DOT_SIZE = 9;
 
-// Match SubAgentCard sizing:
-//   card width 150 + gap 8 + outer padding 12 each side + header room
-const SUB_CARD_WIDTH = 150;
+// Match SubAgentCard sizing (audit 2026-05-16: sub-cards bumped to
+// 240px to match TaskNode visual rhythm). Expanded width =
+//   N * 240 + (N-1) * 8 gap + 2 * 12 outer padding
+const SUB_CARD_WIDTH = 240;
 const SUB_CARD_GAP = 8;
 const EXPANDED_PADDING_X = 12;
 const COLLAPSED_WIDTH = 240;

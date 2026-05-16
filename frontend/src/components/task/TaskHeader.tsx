@@ -6,6 +6,7 @@ import {
 } from "../../queries/useWorkflowQuery";
 import { apiFetch, ApiError } from "../../net/api";
 import { useDismissibleConfirm } from "../common/ConfirmDialog";
+import { askPauseConfirm } from "../../lib/pauseConfirm";
 
 // Header redesign per Figma: NO background frame, NO border, info hugged
 // to the top-left of the page. Drop the breadcrumb/chip clutter; surface
@@ -273,41 +274,6 @@ function TaskHeader({ project, selectedTask }: Props) {
       </div>
     </div>
   );
-}
-
-// Stage G: cooperative-pause confirm. By design (PM v4 Q7) the pause
-// flag is only checked at task / Crew-step boundaries — the LLM call
-// currently in flight still finishes. This tells the user that up
-// front so they don't see a "stuck" project after clicking pause.
-async function askPauseConfirm(
-  confirm: ReturnType<typeof useDismissibleConfirm>,
-  runningCount: number,
-): Promise<boolean> {
-  const result = await confirm({
-    dialogId: "pause.waits_for_current_step",
-    title: "暂停将在当前步骤结束后生效",
-    body: (
-      <>
-        <p>
-          {runningCount > 0
-            ? `当前有 ${runningCount} 个任务正在跑。`
-            : "当前可能有任务步骤正在跑。"}
-          点击暂停后，<strong>正在执行的 LLM 调用不会被打断</strong>，
-          要等本步骤跑完才真正停下来。下一个任务/步骤就不会再启动了。
-        </p>
-        <p className="mt-2 text-xs" style={{ color: "var(--color-ink-faint)" }}>
-          这是 PM v4 软暂停的设计——避免把 LLM 半途砍掉留下半成品。
-          如果想立刻终止整个项目，使用「终止」而不是「暂停」。
-        </p>
-      </>
-    ),
-    options: [
-      { value: "ok", label: "明白了，暂停", primary: true },
-      { value: "cancel", label: "再想想", tone: "subtle" },
-    ],
-    allowDismiss: true,
-  });
-  return result.choice === "ok";
 }
 
 export default TaskHeader;

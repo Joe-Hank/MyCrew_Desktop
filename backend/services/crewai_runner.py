@@ -683,8 +683,21 @@ async def run_crew_step_with_crewai(
 
     # Pull whatever the step emitted via emit_output (may be None if the
     # agent forgot to call it — orchestrator decides how to handle).
-    from src.tools.builtin.local._output_capture import pop_output
-    captured = pop_output(step_task_key)
+    #
+    # For QA the step_task_key collapses to parent_task_id (so workflow_svc's
+    # downstream pop_output(parent_task_id) finds the verdict). If we
+    # *popped* here, the second pop in workflow_svc would return None,
+    # the runner would fall through to JSON-text extraction, fail to
+    # parse the Chinese summary, and raise a misleading
+    # "'<schema field>' is a required property" error. Peek instead —
+    # workflow_svc owns the final removal.
+    from src.tools.builtin.local._output_capture import (
+        peek_output, pop_output,
+    )
+    if step_task_key == parent_task_id:
+        captured = peek_output(step_task_key)
+    else:
+        captured = pop_output(step_task_key)
 
     log.info("crew_step.finished",
              parent_task=parent_task_id, step_index=step_index,

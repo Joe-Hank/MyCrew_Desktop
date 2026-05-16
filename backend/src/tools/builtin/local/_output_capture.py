@@ -61,6 +61,22 @@ def pop_output(task_id: str) -> Any:
         return entry[0] if entry is not None else None
 
 
+def peek_output(task_id: str) -> Any:
+    """Read without removing — used by the Crew QA step which shares its
+    key with the parent task. The Crew walker reads QA's payload to save
+    a sub-step IO file, but workflow_svc still needs to pop the same
+    payload one step later to drive completion. Popping it twice (once
+    inside the walker, once in workflow_svc) would consume it on the
+    first read and leave the second read empty — exactly the cause of
+    the 2026-05-16 美术资产组 "file_paths required" validation false
+    positive.
+    """
+    with _lock:
+        _evict_expired()
+        entry = _outputs.get(task_id, None)
+        return entry[0] if entry is not None else None
+
+
 def has_output(task_id: str) -> bool:
     with _lock:
         _evict_expired()

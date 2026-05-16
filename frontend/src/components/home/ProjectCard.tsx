@@ -13,6 +13,7 @@ import {
 import { useCreateTask } from "../../queries/useWorkflowQuery";
 import { useAgents, useCrews } from "../../queries/useTeamQuery";
 import { performerLabel } from "../../lib/performer";
+import { topoOrder } from "../../lib/topoOrder";
 import { useCreateInceptionSession } from "../../queries/useInceptionQuery";
 import { useInceptionStore } from "../../stores/useInceptionStore";
 import { usePrefsStore } from "../../stores/usePrefsStore";
@@ -197,7 +198,11 @@ function ProjectCard({ project }: { project: Project }) {
   const lastProjectId = usePrefsStore((s) => s.lastProjectId);
   const isLoadedCompleted =
     TERMINAL_STATES.has(project.state) && lastProjectId === project.id;
-  const tasks = detail?.tasks ?? [];
+  // Topological wave order — matches the canvas so a task at "index 2"
+  // here is the same task you see at "wave 1" on the task page. Backend
+  // returns rows in DB insertion order which has no meaning to the user
+  // (last-inserted often == first-runnable when deps are simple).
+  const tasks = topoOrder(detail?.tasks ?? []);
 
   // Halo rule table (matches plan §F):
   //   running  → blue pulsing wave   (still working)

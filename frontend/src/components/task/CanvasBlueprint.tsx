@@ -151,31 +151,36 @@ function CanvasBlueprint({
     });
   }, []);
 
-  // For each task, sum the deltas of all *upstream* (transitively) Crew
-  // tasks that are currently expanded. That total is the horizontal
-  // offset added to its computed x position.
+  // For each task, sum the deltas of every expanded Crew that is
+  // simultaneously (a) to the LEFT of this task and (b) on the same
+  // horizontal lane (y-coords within ROW_TOLERANCE). Geometric, not
+  // dependency-walking — matches user intent: "向右展开就只判断位于
+  // 右侧的卡片，垂直的不要动".
+  //
+  // Earlier this walked .deps transitively, which would push a node
+  // *below* the expanded crew (same column, next row) just because it
+  // happened to depend on something upstream of the crew. Confusing.
+  const ROW_TOLERANCE = 100;  // half ROW_H (=290) — anything within is "same row"
   const offsetFor = useCallback(
     (task: Task): number => {
       if (expandedDeltas.size === 0) return 0;
-      const idById = new Map<string, Task>(tasks.map((t) => [t.id, t]));
-      const visited = new Set<string>();
+      const taskAuto = autoLayout.get(task.id) ?? { x: 40, y: 40 };
+      const taskX = task.position_x ?? taskAuto.x;
+      const taskY = task.position_y ?? taskAuto.y;
       let total = 0;
-      const walk = (id: string) => {
-        if (visited.has(id)) return;
-        visited.add(id);
-        const t = idById.get(id);
-        if (!t) return;
-        for (const dep of t.deps ?? []) {
-          if (expandedDeltas.has(dep)) {
-            total += expandedDeltas.get(dep) ?? 0;
-          }
-          walk(dep);
-        }
-      };
-      walk(task.id);
+      for (const [crewId, delta] of expandedDeltas) {
+        const crew = tasks.find((t) => t.id === crewId);
+        if (!crew) continue;
+        const crewAuto = autoLayout.get(crewId) ?? { x: 40, y: 40 };
+        const crewX = crew.position_x ?? crewAuto.x;
+        const crewY = crew.position_y ?? crewAuto.y;
+        if (crewX >= taskX) continue;  // not on my left → unaffected
+        if (Math.abs(crewY - taskY) > ROW_TOLERANCE) continue;  // different row
+        total += delta;
+      }
       return total;
     },
-    [tasks, expandedDeltas],
+    [tasks, expandedDeltas, autoLayout],
   );
 
   // Build ReactFlow nodes from tasks. Memoised on tasks + the auxiliary
