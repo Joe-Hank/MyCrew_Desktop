@@ -42,7 +42,8 @@ MyCrew_v3/
 
 ## 文档入口
 
-- [docs/README.md](./docs/README.md) — 文档总索引（spec / iterations / roadmap / ADR / archive 分类）
+- **[docs/INDEX.md](./docs/INDEX.md)** — 主题反查表（按关键词 / 动词 / 故障症状定位到具体文档段 + 代码文件）。**找东西先看这个。**
+- [docs/README.md](./docs/README.md) — 目录导航（spec / iterations / roadmap / ADR / archive 分类）
 - [plan.md](./plan.md) — 初始架构与实施路线图（**已冻结**；演进版见 `docs/spec/ARCHITECTURE.md`）
 - [docs/spec/ARCHITECTURE.md](./docs/spec/ARCHITECTURE.md) — 架构定稿（跟代码同步演进）
 - [docs/spec/API.md](./docs/spec/API.md) — REST + WS 契约
