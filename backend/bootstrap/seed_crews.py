@@ -202,7 +202,7 @@ def _seq_step(role: str, instructions: str, *,
 SEED_CREWS: list[dict] = [
     # ── Art Crew (2D sprite / concept / UI image) ─────────────────
     {
-        "name": "Art Crew",
+        "name": "美术资产组",
         "applicable_scenarios": "2D sprite / 概念图 / UI 图 / 任何 PNG 图像资源（含 ComfyUI 真生图 + Unity 导入）",
         "sequence": [
             _seq_step(
@@ -249,7 +249,7 @@ SEED_CREWS: list[dict] = [
     },
     # ── 3D Asset Crew ─────────────────────────────────────────────
     {
-        "name": "3D Asset Crew",
+        "name": "3D 模型组",
         "applicable_scenarios": "3D 模型（角色 / 道具 / 环境，输出 .fbx / .blend / .obj）",
         "sequence": [
             _seq_step(
@@ -286,7 +286,7 @@ SEED_CREWS: list[dict] = [
     },
     # ── Animation Crew ────────────────────────────────────────────
     {
-        "name": "Animation Crew",
+        "name": "动画组",
         "applicable_scenarios": "角色 / 物体动画（输出 .anim / .controller）",
         "sequence": [
             _seq_step(
@@ -327,7 +327,7 @@ SEED_CREWS: list[dict] = [
     },
     # ── VFX Crew ──────────────────────────────────────────────────
     {
-        "name": "VFX Crew",
+        "name": "特效组",
         "applicable_scenarios": "粒子特效 / 视觉效果（输出 VFX prefab 含 ParticleSystem）",
         "sequence": [
             _seq_step(
@@ -362,7 +362,7 @@ SEED_CREWS: list[dict] = [
     },
     # ── System Implementation Crew ────────────────────────────────
     {
-        "name": "System Implementation Crew",
+        "name": "系统实现组",
         "applicable_scenarios": "C# 玩法系统脚本（PlayerController / EnemyAI / 战斗 / 关卡生成等）",
         "sequence": [
             _seq_step(
@@ -392,7 +392,7 @@ SEED_CREWS: list[dict] = [
     },
     # ── UI Implementation Crew ────────────────────────────────────
     {
-        "name": "UI Implementation Crew",
+        "name": "UI 实现组",
         "applicable_scenarios": "UI 界面（Canvas + Image + Text + Button，含 UI 图片）",
         "sequence": [
             _seq_step(
@@ -428,7 +428,7 @@ SEED_CREWS: list[dict] = [
     },
     # ── Audio Crew ────────────────────────────────────────────────
     {
-        "name": "Audio Crew",
+        "name": "音频组",
         "applicable_scenarios": "音频（SFX / 简短 BGM 占位，8-bit 程序化合成，输出 .wav）",
         "sequence": [
             _seq_step(
@@ -465,7 +465,7 @@ SEED_CREWS: list[dict] = [
     },
     # ── Scene Assembly Crew ───────────────────────────────────────
     {
-        "name": "Scene Assembly Crew",
+        "name": "场景装配组",
         "applicable_scenarios": "Unity 场景装配（实例化 prefab + 挂脚本 + 配引用，整合上游所有产物）",
         "sequence": [
             _seq_step(
@@ -590,6 +590,50 @@ async def _ensure_crew(spec: dict, role_to_agent_id: dict[str, str]) -> str:
     return row["id"]
 
 
+# Old → new name mapping for in-place rename. Existing project tasks
+# reference Crews by id, not name, so renaming preserves all the
+# user's saved projects (the 祖玛 crew_xxx ids stay valid). _rename_legacy_crews
+# runs once per boot before the normal _ensure_crew loop; if the old
+# name is gone (fresh install) it's a no-op.
+_LEGACY_NAME_MAP: dict[str, str] = {
+    "Art Crew": "美术资产组",
+    "3D Asset Crew": "3D 模型组",
+    "Animation Crew": "动画组",
+    "VFX Crew": "特效组",
+    "System Implementation Crew": "系统实现组",
+    "UI Implementation Crew": "UI 实现组",
+    "Audio Crew": "音频组",
+    "Scene Assembly Crew": "场景装配组",
+}
+
+
+async def _rename_legacy_crews() -> None:
+    """One-shot in-place rename of seeded Crews to their Chinese names.
+
+    Skips when the target name already exists (fresh install / second
+    boot) so we never end up with duplicate rows. Preserves Crew ids
+    so existing task.performer_id references keep working.
+    """
+    for old, new in _LEGACY_NAME_MAP.items():
+        if old == new:
+            continue
+        old_rows = await crud.get_all("crews", "name = ?", (old,))
+        if not old_rows:
+            continue
+        # Don't UPDATE if a row with the new name already exists — that
+        # would create a unique-name collision (or, with no constraint,
+        # leave dupes). Pick the old one to keep stable id ; user can
+        # manually clean up the dupe in the team page.
+        new_rows = await crud.get_all("crews", "name = ?", (new,))
+        if new_rows:
+            log.warning("seed.crew_rename_skipped_target_exists",
+                        old=old, new=new)
+            continue
+        await crud.update_by_id("crews", old_rows[0]["id"], {"name": new})
+        log.info("seed.crew_renamed",
+                 id=old_rows[0]["id"], old=old, new=new)
+
+
 async def ensure_crew_pool(tool_name_to_id: dict[str, str]) -> dict[str, str]:
     """Seed the 14 agents + 8 Crews. Pick deepseek-flash as default LLM
     (head + QA use cheap tier; executors will be retunable later).
@@ -608,6 +652,11 @@ async def ensure_crew_pool(tool_name_to_id: dict[str, str]) -> dict[str, str]:
         llm_id = f"{m['provider_id']}:{m['model_name']}"
     else:
         log.warning("seed.crew_pool.deepseek_flash_not_found")
+
+    # Migrate any legacy English-named Crews to their Chinese name
+    # BEFORE the seed loop runs; otherwise the loop would see no row
+    # matching the new name and INSERT a duplicate.
+    await _rename_legacy_crews()
 
     role_to_agent_id: dict[str, str] = {}
     for agent_spec in SEED_AGENTS:

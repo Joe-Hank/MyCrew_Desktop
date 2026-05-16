@@ -411,7 +411,7 @@ Task 未创建过 sub-step（不是 Crew 任务）时 `in/out/raw` 全为 `null`
 ```json
 {
   "id": "crew_art",
-  "name": "Art Crew",
+  "name": "美术资产组",
   "process": "sequential",
   "agent_ids": ["agent_art_director", "agent_concept_artist", "..."],
   "is_auto_generated": false,

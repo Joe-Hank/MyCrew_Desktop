@@ -61,9 +61,9 @@ def test_eight_crews_exactly():
     assert len(SEED_CREWS) == 8
     names = {c["name"] for c in SEED_CREWS}
     expected = {
-        "Art Crew", "3D Asset Crew", "Animation Crew", "VFX Crew",
-        "System Implementation Crew", "UI Implementation Crew",
-        "Audio Crew", "Scene Assembly Crew",
+        "美术资产组", "3D 模型组", "动画组", "特效组",
+        "系统实现组", "UI 实现组",
+        "音频组", "场景装配组",
     }
     assert names == expected
 
