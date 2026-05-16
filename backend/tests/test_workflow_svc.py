@@ -99,6 +99,49 @@ class TestWorkflowStart:
             for p in patches:
                 p.stop()
 
+    async def test_start_rejects_when_performer_missing(self, env):
+        """Both channels empty → reject (was the only behaviour pre-PM v4)."""
+        patches = _patch_deps(env)
+        for p in patches:
+            p.start()
+        try:
+            env["crud"].seed("projects", [make_project("proj_no_perf")])
+            env["crud"].seed("tasks", [
+                {**make_task("np1", deps=[], project_id="proj_no_perf"),
+                 "agent_id": None,
+                 "performer_kind": None,
+                 "performer_id": None},
+            ])
+            with pytest.raises(ValueError, match="未指定执行者"):
+                await env["svc"].start("proj_no_perf")
+        finally:
+            for p in patches:
+                p.stop()
+
+    async def test_start_accepts_crew_performer_without_agent_id(self, env):
+        """PM v4 Crew tasks have agent_id=NULL by design — start() must
+        not reject them. Regression: the pre-flight used to be
+        `if not t.get("agent_id")` which excluded every Crew row."""
+        patches = _patch_deps(env)
+        for p in patches:
+            p.start()
+        try:
+            env["crud"].seed("projects", [make_project("proj_crew")])
+            env["crud"].seed("tasks", [
+                {**make_task("ct1", deps=[], project_id="proj_crew"),
+                 "agent_id": None,
+                 "performer_kind": "crew",
+                 "performer_id": "crew_abc"},
+            ])
+            # Stub _dispatch so the test doesn't actually try to load
+            # the crew row — we only care that start() accepts the task.
+            with patch.object(env["svc"], "_schedule_ready_tasks"):
+                await env["svc"].start("proj_crew")
+            assert "proj_crew" in env["svc"].get_active_projects()
+        finally:
+            for p in patches:
+                p.stop()
+
 
 class TestWorkflowPauseResume:
     async def test_pause_active_project(self, env):

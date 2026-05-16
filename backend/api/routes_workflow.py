@@ -214,9 +214,18 @@ class TaskUpdate(BaseModel):
     title: str | None = None
     detail: str | None = None
     agent_id: str | None = None
+    # PM v4: which performer kind (agent / crew) is bound, and the id
+    # of that performer. The frontend's TaskEditModal sets all three of
+    # {agent_id, performer_kind, performer_id} when the user picks a
+    # crew (agent_id cleared to null, kind/id set) so workflow_svc
+    # routes through _run_crew instead of _run_agent.
+    performer_kind: str | None = None
+    performer_id: str | None = None
     # Canvas-editable fields: dependency list (upstream task ids) and node
-    # position. All optional; only non-None fields are persisted, so a partial
-    # PUT from the drag handler can send just {position_x, position_y}.
+    # position. All optional; the partial-PUT semantics (only fields the
+    # client actually sends get applied) come from `exclude_unset=True`
+    # below — so a drag handler sending {position_x, position_y} won't
+    # accidentally clobber agent_id with null.
     deps: list[str] | None = None
     position_x: float | None = None
     position_y: float | None = None
@@ -228,13 +237,15 @@ async def update_task(task_id: str, body: TaskUpdate):
     if not task:
         raise HTTPException(404, detail="task not found")
     updates: dict = {}
-    for k, v in body.model_dump().items():
-        if v is None:
-            continue
-        # `deps` lives in DB as a JSON string. Serialise here so the route's
-        # JSON-list API surface matches what the rest of the codebase reads.
+    # exclude_unset honours partial PUTs: only fields the client put in
+    # the JSON body get touched. Without this, omitted nullable fields
+    # would silently be wiped to NULL on every drag-position save.
+    # `null` explicitly sent by the client still comes through and
+    # clears the column — needed when the user picks "(待指定)" in the
+    # performer dropdown.
+    for k, v in body.model_dump(exclude_unset=True).items():
         if k == "deps":
-            updates[k] = json.dumps(v)
+            updates[k] = json.dumps(v) if v is not None else None
         else:
             updates[k] = v
     if not updates:

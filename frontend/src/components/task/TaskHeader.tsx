@@ -82,15 +82,22 @@ function TaskHeader({ project, selectedTask }: Props) {
       return;
     }
     if (isReady) {
-      // Pre-flight: refuse to start when any task has no agent. The
-      // backend will also block this (workflow_svc.start) but a friendly
-      // client-side popup beats a generic error envelope.
+      // Pre-flight: refuse to start when any task has no executable
+      // performer bound. PM v4 tasks bind via performer_kind +
+      // performer_id; legacy / setup tasks still use the agent_id
+      // column alone. A task is missing a performer only when BOTH
+      // channels are empty — otherwise workflow_svc can dispatch.
+      // Mirrors backend workflow_svc._start_locked exactly so the
+      // friendly alert here and the wire-level rejection there agree.
       const tasks = project.tasks ?? [];
-      const missing = tasks.filter((t) => !t.agent_id);
+      const missing = tasks.filter((t) => {
+        if (t.performer_kind === "crew") return !t.performer_id;
+        return !t.agent_id && !t.performer_id;
+      });
       if (missing.length > 0) {
         const lines = missing.map((t) => `· ${t.title || "未命名"}`).join("\n");
         alert(
-          `以下任务尚未指定执行 Agent，无法启动项目：\n\n${lines}\n\n请在画布上点击任务卡片 → 编辑 → 选择执行 Agent。`,
+          `以下任务尚未指定执行者（Agent/Crew），无法启动项目：\n\n${lines}\n\n请在画布上点击任务卡片 → 编辑 → 选择执行者。`,
         );
         return;
       }

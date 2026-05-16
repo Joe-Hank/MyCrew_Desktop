@@ -150,18 +150,28 @@ class WorkflowService:
         if not tasks:
             raise ValueError(f"Project {project_id} has no tasks")
 
-        # Reject projects where any task is missing its agent_id. The
-        # frontend pre-checks too (see TaskHeader.handlePrimary) but this
-        # is the wire-level guarantee: every code path that calls start()
-        # — including future schedulers, retry-from-failure flows, etc.
-        # — gets the same rule.
-        missing_agent = [
-            t for t in tasks if not t.get("agent_id")
-        ]
-        if missing_agent:
-            titles = ", ".join(t.get("title", "未命名") for t in missing_agent)
+        # Reject projects where any task has no executable performer
+        # bound. PM v4 tasks bind via performer_kind + performer_id;
+        # legacy / setup / iterate tasks still use the agent_id column
+        # alone (workflow_svc._run_agent falls back to it when
+        # performer_kind is null). A task is "assignable" when at least
+        # one of those two channels names a real id — anything else means
+        # Phase 5 didn't pick anyone and we'd crash on dispatch.
+        #
+        # Wire-level guarantee: every code path that calls start() —
+        # frontend pre-check, retry flows, scheduler — gets the same rule.
+        def _has_performer(t: dict) -> bool:
+            kind = t.get("performer_kind")
+            if kind == "crew" and t.get("performer_id"):
+                return True
+            # 'agent' kind OR legacy null kind: either column counts.
+            return bool(t.get("agent_id") or t.get("performer_id"))
+
+        missing_perf = [t for t in tasks if not _has_performer(t)]
+        if missing_perf:
+            titles = ", ".join(t.get("title", "未命名") for t in missing_perf)
             raise ValueError(
-                f"以下任务未指定执行 Agent，无法启动：{titles}",
+                f"以下任务未指定执行者（Agent/Crew），无法启动：{titles}",
             )
 
         dag_errors = validate_dag(tasks)

@@ -80,6 +80,13 @@ export interface TaskPatch {
   title?: string;
   detail?: string;
   agent_id?: string | null;
+  // PM v4: when the user picks a Crew from TaskEditModal, the patch
+  // includes performer_kind='crew' + performer_id=<crew_id> + clears
+  // agent_id to null so workflow_svc routes the task through the Crew
+  // walker. Sending undefined leaves the column untouched (backend
+  // honours exclude_unset).
+  performer_kind?: "agent" | "crew" | null;
+  performer_id?: string | null;
   deps?: string[];
   position_x?: number;
   position_y?: number;
