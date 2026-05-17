@@ -1,6 +1,12 @@
 from fastapi import APIRouter, HTTPException
 
-from api.schemas import LlmProviderCreate, LlmProviderUpdate, LlmModelCreate, LlmModelUpdate
+from api.schemas import (
+    LlmProviderCreate,
+    LlmProviderUpdate,
+    LlmModelCreate,
+    LlmModelUpdate,
+    LlmThinkingProbeRequest,
+)
 from services.llm_svc import llm_svc
 
 router = APIRouter(prefix="/llm", tags=["llm"])
@@ -71,4 +77,26 @@ async def get_quota():
 async def refresh_quota():
     """Force a fresh quota probe across all providers (manual refresh button)."""
     data = await llm_svc.get_quota(force=True)
+    return {"ok": True, "data": data}
+
+
+@router.post("/probe-thinking")
+async def probe_thinking(body: LlmThinkingProbeRequest):
+    """Probe whether a given model supports extended thinking / reasoning.
+
+    Heuristic over (provider_type, model_name) — there is no upstream
+    "capabilities" API that answers this question, so the rules are
+    baked into the backend. Result is cached on the model row when one
+    exists so subsequent reads avoid recomputing.
+    """
+    if not body.model_id and not (body.provider_id and body.model_name):
+        raise HTTPException(
+            422,
+            detail="provide either model_id, or both provider_id + model_name",
+        )
+    data = await llm_svc.probe_thinking(
+        model_id=body.model_id,
+        provider_id=body.provider_id,
+        model_name=body.model_name,
+    )
     return {"ok": True, "data": data}

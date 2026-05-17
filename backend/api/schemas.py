@@ -44,6 +44,19 @@ class LlmModelUpdate(BaseModel):
     supports_thinking: bool | None = None
 
 
+class LlmThinkingProbeRequest(BaseModel):
+    """Either `model_id` alone, or `provider_id` + `model_name`.
+
+    `model_id` is the preferred form — it lets the backend write the
+    probe result back to the DB row as a cache. The two-field form is
+    accepted so the LLM editor can probe a model the user is still
+    typing (no row yet)."""
+
+    model_id: str | None = None
+    provider_id: str | None = None
+    model_name: str | None = None
+
+
 # --- MCP ---
 
 class McpServerCreate(BaseModel):
