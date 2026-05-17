@@ -1272,9 +1272,31 @@ function PMActionButtons({
     );
   }
 
-  if (state.status === "failed") {
+  if (state.status === "failed" || state.status === "interrupted") {
+    // PM v3.1 (2026-05-17): 'interrupted' = backend was killed mid-run
+    // (typically uvicorn --reload picking up a code change). Cache was
+    // restored from disk on next boot but pm_task didn't resume — user
+    // needs to click here to fire /pm/restart. Same code path as a
+    // regular failed phase; backend uses `failed_phase` OR the last
+    // completed phase as the resume point.
+    const isInterrupted = state.status === "interrupted";
+    const resumePoint = state.failed_phase
+      ?? state.last_completed_phase
+      ?? "?";
     return (
-      <div className="flex gap-2">
+      <div className="flex flex-col gap-2">
+        {isInterrupted && (
+          <div
+            className="rounded-md px-2 py-1.5 text-[11px]"
+            style={{
+              backgroundColor: "rgba(245, 158, 11, 0.08)",
+              border: "1px solid rgba(245, 158, 11, 0.3)",
+              color: "#b45309",
+            }}
+          >
+            ⚠️ 后端进程意外终止（dev 热重载或崩溃）— 草稿已从磁盘恢复，但 PM 工作流需手动继续。
+          </div>
+        )}
         <button
           onClick={async () => {
             await call("restart", "重来");
@@ -1283,9 +1305,9 @@ function PMActionButtons({
           disabled={busy}
           className="flex-1 rounded-lg py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
           style={{ backgroundColor: "#f59e0b" }}
-          title={`从 phase '${state.failed_phase ?? "?"}' 重跑，上游产物从缓存复用`}
+          title={`从 phase '${resumePoint}' 重跑，上游产物从缓存复用`}
         >
-          {busy ? "重来中…" : `从断点重来（${state.failed_phase ?? "?"}）`}
+          {busy ? "重来中…" : `从断点重来（${resumePoint}）`}
         </button>
       </div>
     );

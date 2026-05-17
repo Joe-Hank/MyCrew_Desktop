@@ -25,13 +25,18 @@ export interface PMLogEntry {
 }
 
 export interface PMState {
-  status: "idle" | "running" | "ready" | "failed" | "cancelled";
+  status: "idle" | "running" | "ready" | "failed" | "cancelled" | "interrupted";
   current_phase: string | null;
   debug_log: PMLogEntry[];
   draft_blueprint: Record<string, unknown> | null;
   completeness: "ONELINE" | "PRD" | null;
   error: string | null;
   failed_phase: string | null;
+  /** PM v3.1 (2026-05-17): set on persisted-cache reload — the furthest
+   *  phase that has a captured payload. Used as the resume point when
+   *  the user clicks 「从断点重来」 on an 'interrupted' session and the
+   *  cache doesn't carry an explicit failed_phase. */
+  last_completed_phase?: string | null;
 }
 
 const EMPTY: PMState = {

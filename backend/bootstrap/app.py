@@ -206,6 +206,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     ws_interaction.set_broadcast(manager.broadcast)
     log.info("startup.event_bus_ready")
 
+    # STEP 4b (2026-05-17): reload persisted PM draft cache.
+    # Running with uvicorn --reload routinely kills the backend mid-PM
+    # (a 15-min phase chain is fragile against any file save in
+    # api/services/domain/...). Without this, the user's draft
+    # evaporates and the inception drawer goes blank. Now the cache
+    # lives on disk; mid-run sessions get flipped to 'interrupted' so
+    # the UI can offer 「从断点重来」.
+    from services import planner_cache_svc as _pc
+    try:
+        restored = _pc.load_persisted_sessions()
+        if restored:
+            log.info("startup.planner_cache_restored", count=restored)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("startup.planner_cache_load_failed", error=str(exc))
+
     # STEP 5: check last_state.json for recovery
     from infra.config_loader import load_last_state, clear_last_state
 
