@@ -34,6 +34,11 @@ function TaskNode({
   projectRunning,
   onSelect,
   onAction,
+  // When the card is wrapped by CanvasCrewNode (which floats an expand
+  // triangle at top-right), pass a reserved px count so the title
+  // truncates BEFORE running into the button. Default 0 = no reserve
+  // (normal stand-alone task cards have nothing floating up there).
+  titleRightReserve = 0,
 }: {
   task: Task;
   index: number;
@@ -41,6 +46,7 @@ function TaskNode({
   projectRunning: boolean;
   onSelect: (task: Task) => void;
   onAction: (action: TaskAction) => void;
+  titleRightReserve?: number;
 }) {
   const dotColor = STATUS_DOT[task.status] ?? STATUS_DOT.pending;
   // Performer label resolution lives in lib/performer.ts so the three
@@ -110,7 +116,10 @@ function TaskNode({
       {/* Title — setup task ("项目目录初始化") gets a 初始化 badge so
           it's visually distinct from regular tasks; final_qa already has
           a "✓ QA" treatment via TaskStatusIndicator. */}
-      <div className="mb-1 flex items-center gap-1.5">
+      <div
+        className="mb-1 flex items-center gap-1.5"
+        style={{ paddingRight: titleRightReserve || undefined }}
+      >
         <span
           className="inline-block h-2 w-2 shrink-0 rounded-full"
           style={{ backgroundColor: dotColor }}

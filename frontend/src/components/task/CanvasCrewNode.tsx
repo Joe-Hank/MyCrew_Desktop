@@ -147,6 +147,10 @@ function CanvasCrewNode({ data, selected }: NodeProps) {
             projectRunning={projectRunning}
             onSelect={onSelect}
             onAction={onAction}
+            // Reserve enough horizontal space in the title row so the
+            // ▶ button (12px glyph + 8px right offset = ~20px) doesn't
+            // overlap the truncated title.
+            titleRightReserve={24}
           />
           <button
             onClick={(e) => {
@@ -154,23 +158,14 @@ function CanvasCrewNode({ data, selected }: NodeProps) {
               handleToggle();
             }}
             title={`展开 Crew (${sequence.length} 步子任务)`}
-            // 2026-05-17 redesign: replaces the heavy bright-blue ⊕
-            // button. New pill is a quiet ghost-button matching the
-            // visual weight of TaskNode's bottom icon row — a count
-            // label + chevron-down. Hover lifts it to brand color so
-            // it's discoverable without dominating the card at rest.
-            className="canvas-crew-toggle absolute right-2 top-2 z-10 flex items-center gap-1 rounded-md px-1.5 py-1 text-[10px] font-medium transition-colors"
-            style={{
-              backgroundColor: "var(--color-card)",
-              color: "var(--color-ink-muted)",
-              border: "1px solid var(--color-border-soft)",
-            }}
+            // 2026-05-17 v2: 极简版 — 单个右向实心三角形。展开 = 向右，
+            // 收起 = 向左（见下方展开态）。没有文字、没有边框、纯灰色
+            // SVG，hover 才变蓝。
+            className="canvas-crew-toggle absolute right-1.5 top-1.5 z-10 flex h-4 w-4 items-center justify-center rounded transition-colors"
+            style={{ color: "var(--color-ink-faint)" }}
           >
-            <span>{sequence.length} 步</span>
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none"
-                 stroke="currentColor" strokeWidth="2.5"
-                 strokeLinecap="round" strokeLinejoin="round">
-              <polyline points="6 9 12 15 18 9" />
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
+              <polygon points="2,1 9,5 2,9" />
             </svg>
           </button>
         </div>
@@ -234,16 +229,25 @@ function CanvasCrewNode({ data, selected }: NodeProps) {
           onSelect(task);
         }}
       >
-        {/* Header */}
-        <div className="mb-2 flex items-center justify-between">
-          <div className="flex items-center gap-1.5">
+        {/* Header — title truncates with ellipsis at a fixed max width so
+            the ◀ collapse triangle on the right never gets covered. */}
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <div className="flex min-w-0 flex-1 items-center gap-1.5">
             <span
               className="inline-block h-2 w-2 shrink-0 rounded-full"
               style={{ backgroundColor: dotColor }}
             />
             <span
               className="truncate text-sm font-semibold"
-              style={{ color: "var(--color-ink-soft)" }}
+              style={{
+                color: "var(--color-ink-soft)",
+                // Cap to ~28 CJK chars-ish so the row never expands and
+                // the ◀ stays anchored at top-right. The flex layout
+                // already truncates, this just provides a hard ceiling
+                // for very wide expanded Crew widths.
+                maxWidth: "28ch",
+              }}
+              title={`${crew?.name ?? "Crew"} · ${task.title}`}
             >
               {crew?.name ?? "Crew"} · {task.title}
             </span>
@@ -264,18 +268,11 @@ function CanvasCrewNode({ data, selected }: NodeProps) {
               handleToggle();
             }}
             title="收起 Crew"
-            className="canvas-crew-toggle flex items-center gap-1 rounded-md px-1.5 py-1 text-[10px] font-medium transition-colors"
-            style={{
-              backgroundColor: "var(--color-card)",
-              color: "var(--color-ink-muted)",
-              border: "1px solid var(--color-border-soft)",
-            }}
+            className="canvas-crew-toggle flex h-4 w-4 shrink-0 items-center justify-center rounded transition-colors"
+            style={{ color: "var(--color-ink-faint)" }}
           >
-            <span>收起</span>
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none"
-                 stroke="currentColor" strokeWidth="2.5"
-                 strokeLinecap="round" strokeLinejoin="round">
-              <polyline points="18 15 12 9 6 15" />
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
+              <polygon points="8,1 1,5 8,9" />
             </svg>
           </button>
         </div>
