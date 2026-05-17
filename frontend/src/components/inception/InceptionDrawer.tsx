@@ -619,9 +619,16 @@ function InceptionDrawer() {
   const [manualRightPanelOpen, setManualRightPanelOpen] =
     useState<boolean | null>(null);
   const showRightPanel = manualRightPanelOpen ?? autoShowRightPanel;
+  // 2026-05-17 UI lock: the chat column keeps a FIXED width regardless
+  // of right-panel state. Opening / closing the panel only widens or
+  // shrinks the drawer's right edge — the chat toolbar (model selector
+  // through close button) stays anchored at the same x-coordinate so
+  // the buttons stop "dancing".
+  const CHAT_COL_WIDTH = "min(38vw, 560px)";
+  const RIGHT_PANEL_WIDTH = "min(45vw, 540px)";
   const drawerWidth = showRightPanel
-    ? "min(64vw, 1100px)"
-    : "min(38vw, 560px)";
+    ? `calc(${CHAT_COL_WIDTH} + ${RIGHT_PANEL_WIDTH})`
+    : CHAT_COL_WIDTH;
 
   return (
     <>
@@ -657,7 +664,20 @@ function InceptionDrawer() {
           display: drawerOpen ? undefined : "none",
         }}
       >
-      <div className="flex flex-1 flex-col overflow-hidden">
+      <div className="flex flex-1 overflow-hidden">
+        {/* Chat column. Holds the toolbar + scrollback + input.
+            Pinned to CHAT_COL_WIDTH so the toolbar above it never
+            widens when the right panel opens — buttons stay anchored. */}
+        <div
+          className="flex flex-col"
+          style={{
+            width: CHAT_COL_WIDTH,
+            flexShrink: 0,
+            borderRight: showRightPanel
+              ? "1px solid var(--color-border-soft)"
+              : "none",
+          }}
+        >
         {/* Top toolbar */}
         <div
           className="flex items-center gap-1.5 px-3 py-2"
@@ -792,20 +812,9 @@ function InceptionDrawer() {
           </div>
         </div>
 
-        {/* Body: chat (left) + blueprint preview (right) */}
-        <div className="flex min-h-0 flex-1">
-          <div
-            className="flex flex-1 flex-col"
-            style={{
-              // Always show a subtle divider when the right panel is
-              // present, not just when a blueprint draft exists.
-              // Previously the right panel and chat blurred together
-              // visually during PM running — no border, similar bg.
-              borderRight: showRightPanel
-                ? "1px solid var(--color-border-soft)"
-                : "none",
-            }}
-          >
+        {/* (Body wrapper + old chat-column wrapper were removed 2026-05-17;
+            toolbar is now inside the new chat-column wrapper above, so
+            chat scrollback starts here as the toolbar's sibling.) */}
             <div className="flex-1 overflow-auto p-6">
               {visibleMessages.length === 0
                 && chat.pending.length === 0
@@ -1129,8 +1138,12 @@ function InceptionDrawer() {
                   (history session opened without cached blueprint). */}
           {showRightPanel && (
             <div
-              className="flex w-[45%] min-w-[360px] flex-col transition-all duration-200"
-              style={{ backgroundColor: "var(--color-surface)" }}
+              className="flex flex-col transition-all duration-200"
+              style={{
+                width: RIGHT_PANEL_WIDTH,
+                flexShrink: 0,
+                backgroundColor: "var(--color-surface)",
+              }}
             >
               <div className="min-h-0 flex-1 p-4">
                 {(() => {
@@ -1244,7 +1257,6 @@ function InceptionDrawer() {
             </div>
           )}
         </div>
-      </div>
       </div>
     </>
   );
