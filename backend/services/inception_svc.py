@@ -949,8 +949,30 @@ class InceptionService:
         await self._probe(session_id, "llm_resolved",
                           provider=provider.get("name"), model=model_name)
 
-        llm = _build_crewai_llm(provider, model_name)
-        await self._probe(session_id, "llm_built")
+        # Honor the session's thinking toggle for the Plan Maker agent
+        # — only when the resolved model actually supports thinking; if
+        # the saved Plan Maker agent is pointed at a non-reasoning model
+        # the toggle silently drops, matching the UI gate.
+        session_thinking_mode = bool(session.get("thinking_mode", 0))
+        pm_supports_thinking = False
+        if session_thinking_mode:
+            pm_models = await crud.get_all(
+                "llm_models",
+                "provider_id = ? AND model_name = ?",
+                (provider_id, model_name),
+            )
+            pm_supports_thinking = (
+                bool(pm_models[0].get("supports_thinking", 0))
+                if pm_models else False
+            )
+        llm = _build_crewai_llm(
+            provider, model_name,
+            thinking_mode=session_thinking_mode,
+            supports_thinking=pm_supports_thinking,
+        )
+        await self._probe(session_id, "llm_built",
+                          thinking_mode=session_thinking_mode,
+                          supports_thinking=pm_supports_thinking)
 
         # Render placeholders in backstory with current MCP + agent inventory
         # + per-session mode context (template skeleton or iteration root)

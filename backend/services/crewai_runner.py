@@ -114,6 +114,8 @@ def _build_crewai_llm(
     *,
     temperature: float | None = None,
     max_tokens: int | None = None,
+    thinking_mode: bool = False,
+    supports_thinking: bool = False,
 ):
     """Build a `crewai.LLM` instance from a v3 provider row.
 
@@ -121,10 +123,23 @@ def _build_crewai_llm(
     when set — used by Plan Maker 2.0 sub-agents to tune per-intent
     output behavior (cheap classifier at temp=0 vs creative architect
     at temp=0.7, etc.).
+
+    `thinking_mode` + `supports_thinking` together gate the provider-
+    specific reasoning channel:
+      - Anthropic Claude 3.7+ / 4.x: `thinking={"type":"enabled",
+        "budget_tokens": N}` (forces temperature=1).
+      - OpenAI o-series / gpt-5: `reasoning_effort="medium"`.
+      - DeepSeek-reasoner / Qwen QwQ: model_name itself selects
+        reasoning; we just don't send a `thinking` field they'd reject.
+    The fan-out is gated on both flags so an Anthropic model without
+    extended-thinking support (e.g. claude-3-5-haiku) never receives
+    the `thinking` kwarg even if the user accidentally enabled the
+    agent toggle.
     """
     from crewai import LLM
 
-    model_string = _build_litellm_model_string(provider.get("type", "openai"), model_name)
+    ptype = (provider.get("type") or "openai").lower()
+    model_string = _build_litellm_model_string(ptype, model_name)
     kwargs: dict[str, Any] = {
         "model": model_string,
         "api_key": provider.get("api_key_ref") or None,
@@ -136,7 +151,53 @@ def _build_crewai_llm(
         kwargs["temperature"] = float(temperature)
     if max_tokens is not None:
         kwargs["max_tokens"] = int(max_tokens)
+
+    if thinking_mode and supports_thinking:
+        if ptype == "anthropic":
+            # litellm passes `thinking` straight through to the Anthropic
+            # messages API. Extended thinking requires temperature=1; if
+            # the caller already set something else, override.
+            budget = max(1024, min(int(kwargs.get("max_tokens", 4096)) - 1000, 10000))
+            kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            kwargs["temperature"] = 1.0
+        elif ptype == "openai":
+            # OpenAI reasoning models (o-series, gpt-5*) accept a
+            # `reasoning_effort` knob. Default to medium — high doubles
+            # latency and the planner phases don't need it.
+            kwargs["reasoning_effort"] = "medium"
+        # deepseek/qwen/gemini: nothing extra to send — picking the
+        # reasoner variant of the model name is sufficient.
+
     return LLM(**kwargs)
+
+
+async def _resolve_thinking_for_call(
+    agent_row: dict | None,
+    provider_id: str,
+    model_name: str,
+) -> tuple[bool, bool]:
+    """Resolve `(thinking_mode_requested, model_supports_thinking)`
+    for a single LLM call.
+
+    - thinking_mode is read off the agent row (DB stores it 0/1).
+    - supports_thinking is read off the matching llm_models row. If
+      the row is missing or the cached value is false, the call goes
+      out without `thinking` even when the agent toggle is on — same
+      gating that the LLM editor enforces in the UI, applied
+      server-side so an out-of-date toggle on an old agent can't
+      crash a Claude 3.5 / GPT-4o request.
+
+    Both returned as plain bools (DB stores 0/1)."""
+    thinking_mode = bool((agent_row or {}).get("thinking_mode", 0))
+    if not thinking_mode:
+        return False, False
+    rows = await crud.get_all(
+        "llm_models",
+        "provider_id = ? AND model_name = ?",
+        (provider_id, model_name),
+    )
+    supports = bool(rows[0].get("supports_thinking", 0)) if rows else False
+    return thinking_mode, supports
 
 
 # ── Tool resolution ───────────────────────────────────────────────
@@ -374,7 +435,14 @@ async def run_task_with_crewai(
     if not provider:
         raise ValueError(f"LLM provider {provider_id} not found")
 
-    llm = _build_crewai_llm(provider, model_name)
+    thinking_mode, supports_thinking = await _resolve_thinking_for_call(
+        agent_row, provider_id, model_name,
+    )
+    llm = _build_crewai_llm(
+        provider, model_name,
+        thinking_mode=thinking_mode,
+        supports_thinking=supports_thinking,
+    )
 
     # Per-task execution context for tool binding (workspace tools need
     # project_root; emit_output needs task_id + output_schema).
@@ -547,7 +615,14 @@ async def run_crew_step_with_crewai(
     if not provider:
         raise ValueError(f"LLM provider {provider_id} not found")
 
-    llm = _build_crewai_llm(provider, model_name)
+    thinking_mode, supports_thinking = await _resolve_thinking_for_call(
+        agent_row, provider_id, model_name,
+    )
+    llm = _build_crewai_llm(
+        provider, model_name,
+        thinking_mode=thinking_mode,
+        supports_thinking=supports_thinking,
+    )
 
     # The QA step (chain's tail) writes into the parent task_id slot —
     # workflow_svc reads pop_output(task_id) after _run_crew returns.

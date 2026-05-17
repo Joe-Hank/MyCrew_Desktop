@@ -124,6 +124,23 @@ async def run_crew(session: dict, user_message: str, start_from: str | None = No
                                   error=f"LLM 配置错误：{exc}")
         return planner_cache_svc.get(session_id) or {}
 
+    # Session-level thinking toggle (set by the user in the Plan Maker
+    # entry). Only takes effect when the resolved pro model's cached
+    # supports_thinking is true — otherwise we silently drop it so a
+    # stale toggle on an old session can't crash a non-reasoning model
+    # request. The cheap binary classifier always runs without thinking.
+    thinking_mode = bool(session.get("thinking_mode", 0))
+    pro_supports_thinking = False
+    if thinking_mode:
+        pro_models = await crud.get_all(
+            "llm_models",
+            "provider_id = ? AND model_name = ?",
+            (pro_provider["id"], pro_model),
+        )
+        pro_supports_thinking = (
+            bool(pro_models[0].get("supports_thinking", 0)) if pro_models else False
+        )
+
     try:
         # ── Phase 0: completeness ─────────────────────────────────
         if _need_run("completeness", start_from) and not _has_phase_output(session_id, "completeness"):
@@ -155,6 +172,8 @@ async def run_crew(session: dict, user_message: str, start_from: str | None = No
                 tools=[make_submit_concept_tool(session_id)],
                 provider=pro_provider, model_name=pro_model,
                 temperature=0.7, max_tokens=4000,
+                thinking_mode=thinking_mode,
+                supports_thinking=pro_supports_thinking,
             )
             planner_cache_svc.set_phase_output(session_id, "concept", concept_dict["concept"])
             if _check_cancelled(session_id):
@@ -180,6 +199,8 @@ async def run_crew(session: dict, user_message: str, start_from: str | None = No
                 tools=[make_submit_atomic_tasks_tool(session_id)],
                 provider=pro_provider, model_name=pro_model,
                 temperature=0.5, max_tokens=4000,
+                thinking_mode=thinking_mode,
+                supports_thinking=pro_supports_thinking,
             )
             planner_cache_svc.set_phase_output(session_id, "system_design", atomic_dict["tasks"])
             if _check_cancelled(session_id):
@@ -206,6 +227,8 @@ async def run_crew(session: dict, user_message: str, start_from: str | None = No
                 tools=[make_submit_reviewed_tasks_tool(session_id)],
                 provider=pro_provider, model_name=pro_model,
                 temperature=0.2, max_tokens=4000,
+                thinking_mode=thinking_mode,
+                supports_thinking=pro_supports_thinking,
             )
             planner_cache_svc.set_phase_output(session_id, "review", reviewed_dict["tasks"])
             if _check_cancelled(session_id):
@@ -242,6 +265,8 @@ async def run_crew(session: dict, user_message: str, start_from: str | None = No
                 tools=[make_submit_pathed_tasks_tool(session_id)],
                 provider=pro_provider, model_name=pro_model,
                 temperature=0.3, max_tokens=3000,
+                thinking_mode=thinking_mode,
+                supports_thinking=pro_supports_thinking,
                 validator=lambda payload: _validate_path_specs(
                     payload, reviewed or [], allowed_prefixes,
                 ),
@@ -311,6 +336,8 @@ async def run_crew(session: dict, user_message: str, start_from: str | None = No
                 tools=[make_submit_code_contracts_tool(session_id)],
                 provider=pro_provider, model_name=pro_model,
                 temperature=0.25, max_tokens=16000,
+                thinking_mode=thinking_mode,
+                supports_thinking=pro_supports_thinking,
                 validator=lambda payload: _validate_code_contracts(
                     payload, pathed or [],
                 ),
@@ -354,6 +381,8 @@ async def run_crew(session: dict, user_message: str, start_from: str | None = No
                 ],
                 provider=pro_provider, model_name=pro_model,
                 temperature=0.2, max_tokens=3000,
+                thinking_mode=thinking_mode,
+                supports_thinking=pro_supports_thinking,
             )
             raw_assignments = assignments_dict.get("assignments", [])
             validated = await _validate_assignments(raw_assignments, pathed or [])
@@ -430,6 +459,8 @@ async def _run_phase(
     tools: list,
     provider: dict, model_name: str,
     temperature: float, max_tokens: int,
+    thinking_mode: bool = False,
+    supports_thinking: bool = False,
 ) -> dict:
     """Run one phase. Returns the captured payload dict on success.
     Raises on hard failure (after focused repair too)."""
@@ -444,6 +475,7 @@ async def _run_phase(
             description=description, expected_output=expected_output,
             tools=tools, provider=provider, model_name=model_name,
             max_iter=5, temperature=temperature, max_tokens=max_tokens,
+            thinking_mode=thinking_mode, supports_thinking=supports_thinking,
             broadcast_steps=False,  # we emit pm.log separately
         )
     except Exception as exc:  # noqa: BLE001
@@ -473,6 +505,7 @@ async def _run_phase(
             description=repair_desc, expected_output=expected_output,
             tools=tools, provider=provider, model_name=model_name,
             max_iter=3, temperature=temperature, max_tokens=max_tokens,
+            thinking_mode=thinking_mode, supports_thinking=supports_thinking,
             broadcast_steps=False,
         )
     except Exception as exc:  # noqa: BLE001
@@ -505,6 +538,8 @@ async def _run_phase_with_validation(
     provider: dict, model_name: str,
     temperature: float, max_tokens: int,
     validator,  # Callable[[dict], list[str]] — returns error strings; empty = OK
+    thinking_mode: bool = False,
+    supports_thinking: bool = False,
 ) -> dict:
     """Like _run_phase, but after a kickoff produces a captured payload
     we run a custom validator (e.g. coverage/conflict checks). On
@@ -527,6 +562,7 @@ async def _run_phase_with_validation(
             description=description, expected_output=expected_output,
             tools=tools, provider=provider, model_name=model_name,
             max_iter=5, temperature=temperature, max_tokens=max_tokens,
+            thinking_mode=thinking_mode, supports_thinking=supports_thinking,
             broadcast_steps=False,
         )
     except Exception as exc:  # noqa: BLE001
@@ -566,6 +602,7 @@ async def _run_phase_with_validation(
             description=repair_desc, expected_output=expected_output,
             tools=tools, provider=provider, model_name=model_name,
             max_iter=3, temperature=temperature, max_tokens=max_tokens,
+            thinking_mode=thinking_mode, supports_thinking=supports_thinking,
             broadcast_steps=False,
         )
     except Exception as exc:  # noqa: BLE001

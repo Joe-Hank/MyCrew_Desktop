@@ -68,6 +68,8 @@ async def run_crewai_agent(
     max_iter: int,
     temperature: float | None = None,
     max_tokens: int | None = None,
+    thinking_mode: bool = False,
+    supports_thinking: bool = False,
     broadcast_steps: bool = True,
 ) -> str:
     """Standardised CrewAI invocation. Wraps:
@@ -92,6 +94,8 @@ async def run_crewai_agent(
     llm = _build_crewai_llm(
         provider, model_name,
         temperature=temperature, max_tokens=max_tokens,
+        thinking_mode=thinking_mode,
+        supports_thinking=supports_thinking,
     )
     agent = Agent(
         role=role, goal=goal, backstory=backstory, llm=llm,
