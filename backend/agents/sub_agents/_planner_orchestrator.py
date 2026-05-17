@@ -266,7 +266,11 @@ async def run_crew(session: dict, user_message: str, start_from: str | None = No
         if _need_run("code_contract", start_from) and not _has_phase_output(session_id, "code_contract"):
             planner_cache_svc.update(session_id, current_phase="code_contract")
             pathed = planner_cache_svc.get_phase_output(session_id, "project_mgmt")
-            cc_dict = await _run_phase(
+            # Use _run_phase_with_validation (not _run_phase): we need the
+            # post-Pydantic cross-task validator to reject contracts whose
+            # imports point at non-existent symbols. _run_phase doesn't
+            # have a `validator` kwarg.
+            cc_dict = await _run_phase_with_validation(
                 session_id=session_id,
                 phase="code_contract",
                 role=PHASE_CC_ROLE, goal=PHASE_CC_GOAL,

@@ -15,7 +15,10 @@ const PHASE_LABELS: Record<string, string> = {
   system_design: "Phase 2 · 系统策划",
   review: "Phase 3 · 审核策划",
   project_mgmt: "Phase 4 · 项目管理",
-  agent_assignment: "Phase 5 · Agent 指挥员",
+  // PM v5 (2026-05-17): inserted between project_mgmt and assignment.
+  // Decides cross-task C# symbol contract before any Crew runs.
+  code_contract: "Phase 5 · 代码契约设计师",
+  agent_assignment: "Phase 6 · Agent 指挥员",
   complete: "完成",
 };
 
@@ -25,6 +28,7 @@ const PHASE_ORDER = [
   "system_design",
   "review",
   "project_mgmt",
+  "code_contract",
   "agent_assignment",
   "complete",
 ];
