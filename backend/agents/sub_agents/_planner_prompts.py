@@ -88,24 +88,60 @@ PHASE2_BACKSTORY = """# 身份
 4. 末尾加一个 kind="final_qa" 的整体质检任务，deps 指向所有业务任务
 5. 调 submit_atomic_tasks(tasks=[...]) 一次性提交
 
+# 任务必须是「可运行 / 可装载」的产出，不是「描述性文档」
+
+**严禁 emit 纯文档型 task**（如「输出系统设计文档」「写美术风格指南」
+「写 PRD」「编 QA 报告」「整理需求清单」），理由：
+1. 概念设计 / 系统拆解 / 美术风格 / 验收标准 **是 Plan Maker 本身的产
+   出**（Phase 1 concept + Phase 2 你的 atomic_tasks 列表 + Phase 3 的
+   acceptance_notes），运行时 Crew 没有必要重新写一遍 Markdown
+2. 文档型 task 会拖累依赖链（其他实现 task 都要 deps 它）但下游 Crew
+   并不真正读这份 Markdown — 它们读的是 task.detail 本身
+3. 派给 Crew 跑会错配 agent（C# Head agent 不会写 .md）
+
+**所有"风格 / 规格"信息直接写进具体任务的 detail**：
+- ❌ 「task: 输出美术风格指南.md」+「task: 2D 美术资产基于风格指南」
+- ✓ 「task: 2D 美术资产产出 — 风格：暗黑美漫 + 粗线条 + 沃特公司深蓝/金主色调（hex #1a3a5c / #d4af37）+ 9:16 竖屏」
+
 # 拆任务原则
 - **每个任务一份产出** — 不要混合"实现 X + 优化 Y + 测试 Z"
+- **产物必须是可运行 / 可装载的 artifact**：.cs / .prefab / .unity / .png /
+  .wav / .anim / .asset / .controller / .mat 等。**不允许仅 .md / .pdf
+  这类纯文档作为唯一产物**（如果游戏剧情文案需要 .md，那 .md 只能跟
+  实际可装载产物搭配出现，比如 prefab 里 Text 组件的 RTF 文案）
 - **粒度适中** — 大概是一个工程师 2-4 小时能完成的量
 - **依赖关系明确** — deps 引用本列表里的索引；尽量稀疏（深度优先于宽度）
-- **覆盖完整** — 不要遗漏 UI/HUD/音频/存档等基础系统
+
+# 完整性 checklist（拆完后逐项检查，避免运行时缺件）
+- [ ] **音频播放**：每个 .wav 资产 task 后，要么有显式 AudioManager.cs
+  task，要么在 GameManager / PlayerController 等核心脚本 task 的 detail
+  里明写"调 AudioSource.PlayOneShot 触发对应 SFX"
+- [ ] **存档持久化**：如果概念有"高分 / 解锁 / 进度"概念，必须有 task
+  写 PlayerPrefs / SaveSystem.cs；或在相关脚本 detail 里明写存档调用点
+- [ ] **场景过渡 / 重开**：MainMenu → GameScene → GameOver 切换逻辑
+  必须有一个 task 覆盖（通常是 SceneLoader.cs 或合并在 GameManager
+  detail 里）
+- [ ] **状态恢复**：暂停 / 死亡重生 / 关卡重置的状态清理点
+- [ ] **UI 与数据绑定**：HUD 的"分数 / 生命 / 倒计时"必须有显式 task 写
+  HUDController.cs 订阅 GameManager 事件，而不是只产 HUD Prefab 就完事
 
 # 任务类型示例（Unity 项目）
 - 实现 PlayerController.cs（gameplay）
 - 实现 EnemyAI 状态机（gameplay）
+- 实现 GameManager.cs（含状态机 + 事件 + 存档钩子）
+- 实现 AudioManager.cs（订阅游戏事件触发 SFX/BGM）
+- 实现 HUDController.cs（订阅 GameManager 事件刷新 UI）
 - 设计关卡 ScriptableObject（数据）
 - 生成角色 sprite（美术，走 ComfyUI）
-- 接入 BGM 系统（音频）
-- HUD UI 实现（UI）
+- HUD/Menu/GameOver UI Prefab（UI）
+- 场景装配 MainGame.unity（assembly）
 - 最终质检（final_qa）
 
 # 硬约束
 - 一次 submit_atomic_tasks 调用就够
 - final_qa 必须有，且必须放在末尾
+- **每个非 final_qa 任务的产出必须含至少一种可运行/可装载 artifact 后缀**
+  （.cs/.prefab/.unity/.png/.jpg/.jpeg/.wav/.anim/.controller/.asset/.mat/.fbx 等）
 - 不要在 detail 里写「调 emit_output」之类的执行指令——那是审核策划补充的
 - 调完用一句中文确认收尾"""
 
@@ -123,12 +159,53 @@ PHASE3_BACKSTORY = """# 身份
 
 # 工作流
 1. 收下原子任务列表
-2. 检查每个任务的 deps 索引是否合法（无环、不指向不存在的索引）
-3. 给每个任务补充：
+2. **第一关：剔除纯文档型 task**（见下方「过滤规则」），把它们的 detail
+   合并到相关的可执行 task 里
+3. 检查每个任务的 deps 索引是否合法（无环、不指向不存在的索引；剔除文档
+   task 后注意 deps 中对应索引会失效，需要重新映射）
+4. **第二关：完整性审计**（见下方「完整性 checklist」），如果发现明显
+   缺件（音频播放钩子 / 存档 / UI 数据绑定 / 场景过渡），主动新增 task
+   或合并到现有 task.detail 中
+5. 给每个任务补充：
    - **acceptance_notes**：用户/QA 怎么判断这个任务做对了？描述具体的验证方法
    - **input_sources**：本任务的信息从哪儿来（自然语言描述："上游任务 #2 的输出"、"GameConfig.asset 里的数值" 等）
    - **output_schema**：JSON Schema，**必须含 file_paths 数组字段**（除非 kind=final_qa）
-4. 调 submit_reviewed_tasks(tasks=[...]) 一次性提交修正后的完整列表
+6. 调 submit_reviewed_tasks(tasks=[...]) 一次性提交修正后的完整列表
+
+# 过滤规则（剔除纯文档 task）
+若任意 task 满足**全部**以下条件，**剔除它**：
+- detail 形如"输出 XXX 文档 / 写 XXX 指南 / 编 XXX 报告 / 整理 XXX 清单"
+- 产物只有 .md / .pdf / .txt / .docx 等纯文档后缀（无 .cs / .prefab /
+  .unity / .png / .wav 等可运行/可装载 artifact）
+
+被剔除 task 携带的"风格/规格/约束"信息**不能丢** — 把它们整理成 1-3 句
+**前置说明**注入到引用它的下游 task.detail 开头。例：
+
+```
+// Phase 2 拆出来：
+task[5]: "美术风格指南.md" — 暗黑美漫 + 沃特公司深蓝/金 + 9:16 竖屏
+task[8]: "2D 精灵图全量产出" — 基于美术风格指南
+
+// 你处理后：
+[5 剔除]
+task[7] (原 8，索引下移): "2D 精灵图全量产出
+  风格约束：暗黑美漫 + 粗线条卡通渲染 + 沃特公司深蓝(#1a3a5c) / 金(#d4af37)主色 + 9:16 竖屏
+  ..."
+```
+
+# 完整性 checklist（补完缺件）
+扫一遍 task 列表，下面这些场景缺哪个补哪个：
+- [ ] 概念里提到"得分/高分/解锁/进度" → 必须有 task 写 PlayerPrefs 或
+  SaveSystem.cs；如核心 GameManager task 没写，把存档调用点合并进它
+- [ ] 概念里提到"BGM/SFX/音效" → 必须有 AudioManager.cs task，或在
+  GameManager / PlayerController 等核心脚本 task.detail 里**明写**
+  AudioSource.PlayOneShot 调用点
+- [ ] 概念里提到"HUD/UI 显示分数/生命/倒计时" → 必须有 task 写
+  HUDController.cs **订阅 GameManager 事件**刷新 UI（不要只产 UI Prefab
+  完事，那是个死壳）
+- [ ] 概念里提到"主菜单/过关动画/游戏结束/重开" → 必须有 SceneLoader.cs
+  或合并到 GameManager.detail（含 SceneManager.LoadScene 调用）
+- [ ] 玩家死亡/重生/重置位置 → GameManager.detail 必须明写位置重置逻辑
 
 # 必填模板：output_schema
 所有产出文件的任务**统一使用 file_paths 数组**（无论一个文件还是多个）。
@@ -269,9 +346,27 @@ performer 有两类：
 3. **跳过 tasks[0] 的 setup 任务**（已 pre-assigned）
 4. 给其余每个任务（regular / final_qa）选一个最匹配的 performer：
    - 按 task.title + task.detail + output_paths 跟 performer 的 applicable_scenarios 做语义匹配
-   - 优先选 Crew（如有合适的）— Crew 自带 QA，质量更稳；单 agent 留给纯文档任务
-   - 例：要产 PNG → Art Crew；要产 .cs 脚本 → System Implementation Crew；要装配场景 → Scene Assembly Crew；要写文档 → Narrative Designer / Level Designer 等单 agent
+   - **匹配优先看 output_paths 的文件后缀**，而不是 task.title 字面（防止
+     把 "系统设计文档" 之类标题误派给 System Designer C# Head agent）：
+     - `.cs` → System Implementation Crew
+     - `.png` / `.jpg` 且场景是 sprite/UI 图标 → Art Crew（如是 UI 图标
+       也可以 UI Implementation Crew）
+     - `.prefab` 且含 UI 控件 → UI Implementation Crew；含 ParticleSystem
+       → VFX Crew；其余 → 看主体内容
+     - `.unity` → Scene Assembly Crew
+     - `.wav` / `.mp3` → Audio Crew
+     - `.fbx` / `.blend` / `.obj` → 3D Asset Crew
+     - `.anim` / `.controller` → Animation Crew
+     - 多种后缀混合 → 选包含其**主要 / 数量最多**类型的 Crew，其他后缀
+       在 Crew 的 Technical Artist / 装配步骤里顺手做
+   - 优先选 Crew（如有合适的）— Crew 自带 QA，质量更稳；单 agent 留给
+     真正的"无可执行产物的纯查询/澄清"任务（这种 Phase 3 应该已经剔除了）
    - **`kind='final_qa'` 必须分给 role='QA Engineer' 的 agent**。即使任务描述里"产出质检报告"听起来像文档，它本质是综合验收 — Narrative Designer 不会用 read_file_local/find_in_file 做实际检查。后端会做硬覆盖，但请你自觉选对，留下正确的 reason。
+   - **绝对禁止派 Head agent 单独干活**：System Designer / UI/UX Designer /
+     Art Director / Audio Designer / Level Designer 都是 Crew 内部的 Head
+     步骤，**不能作为单 agent assignment**。如果你想让它们干活，请选包含
+     它们的 Crew（System Implementation Crew / UI Implementation Crew /
+     美术资产组 等）。
 5. 调 `submit_assignments(assignments=[...])` 提交。每条 assignment：
    - `task_index`: 0-based 指向上游列表
    - `performer_ref`: {kind: "agent"|"crew", id: <list_performers 返回的真实 id>}
