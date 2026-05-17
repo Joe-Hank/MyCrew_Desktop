@@ -270,19 +270,39 @@ async def run_crew(session: dict, user_message: str, start_from: str | None = No
             # post-Pydantic cross-task validator to reject contracts whose
             # imports point at non-existent symbols. _run_phase doesn't
             # have a `validator` kwarg.
+            #
+            # 2026-05-17 fix: the previous version dumped the FULL pathed
+            # task list (detail / acceptance_notes / kind / deps / ...) and
+            # capped max_tokens at 4000. For a 10-task project the output
+            # alone (contracts array with files / exports / imports for
+            # each .cs task) easily exceeds 4000 tokens — CrewAI then
+            # ran into truncated JSON, exhausted max_iter, and
+            # force_final_answer returned empty → "Invalid response from
+            # LLM call - None or empty". Slim the input to ONLY the
+            # fields code_contract needs to decide (task_index, title,
+            # output_paths) and bump max_tokens to 16000.
+            cc_pathed_slim = [
+                {
+                    "task_index": i,
+                    "title": (t.get("title") or "")[:80],
+                    "output_paths": t.get("output_paths") or [],
+                    "kind": t.get("kind") or "regular",
+                }
+                for i, t in enumerate(pathed or [])
+            ]
             cc_dict = await _run_phase_with_validation(
                 session_id=session_id,
                 phase="code_contract",
                 role=PHASE_CC_ROLE, goal=PHASE_CC_GOAL,
                 backstory=phase_cc_backstory(),
                 description=(
-                    "# 上游带路径的任务列表（Phase 4 产物）\n"
+                    "# 上游任务清单（精简版：仅 task_index + title + output_paths + kind）\n"
                     "```json\n"
-                    f"{json.dumps(pathed, ensure_ascii=False, indent=2)}\n"
+                    f"{json.dumps(cc_pathed_slim, ensure_ascii=False, indent=2)}\n"
                     "```\n\n"
-                    f"上游共 {len(pathed or [])} 个 task（含 setup）。请逐个判断："
-                    "task.output_paths 含 .cs → 需要写 code_contract；其他全为非代码资产 → "
-                    "code_contract 必须填 null。contracts 数组长度必须 == "
+                    f"上游共 {len(pathed or [])} 个 task。逐个判断："
+                    "output_paths 含 .cs → 需要 code_contract；全是非代码资产 → "
+                    "code_contract 填 null。contracts 数组长度必须 == "
                     f"{len(pathed or [])}，task_index 必须覆盖 0..{len(pathed or []) - 1}。"
                 ),
                 expected_output=(
@@ -290,7 +310,7 @@ async def run_crew(session: dict, user_message: str, start_from: str | None = No
                 ),
                 tools=[make_submit_code_contracts_tool(session_id)],
                 provider=pro_provider, model_name=pro_model,
-                temperature=0.25, max_tokens=4000,
+                temperature=0.25, max_tokens=16000,
                 validator=lambda payload: _validate_code_contracts(
                     payload, pathed or [],
                 ),
