@@ -1,3 +1,4 @@
+import os
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -8,6 +9,27 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from bootstrap.paths import RUNTIME_DIR, ensure_dirs
+from infra.log_pipeline import tap_processor
+
+# 2026-05-17 T1: configure structlog HERE so uvicorn-imported entry
+# (`uvicorn bootstrap.app:create_app --factory`) gets the proper
+# pipeline. `bootstrap/main.py` also configures structlog when used as
+# a CLI launcher, but uvicorn imports app.py directly without going
+# through main.py — without this block, structlog defaults applied and
+# tap_processor was never wired.
+structlog.configure(
+    processors=[
+        structlog.contextvars.merge_contextvars,
+        structlog.processors.add_log_level,
+        structlog.processors.TimeStamper(fmt="iso"),
+        # tap to file + memory buffer + WS log.line channel
+        tap_processor,
+        structlog.dev.ConsoleRenderer() if os.getenv("MYCREW_DEV") == "1"
+        else structlog.processors.JSONRenderer(),
+    ],
+    wrapper_class=structlog.make_filtering_bound_logger(0),
+    logger_factory=structlog.PrintLoggerFactory(),
+)
 
 log = structlog.get_logger()
 
@@ -332,6 +354,7 @@ def create_app() -> FastAPI:
     from api.routes_settings import router as settings_router
     from api.routes_pm import router as pm_router
     from api.routes_preferences import router as preferences_router
+    from api.routes_logs import router as logs_router
 
     app.include_router(health_router, prefix="/api/v1")
     app.include_router(auth_router, prefix="/api/v1")
@@ -353,5 +376,6 @@ def create_app() -> FastAPI:
     app.include_router(settings_router, prefix="/api/v1")
     app.include_router(pm_router, prefix="/api/v1")
     app.include_router(preferences_router, prefix="/api/v1")
+    app.include_router(logs_router, prefix="/api/v1")
 
     return app

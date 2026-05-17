@@ -6,12 +6,20 @@ import uvicorn
 import structlog
 
 from bootstrap.paths import DEFAULT_PORT, PORT_RANGE
+from infra.log_pipeline import tap_processor
 
 structlog.configure(
     processors=[
         structlog.contextvars.merge_contextvars,
         structlog.processors.add_log_level,
         structlog.processors.TimeStamper(fmt="iso"),
+        # 2026-05-17 T1: tap the structured log into 3 sinks (rotating
+        # file at data/logs/mycrew.log, in-memory ring buffer for the
+        # /logs replay endpoint, and the WS log.line channel for live
+        # LogDrawer streaming). Placed AFTER add_log_level + TimeStamper
+        # so the snapshot already has ts + level, and BEFORE the final
+        # renderer so stdout still gets a clean console/JSON line.
+        tap_processor,
         structlog.dev.ConsoleRenderer() if os.getenv("MYCREW_DEV") == "1"
         else structlog.processors.JSONRenderer(),
     ],

@@ -9,9 +9,18 @@ import { persist } from "zustand/middleware";
  * avoided.
  */
 
-export type LogTab = "应用日志" | "Agent 输出";
+// 2026-05-17: "应用日志" promoted to a 「后端」 sink that now streams
+// the full structlog tap (via WS `log.line` + GET /logs replay). The
+// new 「LLM 调用」 tab pairs llm.call.detail events by call_id.
+export type LogTab = "后端日志" | "Agent 输出" | "LLM 调用";
 export type TeamTab = "agents" | "crews" | "tools";
 export type SettingsTab = "llm" | "mcp" | "permission";
+
+export interface LogDrawerFilters {
+  level: "" | "debug" | "info" | "warning" | "error";
+  source: string;  // "" = all
+  query: string;
+}
 
 interface PrefsState {
   // Inception drawer
@@ -22,6 +31,8 @@ interface PrefsState {
   // Log drawer
   logDrawerExpanded: boolean;
   logDrawerActiveTab: LogTab;
+  logDrawerHeight: number;
+  logDrawerFilters: LogDrawerFilters;
 
   // Team / Settings active tab
   teamActiveTab: TeamTab;
@@ -42,6 +53,8 @@ interface PrefsState {
   setInceptionThinking: (v: boolean) => void;
   setLogDrawerExpanded: (v: boolean) => void;
   setLogDrawerActiveTab: (v: LogTab) => void;
+  setLogDrawerHeight: (v: number) => void;
+  setLogDrawerFilters: (patch: Partial<LogDrawerFilters>) => void;
   setTeamActiveTab: (v: TeamTab) => void;
   setSettingsActiveTab: (v: SettingsTab) => void;
   setLastProjectId: (v: string | null) => void;
@@ -55,7 +68,9 @@ export const usePrefsStore = create<PrefsState>()(
       inceptionModel: null,
       inceptionThinking: false,
       logDrawerExpanded: false,
-      logDrawerActiveTab: "应用日志",
+      logDrawerActiveTab: "后端日志",
+      logDrawerHeight: 224,
+      logDrawerFilters: { level: "", source: "", query: "" },
       teamActiveTab: "agents",
       settingsActiveTab: "llm",
       lastProjectId: null,
@@ -66,6 +81,14 @@ export const usePrefsStore = create<PrefsState>()(
       setInceptionThinking: (v) => set({ inceptionThinking: v }),
       setLogDrawerExpanded: (v) => set({ logDrawerExpanded: v }),
       setLogDrawerActiveTab: (v) => set({ logDrawerActiveTab: v }),
+      // Clamp 120..600px — below 120 nothing's visible, above 600 the
+      // page above is cramped on small windows.
+      setLogDrawerHeight: (v) => set({
+        logDrawerHeight: Math.min(600, Math.max(120, Math.round(v))),
+      }),
+      setLogDrawerFilters: (patch) => set((s) => ({
+        logDrawerFilters: { ...s.logDrawerFilters, ...patch },
+      })),
       setTeamActiveTab: (v) => set({ teamActiveTab: v }),
       setSettingsActiveTab: (v) => set({ settingsActiveTab: v }),
       setLastProjectId: (v) => set({ lastProjectId: v }),
@@ -75,6 +98,25 @@ export const usePrefsStore = create<PrefsState>()(
         ioViewerWidth: Math.min(1200, Math.max(280, Math.round(v))),
       }),
     }),
-    { name: "mycrew-prefs", version: 1 },
+    {
+      name: "mycrew-prefs",
+      version: 2,
+      // v1 → v2: 「应用日志」 tab renamed to 「后端日志」 + new
+      // logDrawerHeight / logDrawerFilters fields. Old persisted state
+      // may have any of these missing or with the old tab label.
+      migrate: (persisted: any, _from) => {
+        if (!persisted || typeof persisted !== "object") return persisted;
+        if (persisted.logDrawerActiveTab === "应用日志") {
+          persisted.logDrawerActiveTab = "后端日志";
+        }
+        if (typeof persisted.logDrawerHeight !== "number") {
+          persisted.logDrawerHeight = 224;
+        }
+        if (!persisted.logDrawerFilters) {
+          persisted.logDrawerFilters = { level: "", source: "", query: "" };
+        }
+        return persisted;
+      },
+    },
   ),
 );
