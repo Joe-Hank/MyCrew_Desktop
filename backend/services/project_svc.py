@@ -108,6 +108,21 @@ class ProjectService:
                     json.dumps(code_contract, ensure_ascii=False)
                     if isinstance(code_contract, dict) else None
                 )
+                # 2026-05-17 (Plan A): Phase 4 LLM produces detailed
+                # output_paths per task (sprite list / .cs paths / etc.),
+                # but the prior INSERT silently dropped them. Tasks ended
+                # up with NULL output_paths → Crew Executors saw "[]" in
+                # their contract block and did nothing (audio task: zero
+                # .wav produced) or improvised from task.detail prose
+                # alone (art task: only Player sprites). Persist the
+                # list so emit_output verification, Crew step
+                # description, and code-contract phase all see the
+                # truth.
+                paths = t.get("output_paths") or []
+                output_paths_json = (
+                    json.dumps(paths, ensure_ascii=False)
+                    if isinstance(paths, list) else None
+                )
                 row = await crud.insert("tasks", {
                     "project_id": project_id,
                     "title": t["title"],
@@ -124,6 +139,11 @@ class ProjectService:
                     "performer_id": t.get("performer_id"),
                     # PM v5: named-symbol contract for Crew QA verification.
                     "code_contract": contract_json,
+                    # PM Phase 4 output: the explicit must-produce file
+                    # paths. Empty list = "no files expected" (e.g. setup
+                    # / final_qa tasks). NULL = legacy row from before
+                    # this fix.
+                    "output_paths": output_paths_json,
                 }, id_prefix="task_")
                 index_to_id[i] = row["id"]
 

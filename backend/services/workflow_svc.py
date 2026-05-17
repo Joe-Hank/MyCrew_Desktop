@@ -365,6 +365,36 @@ class WorkflowService:
         if not tasks:
             raise ValueError(f"Project {project_id} has no tasks")
 
+        # 2026-05-17 Plan C sanity guard: surface PM contract corruption
+        # before kicking off any Crew. A Crew task whose output_paths
+        # came back empty means Phase 4's `path_specs` were dropped (the
+        # legacy project_svc INSERT bug, fixed in commit "feat(pm): persist
+        # output_paths") or the LLM produced nothing. Without this warning
+        # the Executor will see "[]" and exit silently with zero files,
+        # like the 魔塔 audio task did. We don't block start() — for some
+        # legacy rows the user may want to push through anyway — but we
+        # do log a loud warning the Log drawer will surface.
+        for t in tasks:
+            if t.get("performer_kind") != "crew":
+                continue
+            raw = t.get("output_paths")
+            paths_list: list = []
+            if isinstance(raw, str) and raw:
+                try:
+                    paths_list = json.loads(raw)
+                except (json.JSONDecodeError, TypeError):
+                    paths_list = []
+            elif isinstance(raw, list):
+                paths_list = raw
+            if not paths_list:
+                log.warning(
+                    "workflow.start.crew_task_missing_output_paths",
+                    project_id=project_id,
+                    task_id=t.get("id"),
+                    title=t.get("title"),
+                    hint="PM Phase 4 path_specs were not persisted; Crew Executor will fall back to task.detail",
+                )
+
         # Reject projects where any task has no executable performer
         # bound. PM v4 tasks bind via performer_kind + performer_id;
         # legacy / setup / iterate tasks still use the agent_id column

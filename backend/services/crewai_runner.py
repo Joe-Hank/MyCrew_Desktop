@@ -607,6 +607,33 @@ async def run_crew_step_with_crewai(
         f"- output_paths（必产）：{json.dumps(parent_output_paths or [], ensure_ascii=False)}",
         f"- output_schema：```json\n{json.dumps(parent_output_schema or {}, ensure_ascii=False, indent=2)}\n```",
     ]
+    # 2026-05-17 Plan D fallback: when PM Phase 4 lost the output_paths
+    # (legacy data from before the project_svc INSERT fix, or a Phase 4
+    # LLM that came up empty), the Executor will read "[]" and exit
+    # without producing any files — that's exactly how the 魔塔 audio
+    # task ended up with zero .wav. Rather than punt, instruct the agent
+    # to derive the must-produce list from task.detail prose. The fail
+    # path is also explicit so the QA chain can surface unrecoverable
+    # contracts.
+    if not parent_output_paths and step_role in ("head", "executor"):
+        desc_parts += [
+            "",
+            "## ⚠️ output_paths 缺失 — 从 detail 推导",
+            (
+                "PM 契约的 output_paths 为空数组。这通常是上游 PM 阶段的"
+                "历史数据 bug；不要把它当成『无须产出文件』。请仔细阅读"
+                "上方 task.detail，提取里面列出/暗示的所有应产出文件路径"
+                "（包括相对项目根的 Assets/... 等），作为本步骤的 must-"
+                "produce 清单，然后真正生成这些文件并在 emit_output 的 "
+                "file_paths 字段里把它们全部列齐。"
+            ),
+            (
+                "若 detail 中信息确实不足以推出任何路径，请用 emit_output "
+                "提交 verdict='fail' + issues=['PM contract missing "
+                "output_paths and detail is too vague to recover']，不要"
+                "随便提交一个空 file_paths 就算完事。"
+            ),
+        ]
     if upstream_outputs:
         desc_parts += [
             "",
