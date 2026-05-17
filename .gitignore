@@ -54,8 +54,16 @@ output/
 
 # 本地配置
 .claude/settings.local.json
+.claude/scheduled_tasks.lock
 data/config/*.yaml
 !data/config/README.md
+
+# SQLite — was at data/db/ historically but the active path
+# (bootstrap.paths.DB_PATH) writes to backend/mycrew.db on some runs.
+backend/mycrew.db
+backend/mycrew.db-journal
+backend/mycrew.db-wal
+backend/mycrew.db-shm
 
 # 测试产物
 /tests/playwright-report/
