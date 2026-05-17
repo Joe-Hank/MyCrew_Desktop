@@ -58,7 +58,18 @@ function TaskNode({
 
   const canEdit = !projectRunning && task.status !== "running";
   const canPause = task.status === "running";
-  const canRetry = ["done", "failed", "validation_failed", "aborted"].includes(task.status) && !projectRunning;
+  // Retry is always allowed for terminally-failed states — even when the
+  // project itself is still reported as RUNNING. Previously the guard
+  // refused retry on a validation_failed task whenever projectRunning was
+  // true, but a validation-failed root task often cascades blocks
+  // through every downstream task, leaving the project frozen at
+  // state='running' with nothing actually executing. Backend's
+  // _maybe_stall_project now transitions the project to STALLED in that
+  // case, but this UI guard is the belt-and-braces fix that also lets
+  // users unstuck existing stuck projects (created before the backend
+  // patch) without a pause-resume dance.
+  const isFailureState = ["failed", "validation_failed", "aborted"].includes(task.status);
+  const canRetry = isFailureState || (task.status === "done" && !projectRunning);
   const canChat = ["failed", "validation_failed", "blocked"].includes(task.status);
 
   // "Needs input" = task is in a state requiring manual intervention.

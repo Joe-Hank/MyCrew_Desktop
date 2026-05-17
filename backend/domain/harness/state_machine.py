@@ -88,6 +88,8 @@ class HarnessStateMachine:
         # stuck in RUNNING forever.
         if self._all_tasks_terminal():
             events.extend(self._finalize_project())
+        else:
+            self._maybe_stall_project()
         return events
 
     def stall_task(self, task_id: str) -> list[DomainEvent]:
@@ -120,9 +122,34 @@ class HarnessStateMachine:
         events.append(self._calc_progress())
         if self._all_tasks_terminal():
             events.extend(self._finalize_project())
+        else:
+            self._maybe_stall_project()
         return events
 
+    def _maybe_stall_project(self) -> None:
+        """If no task is still RUNNING but the project isn't all-terminal
+        either (typical shape after a fail/validation_fail cascades
+        BLOCKED through the rest of the graph), park the project at
+        STALLED instead of leaving it limp at RUNNING. Without this the
+        UI's projectRunning flag stays true, the canvas refuses to
+        enable Retry on the offending card, and the user has no way out
+        short of pause/resume.
+        """
+        if self.state != ProjectState.RUNNING:
+            return
+        any_running = any(
+            t["status"] == TaskState.RUNNING for t in self._tasks.values()
+        )
+        if not any_running:
+            self._transition_project(ProjectState.STALLED)
+
     def retry_task(self, task_id: str) -> list[DomainEvent]:
+        # When the user retries a task that put the whole project at
+        # STALLED, also flip the project back to RUNNING so the harness
+        # is allowed to schedule again (PROJECT_TRANSITIONS forbids
+        # writing tasks while project is STALLED on some paths).
+        if self.state == ProjectState.STALLED:
+            self._transition_project(ProjectState.RUNNING)
         self._transition_task(task_id, TaskState.RUNNING)
         for t in self._tasks.values():
             if t["status"] == TaskState.BLOCKED:
@@ -186,19 +213,33 @@ class HarnessStateMachine:
         return events
 
     def _block_downstream(self, failed_task_id: str) -> list[DomainEvent]:
+        """Block every PENDING/PAUSED task that *transitively* depends on
+        ``failed_task_id``. Previous behaviour only marked direct
+        dependents, so a chain like setup → A → B left B as PENDING
+        forever — `_all_tasks_terminal()` then stayed False (PENDING ≠
+        terminal) and the project sat in RUNNING with nothing ever
+        scheduled, which in turn kept the UI's `projectRunning` flag
+        true and grayed out the Retry button on the actual offender.
+        """
         events = []
-        for t in self._tasks.values():
-            if t["status"] in TERMINAL_TASK_STATES or t["status"] == TaskState.BLOCKED:
-                continue
-            deps = t.get("deps", [])
-            if failed_task_id in deps:
-                if t["status"] in (TaskState.PENDING, TaskState.PAUSED):
-                    t["status"] = TaskState.BLOCKED
-                    events.append(TaskBlocked(
-                        project_id=self.project_id,
-                        task_id=t["id"],
-                        blocked_by=[failed_task_id],
-                    ))
+        newly_blocked = {failed_task_id}
+        changed = True
+        while changed:
+            changed = False
+            for t in self._tasks.values():
+                if t["status"] in TERMINAL_TASK_STATES or t["status"] == TaskState.BLOCKED:
+                    continue
+                deps = t.get("deps", []) or []
+                if any(d in newly_blocked for d in deps):
+                    if t["status"] in (TaskState.PENDING, TaskState.PAUSED):
+                        t["status"] = TaskState.BLOCKED
+                        newly_blocked.add(t["id"])
+                        events.append(TaskBlocked(
+                            project_id=self.project_id,
+                            task_id=t["id"],
+                            blocked_by=[d for d in deps if d in newly_blocked],
+                        ))
+                        changed = True
         return events
 
     def _get_failed_deps(self, task_id: str) -> list[str]:
