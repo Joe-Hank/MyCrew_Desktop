@@ -733,8 +733,12 @@ function InceptionDrawer() {
             <div className="relative">
               <button
                 onClick={() => setHistoryOpen((v) => !v)}
-                className="flex h-7 w-7 items-center justify-center rounded bg-white transition-colors hover:bg-zinc-50"
-                style={{ border: "1px solid var(--color-border-soft)", color: "var(--color-ink-muted)" }}
+                className="flex h-7 w-7 items-center justify-center rounded transition-colors hover:opacity-80"
+                style={{
+                  backgroundColor: "var(--color-card)",
+                  border: "1px solid var(--color-border-soft)",
+                  color: "var(--color-ink-muted)",
+                }}
                 title="历史会话"
               >
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -760,8 +764,12 @@ function InceptionDrawer() {
 
             <button
               onClick={handleNewSession}
-              className="flex h-7 w-7 items-center justify-center rounded bg-white transition-colors hover:bg-zinc-50"
-              style={{ border: "1px solid var(--color-border-soft)", color: "var(--color-ink-muted)" }}
+              className="flex h-7 w-7 items-center justify-center rounded transition-colors hover:opacity-80"
+              style={{
+                backgroundColor: "var(--color-card)",
+                border: "1px solid var(--color-border-soft)",
+                color: "var(--color-ink-muted)",
+              }}
               title="新对话"
             >
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -773,8 +781,11 @@ function InceptionDrawer() {
             {/* 2026-05-17: manual right-panel toggle. Each click flips
                 between forced-open and forced-closed; null state (auto)
                 gets seeded by the user's first click based on current
-                effective state. Highlighted brand color when open so
-                it reads as a state indicator, not just an action. */}
+                effective state. Theme-aware colors (var(--color-*))
+                so dark mode renders correctly — was hardcoded "white"
+                which stayed literal white in dark mode. Open state is
+                a subtle gray fill (--color-surface-alt) rather than
+                brand color, per user note "灰色即可". */}
             <button
               onClick={() =>
                 setManualRightPanelOpen(showRightPanel ? false : true)
@@ -782,10 +793,12 @@ function InceptionDrawer() {
               className="flex h-7 w-7 items-center justify-center rounded transition-colors"
               style={{
                 backgroundColor: showRightPanel
-                  ? "var(--color-brand-500)"
-                  : "white",
+                  ? "var(--color-surface-alt)"
+                  : "var(--color-card)",
                 border: "1px solid var(--color-border-soft)",
-                color: showRightPanel ? "white" : "var(--color-ink-muted)",
+                color: showRightPanel
+                  ? "var(--color-ink-soft)"
+                  : "var(--color-ink-muted)",
               }}
               title={showRightPanel ? "关闭任务/LLM 日志栏" : "打开任务/LLM 日志栏"}
             >
