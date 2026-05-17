@@ -141,22 +141,29 @@ async def run_crew(session: dict, user_message: str, start_from: str | None = No
                                   error=f"LLM 配置错误：{exc}")
         return planner_cache_svc.get(session_id) or {}
 
-    # Session-level thinking toggle (set by the user in the Plan Maker
-    # entry). Only takes effect when the resolved pro model's cached
-    # supports_thinking is true — otherwise we silently drop it so a
-    # stale toggle on an old session can't crash a non-reasoning model
-    # request. The cheap binary classifier always runs without thinking.
-    thinking_mode = bool(session.get("thinking_mode", 0))
-    pro_supports_thinking = False
-    if thinking_mode:
-        pro_models = await crud.get_all(
-            "llm_models",
-            "provider_id = ? AND model_name = ?",
-            (pro_provider["id"], pro_model),
-        )
-        pro_supports_thinking = (
-            bool(pro_models[0].get("supports_thinking", 0)) if pro_models else False
-        )
+    # Look up the pro model row once. We need two things from it:
+    #   - supports_thinking — gates thinking on the per-phase defaults
+    #     (PHASE_THINKING_DEFAULTS). An unsupported model silently
+    #     downgrades to off so a stale config can't crash a request.
+    #   - max_tokens — the model's declared output cap. We hand each
+    #     phase 80% of that so even a 20-task review JSON has room
+    #     (Phase 3 previously hardcoded 4000, which truncated and
+    #     killed tool_use parsing → "未捕获到合法输出").
+    # Session-level thinking_mode (DB column) is kept for backward
+    # compatibility with old data but no longer consumed here — the
+    # orchestrator now decides per-phase via PHASE_THINKING_DEFAULTS.
+    pro_models = await crud.get_all(
+        "llm_models",
+        "provider_id = ? AND model_name = ?",
+        (pro_provider["id"], pro_model),
+    )
+    pro_model_row = pro_models[0] if pro_models else {}
+    pro_supports_thinking = bool(pro_model_row.get("supports_thinking", 0))
+    # Floor at 4096 in case the DB row is missing/zero — Phase 3's
+    # original 4000 was already too small, so 4096 is the minimum
+    # we'd ever want to spend.
+    pro_max_tokens = int(pro_model_row.get("max_tokens") or 8192)
+    phase_max_tokens = max(4096, int(pro_max_tokens * 0.8))
 
     try:
         # ── Phase 0: completeness ─────────────────────────────────
@@ -188,8 +195,8 @@ async def run_crew(session: dict, user_message: str, start_from: str | None = No
                 expected_output="调一次 submit_concept 提交 ConceptDoc 后一句中文确认。",
                 tools=[make_submit_concept_tool(session_id)],
                 provider=pro_provider, model_name=pro_model,
-                temperature=0.7, max_tokens=4000,
-                thinking_mode=thinking_mode,
+                temperature=0.7, max_tokens=phase_max_tokens,
+                thinking_mode=PHASE_THINKING_DEFAULTS["concept"],
                 supports_thinking=pro_supports_thinking,
             )
             planner_cache_svc.set_phase_output(session_id, "concept", concept_dict["concept"])
@@ -215,8 +222,8 @@ async def run_crew(session: dict, user_message: str, start_from: str | None = No
                 expected_output="调一次 submit_atomic_tasks 提交任务列表后一句中文确认。",
                 tools=[make_submit_atomic_tasks_tool(session_id)],
                 provider=pro_provider, model_name=pro_model,
-                temperature=0.5, max_tokens=4000,
-                thinking_mode=thinking_mode,
+                temperature=0.5, max_tokens=phase_max_tokens,
+                thinking_mode=PHASE_THINKING_DEFAULTS["system_design"],
                 supports_thinking=pro_supports_thinking,
             )
             planner_cache_svc.set_phase_output(session_id, "system_design", atomic_dict["tasks"])
@@ -243,8 +250,8 @@ async def run_crew(session: dict, user_message: str, start_from: str | None = No
                 expected_output="调一次 submit_reviewed_tasks 提交后一句中文确认。",
                 tools=[make_submit_reviewed_tasks_tool(session_id)],
                 provider=pro_provider, model_name=pro_model,
-                temperature=0.2, max_tokens=4000,
-                thinking_mode=thinking_mode,
+                temperature=0.2, max_tokens=phase_max_tokens,
+                thinking_mode=PHASE_THINKING_DEFAULTS["review"],
                 supports_thinking=pro_supports_thinking,
             )
             planner_cache_svc.set_phase_output(session_id, "review", reviewed_dict["tasks"])
@@ -281,8 +288,8 @@ async def run_crew(session: dict, user_message: str, start_from: str | None = No
                 ),
                 tools=[make_submit_pathed_tasks_tool(session_id)],
                 provider=pro_provider, model_name=pro_model,
-                temperature=0.3, max_tokens=3000,
-                thinking_mode=thinking_mode,
+                temperature=0.3, max_tokens=phase_max_tokens,
+                thinking_mode=PHASE_THINKING_DEFAULTS["project_mgmt"],
                 supports_thinking=pro_supports_thinking,
                 validator=lambda payload: _validate_path_specs(
                     payload, reviewed or [], allowed_prefixes,
@@ -313,16 +320,13 @@ async def run_crew(session: dict, user_message: str, start_from: str | None = No
             # imports point at non-existent symbols. _run_phase doesn't
             # have a `validator` kwarg.
             #
-            # 2026-05-17 fix: the previous version dumped the FULL pathed
-            # task list (detail / acceptance_notes / kind / deps / ...) and
-            # capped max_tokens at 4000. For a 10-task project the output
-            # alone (contracts array with files / exports / imports for
-            # each .cs task) easily exceeds 4000 tokens — CrewAI then
-            # ran into truncated JSON, exhausted max_iter, and
-            # force_final_answer returned empty → "Invalid response from
-            # LLM call - None or empty". Slim the input to ONLY the
-            # fields code_contract needs to decide (task_index, title,
-            # output_paths) and bump max_tokens to 16000.
+            # We also slim the LLM-visible input to ONLY the fields
+            # code_contract needs (task_index, title, output_paths, kind).
+            # Dumping the full PathedTask list (detail / acceptance_notes /
+            # deps / ...) wastes input tokens and adds nothing to the
+            # contract decision. max_tokens itself is now phase_max_tokens
+            # (80% of the model's declared cap) so output truncation is
+            # no longer the bottleneck even for 20+ task projects.
             cc_pathed_slim = [
                 {
                     "task_index": i,
@@ -352,8 +356,8 @@ async def run_crew(session: dict, user_message: str, start_from: str | None = No
                 ),
                 tools=[make_submit_code_contracts_tool(session_id)],
                 provider=pro_provider, model_name=pro_model,
-                temperature=0.25, max_tokens=16000,
-                thinking_mode=thinking_mode,
+                temperature=0.25, max_tokens=phase_max_tokens,
+                thinking_mode=PHASE_THINKING_DEFAULTS["code_contract"],
                 supports_thinking=pro_supports_thinking,
                 validator=lambda payload: _validate_code_contracts(
                     payload, pathed or [],
@@ -397,8 +401,8 @@ async def run_crew(session: dict, user_message: str, start_from: str | None = No
                     make_submit_assignments_tool(session_id),
                 ],
                 provider=pro_provider, model_name=pro_model,
-                temperature=0.2, max_tokens=3000,
-                thinking_mode=thinking_mode,
+                temperature=0.2, max_tokens=phase_max_tokens,
+                thinking_mode=PHASE_THINKING_DEFAULTS["agent_assignment"],
                 supports_thinking=pro_supports_thinking,
             )
             raw_assignments = assignments_dict.get("assignments", [])
