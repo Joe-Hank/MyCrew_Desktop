@@ -358,11 +358,31 @@ class MCPPool:
                             server_id=server_id, error=str(exc))
 
     async def _broadcast_status_change(self, server_id: str, conn: MCPConnection) -> None:
-        if self._broadcast_fn:
-            try:
-                await self._broadcast_fn("mcp.status_changed", conn.to_status_dict())
-            except Exception:
-                pass
+        # Noise control (2026-05-17): the heartbeat loop re-runs every
+        # 30s and re-broadcasts identical "connected" for healthy servers
+        # plus identical "error" for dead ones (e.g. Unity HTTP MCP at
+        # port 8090 when Unity Editor is closed). That alone produced
+        # ~491 mcp.status_changed events in one day's events table, most
+        # carrying zero new information. Track the last broadcast value
+        # per server and skip when nothing meaningful changed (status +
+        # error_message + tools_count).
+        if not self._broadcast_fn:
+            return
+        snapshot = conn.to_status_dict()
+        key = (
+            snapshot.get("status"),
+            snapshot.get("error") or "",
+            snapshot.get("tools_count", 0),
+        )
+        if getattr(self, "_last_broadcast_status", None) is None:
+            self._last_broadcast_status = {}
+        if self._last_broadcast_status.get(server_id) == key:
+            return
+        self._last_broadcast_status[server_id] = key
+        try:
+            await self._broadcast_fn("mcp.status_changed", snapshot)
+        except Exception:
+            pass
 
 
 mcp_pool = MCPPool()

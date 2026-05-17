@@ -41,7 +41,14 @@ def _audit(tool_name: str, status: str, **extra: Any) -> None:
     thread); schedules `manager.broadcast` on the main loop where WS
     connection state lives. Failures are swallowed — audit must never
     break the underlying tool call.
+
+    Noise control (2026-05-17): the 'started' status carries no debug
+    info beyond what 'completed' already conveys (the latter has the
+    same tool name + `duration_ms`). Roughly halved events-table size
+    just by dropping it. Errors / denials still broadcast normally.
     """
+    if status == "started":
+        return
     from infra.runtime import get_main_loop
     try:
         from api.ws import manager
