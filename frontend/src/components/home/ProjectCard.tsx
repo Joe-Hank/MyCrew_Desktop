@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   useProject,
@@ -10,14 +11,17 @@ import {
   type Project,
   type Task,
 } from "../../queries/useProjectQuery";
-import { useCreateTask } from "../../queries/useWorkflowQuery";
+import { useCreateTask, useScaffoldProject } from "../../queries/useWorkflowQuery";
 import { useAgents, useCrews } from "../../queries/useTeamQuery";
 import { performerLabel } from "../../lib/performer";
 import { topoOrder } from "../../lib/topoOrder";
+import { deriveSlugFromName, TEMPLATE_LABELS } from "../../lib/scaffold";
 import { useCreateInceptionSession } from "../../queries/useInceptionQuery";
 import { useInceptionStore } from "../../stores/useInceptionStore";
 import { usePrefsStore } from "../../stores/usePrefsStore";
+import { useEvent } from "../../hooks/useEvent";
 import { apiFetch, ApiError } from "../../net/api";
+import ScaffoldConfigModal from "../task/ScaffoldConfigModal";
 
 // ── Card state machine ─────────────────────────────────────────────
 //
@@ -60,19 +64,39 @@ const stateLabels: Record<string, string> = {
 
 function ProjectCard({ project }: { project: Project }) {
   const navigate = useNavigate();
+  const qc = useQueryClient();
   const { data: detail } = useProject(project.id);
   const [deleteConfirm, setDeleteConfirm] = useState(false);
   const [deleteInput, setDeleteInput] = useState("");
   const [pathModal, setPathModal] = useState(false);
   const [pathInput, setPathInput] = useState(project.root_path ?? "");
+  // PM v5+ scaffold modal — opens when user clicks 路径 on a Unity-
+  // template project whose scaffold_status is pending or failed.
+  const [scaffoldModalOpen, setScaffoldModalOpen] = useState(false);
   const deleteMut = useDeleteProject();
   const cloneMut = useCloneProject();
   const rootPathMut = useUpdateRootPath();
   const favMut = useToggleFavorite();
+  const scaffoldMut = useScaffoldProject();
   const createSession = useCreateInceptionSession();
   const openDrawer = useInceptionStore((s) => s.openDrawer);
   const setActiveSession = useInceptionStore((s) => s.setActiveSession);
   const isFavorited = !!project.favorited_at;
+
+  // Refetch the project row whenever a scaffold WS event for THIS
+  // project lands. The path button label / state derive from
+  // project.scaffold_status so they need to stay fresh.
+  const onScaffoldEvent = useCallback(
+    (msg: { payload: Record<string, unknown> }) => {
+      if (msg.payload?.project_id !== project.id) return;
+      qc.invalidateQueries({ queryKey: ["project", project.id] });
+      qc.invalidateQueries({ queryKey: ["projects"] });
+    },
+    [project.id, qc],
+  );
+  useEvent("project.scaffold_progress", onScaffoldEvent);
+  useEvent("project.scaffold_complete", onScaffoldEvent);
+  useEvent("project.scaffold_failed", onScaffoldEvent);
 
   function handlePathSave() {
     if (!pathInput.trim()) return;
@@ -105,23 +129,53 @@ function ProjectCard({ project }: { project: Project }) {
     return typeof result === "string" ? result : null;
   }
 
-  // Path button has three states (per spec):
-  //   1. unset       — no root_path yet                → blue, picker
-  //   2. modifiable  — root configured but never started → gray, picker seeded with current
-  //   3. locked      — project has been started or finished → gray, lock icon, opens Explorer read-only
-  // "started" detection: any state besides 'ready' implies execution
-  // happened at some point (running/paused/stalled/completed*/aborted).
-  type PathBtnMode = "unset" | "modifiable" | "locked";
-  const pathBtnMode: PathBtnMode = !project.root_path
-    ? "unset"
-    : project.state === "ready"
-      ? "modifiable"
-      : "locked";
+  // Path button mode machine. 2026-05-17 redesign: Unity-template
+  // projects now go through their own scaffold modal flow on first
+  // click, before there's any root_path to pick. After the clone, the
+  // button behaves like "locked" (opens explorer at the child dir).
+  //
+  //   scaffold_pending   — Unity template + scaffold_status pending/failed
+  //                          → opens ScaffoldConfigModal (collects parent
+  //                          + slug, fires git clone in background)
+  //   scaffold_progress  — scaffold_status in_progress → disabled spinner
+  //   unset              — no root_path yet, non-Unity            → folder picker
+  //   modifiable         — root configured, state=ready            → folder picker
+  //                          seeded with current path
+  //   locked             — has root_path, state≠ready or scaffold done
+  //                          → opens Explorer read-only
+  type PathBtnMode =
+    | "scaffold_pending"
+    | "scaffold_progress"
+    | "unset"
+    | "modifiable"
+    | "locked";
+
+  const ss = project.scaffold_status;
+  const isScaffoldable =
+    !!project.template_id && project.template_id in TEMPLATE_LABELS;
+
+  const pathBtnMode: PathBtnMode = (() => {
+    if (isScaffoldable && (ss === "pending" || ss === "failed")) {
+      return "scaffold_pending";
+    }
+    if (ss === "in_progress") return "scaffold_progress";
+    if (!project.root_path) return "unset";
+    if (project.state === "ready") return "modifiable";
+    return "locked";
+  })();
 
   /** Click handler for the "路径" button. Behaviour branches by mode:
-   *   unset / modifiable → folder picker (modifiable seeds defaultPath)
-   *   locked             → just open the existing root in Explorer */
+   *   scaffold_pending  → open ScaffoldConfigModal (modal kicks off
+   *                       background git clone on submit)
+   *   scaffold_progress → no-op (button is disabled visually)
+   *   unset/modifiable  → folder picker (modifiable seeds defaultPath)
+   *   locked            → open existing root in Explorer */
   async function handleConfigurePath() {
+    if (pathBtnMode === "scaffold_progress") return;
+    if (pathBtnMode === "scaffold_pending") {
+      setScaffoldModalOpen(true);
+      return;
+    }
     if (pathBtnMode === "locked") {
       try {
         await apiFetch(`/projects/${project.id}/open-root`, { method: "POST" });
@@ -147,6 +201,24 @@ function ProjectCard({ project }: { project: Project }) {
     }
     setPathInput(project.root_path ?? "");
     setPathModal(true);
+  }
+
+  /** Submit handler for the ScaffoldConfigModal. Closes the modal and
+   *  fires the scaffold mutation; WS events drive subsequent UI updates
+   *  (button → spinner → done). */
+  async function handleScaffoldSubmit({
+    rootParentPath, slug,
+  }: { rootParentPath: string; slug: string }) {
+    setScaffoldModalOpen(false);
+    try {
+      await scaffoldMut.mutateAsync({
+        projectId: project.id,
+        root_parent_path: rootParentPath,
+        slug,
+      });
+    } catch (err) {
+      alert(`脚手架启动失败：${(err as Error).message ?? err}`);
+    }
   }
 
   function handleCopy() {
@@ -490,6 +562,18 @@ function ProjectCard({ project }: { project: Project }) {
           </div>
         </div>
       )}
+
+      {scaffoldModalOpen && (
+        <ScaffoldConfigModal
+          defaultSlug={deriveSlugFromName(project.name)}
+          defaultParent={project.root_parent_path ?? ""}
+          templateLabel={
+            project.template_id ? TEMPLATE_LABELS[project.template_id] : undefined
+          }
+          onSubmit={handleScaffoldSubmit}
+          onCancel={() => setScaffoldModalOpen(false)}
+        />
+      )}
     </div>
   );
 }
@@ -498,39 +582,63 @@ function PathButton({
   mode,
   onClick,
 }: {
-  mode: "unset" | "modifiable" | "locked";
+  mode:
+    | "scaffold_pending"
+    | "scaffold_progress"
+    | "unset"
+    | "modifiable"
+    | "locked";
   onClick: () => void;
 }) {
-  // Visual contract:
-  //   unset       — brand-blue fill, white text. Calls user attention
-  //                 because the primary "开始" button is gated on this.
-  //   modifiable  — light gray bg, label-color text, unlock icon. Picker
-  //                 will seed defaultPath to the current root_path.
-  //   locked      — light gray bg, disabled-color text, lock icon. Click
-  //                 opens Explorer at root_path; no modification allowed.
-  const bg = mode === "unset"
+  // 2026-05-17: two new modes for the Unity-template scaffold flow:
+  //   scaffold_pending  — brand blue, prompts the modal. Visually
+  //                       parallel to "unset" since both gate the
+  //                       primary 「开始」 button.
+  //   scaffold_progress — disabled + indeterminate spinner.
+  const isPending = mode === "scaffold_pending";
+  const isInProgress = mode === "scaffold_progress";
+
+  const bg = (mode === "unset" || isPending)
     ? "var(--color-brand-500)"
     : "var(--color-card)";
-  const color = mode === "unset"
+  const color = (mode === "unset" || isPending)
     ? "white"
-    : mode === "modifiable"
-      ? "var(--color-ink-label)"
-      : "var(--color-ink-disabled)";
-  const border = mode === "unset"
+    : isInProgress
+      ? "var(--color-ink-muted)"
+      : mode === "modifiable"
+        ? "var(--color-ink-label)"
+        : "var(--color-ink-disabled)";
+  const border = (mode === "unset" || isPending)
     ? "var(--color-brand-500)"
     : "var(--color-border-soft)";
-  const title = mode === "unset"
-    ? "未配置路径 — 点击选择根目录"
-    : mode === "modifiable"
-      ? "已配置路径但项目未启动，可重新选择"
-      : "项目已启动，路径锁定。点击在资源管理器中打开";
+  const title = isPending
+    ? "未构建项目雏形 — 点击配置目录并自动下载模板"
+    : isInProgress
+      ? "正在构建项目雏形…"
+      : mode === "unset"
+        ? "未配置路径 — 点击选择根目录"
+        : mode === "modifiable"
+          ? "已配置路径但项目未启动，可重新选择"
+          : "项目已启动，路径锁定。点击在资源管理器中打开";
+  const label = isPending
+    ? "配置路径"
+    : isInProgress
+      ? "构建中"
+      : "路径";
   return (
     <button
       onClick={onClick}
-      className="flex items-center gap-1 rounded-lg border px-3 py-2 text-sm transition-opacity hover:opacity-90"
+      disabled={isInProgress}
+      className="flex items-center gap-1 rounded-lg border px-3 py-2 text-sm transition-opacity hover:opacity-90 disabled:opacity-70 disabled:cursor-not-allowed"
       style={{ backgroundColor: bg, borderColor: border, color }}
       title={title}
     >
+      {isInProgress && (
+        <span
+          className="h-3 w-3 animate-spin rounded-full border-2 border-current"
+          style={{ borderTopColor: "transparent" }}
+        />
+      )}
       {mode === "locked" && (
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
           <rect x="3" y="11" width="18" height="11" rx="2" />
@@ -543,7 +651,7 @@ function PathButton({
           <path d="M7 11V7a5 5 0 0 1 10 0v4 M17 11V7a5 5 0 0 0-5-5" />
         </svg>
       )}
-      路径
+      {label}
     </button>
   );
 }

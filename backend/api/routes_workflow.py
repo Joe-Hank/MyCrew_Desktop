@@ -1,4 +1,6 @@
+import asyncio
 import json
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
@@ -11,11 +13,12 @@ router = APIRouter(prefix="/workflow", tags=["workflow"])
 
 
 class StartProjectBody(BaseModel):
-    """Optional scaffold args. Required ONLY when the project's
-    scaffold_status is 'pending' (or 'failed' — retry). For already-
-    scaffolded projects the body can be omitted (start is idempotent).
-    The English `slug` becomes the on-disk folder name; root_parent_path
-    is the user-chosen parent dir under which the clone lands."""
+    """Optional scaffold args. 2026-05-17: scaffold is no longer
+    triggered through this route — start() rejects pending/failed
+    projects with a "please use the path button" message. These
+    fields stay in the schema for backward compatibility with old
+    clients, but the server ignores them.
+    """
     root_parent_path: str | None = None
     slug: str | None = None
 
@@ -34,6 +37,135 @@ async def start_project(project_id: str, body: StartProjectBody | None = None):
         raise HTTPException(404, detail="project not found")
     except ValueError as exc:
         return {"ok": False, "error": {"code": "validation_failed", "message": str(exc)}}
+
+
+# ── PM v5+ scaffold endpoints (2026-05-17) ────────────────────────
+
+
+class ScaffoldBody(BaseModel):
+    """User-supplied parent directory + English slug. Together they
+    determine where the Unity template gets cloned:
+        <root_parent_path>/<slug>/
+    """
+    root_parent_path: str
+    slug: str
+
+
+@router.post("/projects/{project_id}/scaffold")
+async def scaffold_project(project_id: str, body: ScaffoldBody):
+    """Trigger an async git clone of the project's bound Unity template
+    into <root_parent_path>/<slug>/. Returns 202 Accepted immediately;
+    progress streamed via project.scaffold_* WS events. On success the
+    project row's root_path is updated to the new child dir and
+    scaffold_status flips to 'done'.
+
+    Fires the ProjectCard 「路径」 button when the project is unsaved
+    (scaffold_status='pending' or 'failed').
+    """
+    project = await crud.get_by_id("projects", project_id)
+    if not project:
+        raise HTTPException(404, detail="project not found")
+    if project.get("scaffold_status") == "in_progress":
+        return {"ok": False, "error": {
+            "code": "in_progress",
+            "message": "项目正在构建雏形，请等待完成",
+        }}
+    if project.get("scaffold_status") == "done":
+        return {"ok": False, "error": {
+            "code": "already_scaffolded",
+            "message": "项目已构建过；想重新构建请用修复接口",
+        }}
+    # Fire-and-forget the clone; user gets immediate response
+    asyncio.create_task(
+        workflow_svc.scaffold_only(project_id, body.root_parent_path, body.slug),
+    )
+    return {"ok": True, "data": {"project_id": project_id, "status": "started"}}
+
+
+@router.post("/projects/{project_id}/scaffold-repair")
+async def repair_scaffold(project_id: str):
+    """Re-run the clone with overwrite=True. Used after the structure
+    audit reports missing critical files (e.g. user deleted
+    ProjectSettings/ manually, git download truncated). Reads the
+    project's stored root_parent_path + slug — no body needed.
+
+    DESTRUCTIVE: wipes the existing child directory before re-cloning,
+    so any user-side changes inside it are lost. Frontend must confirm
+    with the user via the audit modal first.
+    """
+    project = await crud.get_by_id("projects", project_id)
+    if not project:
+        raise HTTPException(404, detail="project not found")
+    if project.get("scaffold_status") == "in_progress":
+        return {"ok": False, "error": {
+            "code": "in_progress",
+            "message": "项目正在构建雏形，请等待完成",
+        }}
+    parent = project.get("root_parent_path")
+    root = project.get("root_path")
+    # Derive slug from root_path (= <parent>/<slug>) since we don't
+    # store it separately. Fallback to parsing if root_path missing.
+    if not parent:
+        return {"ok": False, "error": {
+            "code": "missing_parent",
+            "message": "项目缺少 root_parent_path，无法定位克隆目标。请从主页"
+                       "项目卡片【路径】按钮重新选择目录",
+        }}
+    slug = Path(root).name if root else None
+    if not slug:
+        return {"ok": False, "error": {
+            "code": "missing_slug",
+            "message": "无法从 root_path 推导项目英文名",
+        }}
+    asyncio.create_task(
+        workflow_svc.scaffold_only(project_id, parent, slug, overwrite=True),
+    )
+    return {"ok": True, "data": {
+        "project_id": project_id,
+        "status": "repairing",
+        "target": f"{parent}/{slug}",
+    }}
+
+
+@router.get("/projects/{project_id}/scaffold-audit")
+async def audit_scaffold(project_id: str):
+    """Check that the project's scaffolded directory still contains the
+    4 critical anchor paths (Assets/, Packages/manifest.json,
+    ProjectSettings/ProjectVersion.txt, .mycrew_scaffolded). Returns
+    the list of missing paths so the frontend can decide whether to
+    pop the ScaffoldAuditModal before allowing 开始 to proceed.
+
+    Returns 200 with ok=true and missing=[] for non-Unity projects
+    (no scaffold needed) and for projects not yet scaffolded
+    (audit_required is meaningless before clone).
+    """
+    project = await crud.get_by_id("projects", project_id)
+    if not project:
+        raise HTTPException(404, detail="project not found")
+    status = project.get("scaffold_status")
+    if status != "done":
+        # Either non-Unity (null) or not yet scaffolded — nothing to
+        # audit. UI shouldn't gate start on this.
+        return {"ok": True, "data": {
+            "applicable": False,
+            "scaffold_status": status,
+            "missing": [],
+        }}
+    root = project.get("root_path")
+    if not root:
+        return {"ok": True, "data": {
+            "applicable": False,
+            "scaffold_status": status,
+            "missing": [],
+        }}
+    from services.template_cloner_svc import audit_against_skeleton
+    missing = audit_against_skeleton(Path(root))
+    return {"ok": True, "data": {
+        "applicable": True,
+        "scaffold_status": status,
+        "root_path": root,
+        "missing": missing,
+    }}
 
 
 @router.post("/projects/{project_id}/pause")

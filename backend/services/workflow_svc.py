@@ -163,17 +163,31 @@ class WorkflowService:
                 slug=slug,
             )
 
-    async def _scaffold_then_start(
+    async def scaffold_only(
         self,
         project_id: str,
-        *,
-        template_id: str | None,
         root_parent_path: str,
         slug: str,
+        *,
+        overwrite: bool = False,
     ) -> None:
-        """Run the clone, then transition to a normal start. All errors
-        are caught + recorded as scaffold_status='failed' + a WS event
-        so the frontend can surface them to the user."""
+        """Run a git clone for the bound Unity template, WITHOUT
+        continuing to start the workflow. Fire-and-forget — caller
+        returns to user immediately; UI tracks progress via the
+        project.scaffold_* WS events.
+
+        2026-05-17 redesign: replaces _scaffold_then_start. Triggered
+        from the ProjectCard 「路径」 button (POST /workflow/projects/
+        {id}/scaffold) and the repair flow (POST /scaffold-repair with
+        overwrite=True). On success: scaffold_status='done' — but no
+        automatic start. User clicks 开始 on the task page separately.
+        """
+        project = await crud.get_by_id("projects", project_id)
+        if not project:
+            log.warning("scaffold_only.project_missing", project_id=project_id)
+            return
+        template_id = project.get("template_id") or ""
+
         from services.template_cloner_svc import (
             clone_template,
             mark_scaffold_status,
@@ -181,6 +195,11 @@ class WorkflowService:
             ScaffoldError,
         )
         from api.ws import manager as ws_manager
+
+        await crud.update_by_id("projects", project_id, {
+            "root_parent_path": root_parent_path,
+        })
+        await mark_scaffold_status(project_id, "in_progress")
 
         async def _broadcast(stage: str, message: str) -> None:
             try:
@@ -193,13 +212,15 @@ class WorkflowService:
                 pass  # WS issues must never break the clone path
 
         try:
-            await _broadcast("starting", f"开始构建项目雏形（{slug}）…")
+            verb = "修复并重新构建" if overwrite else "构建"
+            await _broadcast("starting", f"开始{verb}项目雏形（{slug}）…")
             new_root = await clone_template(
                 project_id,
-                template_id=template_id or "",
+                template_id=template_id,
                 parent_dir=root_parent_path,
                 project_slug=slug,
                 on_progress=_broadcast,
+                overwrite=overwrite,
             )
             await update_project_root(project_id, new_root)
             await mark_scaffold_status(project_id, "done")
@@ -208,12 +229,9 @@ class WorkflowService:
                 "root_path": str(new_root),
             })
             log.info("workflow.scaffold_complete",
-                     project_id=project_id, root_path=str(new_root))
-            # Now do the real start. Re-take the lock; the public start
-            # method's pre-checks already passed (scaffold_status moved
-            # to 'done' above, so the in_progress branch is skipped).
-            async with self._get_project_lock(project_id):
-                await self._start_locked(project_id)
+                     project_id=project_id,
+                     root_path=str(new_root),
+                     overwrite=overwrite)
         except ScaffoldError as exc:
             await mark_scaffold_status(project_id, "failed")
             try:
@@ -241,45 +259,32 @@ class WorkflowService:
         self,
         project_id: str,
         *,
-        root_parent_path: str | None = None,
-        slug: str | None = None,
+        # Legacy kwargs from the old "scaffold via start" flow — still
+        # accepted so old tests keep their signature compatible, but
+        # they no longer affect behavior. Scaffold now lives on its own
+        # POST /workflow/projects/{id}/scaffold route triggered by the
+        # ProjectCard 「路径」 button.
+        root_parent_path: str | None = None,  # noqa: ARG002 — kept for legacy callers
+        slug: str | None = None,  # noqa: ARG002
     ) -> None:
         project = await crud.get_by_id("projects", project_id)
         if not project:
             raise KeyError(f"Project {project_id} not found")
 
-        # V5+ scaffold gate. Branches BEFORE we touch tasks / harness /
-        # state because a 'pending' project may not even have its
-        # output_paths root resolved yet.
+        # V5+ scaffold gate. 2026-05-17 redesign: start() no longer
+        # triggers the clone. If user hasn't scaffolded yet, refuse with
+        # a clear pointer to the ProjectCard's path button. If scaffold
+        # is mid-flight, refuse with "wait". scaffold_status==None means
+        # non-Unity project (no scaffold needed) → falls through to the
+        # normal start path.
         scaffold_status = project.get("scaffold_status")
         if scaffold_status in ("pending", "failed"):
-            if not (root_parent_path and slug):
-                raise ValueError(
-                    "项目尚未脚手架；请同时提供 root_parent_path + slug"
-                    "（用户选的父目录 + 英文项目名）"
-                )
-            from services.template_cloner_svc import mark_scaffold_status
-            await crud.update_by_id("projects", project_id, {
-                "root_parent_path": root_parent_path,
-            })
-            await mark_scaffold_status(project_id, "in_progress")
-            # Fire-and-forget. The task will:
-            #   - run the clone
-            #   - on success: update root_path + scaffold_status='done',
-            #     then re-enter _start_locked() to do the real start
-            #   - on failure: scaffold_status='failed' + WS event;
-            #     user can retry from the UI
-            asyncio.create_task(
-                self._scaffold_then_start(
-                    project_id,
-                    template_id=project.get("template_id"),
-                    root_parent_path=root_parent_path,
-                    slug=slug,
-                )
+            raise ValueError(
+                "项目尚未脚手架。请回主页点项目卡片【路径】按钮，"
+                "选好父目录 + 英文项目名后再来启动。"
             )
-            return
         if scaffold_status == "in_progress":
-            raise ValueError("项目正在脚手架中，请等待完成后再启动")
+            raise ValueError("项目正在构建雏形，请等待完成后再启动")
 
         tasks = await self._load_tasks(project_id)
         if not tasks:

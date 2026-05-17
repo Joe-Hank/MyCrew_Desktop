@@ -80,6 +80,7 @@ async def clone_template(
     project_slug: str,
     *,
     on_progress=None,
+    overwrite: bool = False,
 ) -> Path:
     """Clone the template matching `template_id` into
     `<parent_dir>/<project_slug>/`. Returns the resolved child path.
@@ -88,8 +89,14 @@ async def clone_template(
     fired at each milestone — caller wires it to the WS broadcaster so
     the frontend sees a live status string under the progress bar.
 
+    `overwrite=True` (2026-05-17): used by the scaffold-repair flow.
+    If the target already exists, force-delete it (Windows-safe rmtree)
+    before re-cloning. WITHOUT overwrite, a target dir that we ourselves
+    scaffolded earlier is still cleaned up (via the sentinel check) but
+    a foreign dir refuses with ScaffoldError.
+
     Raises ScaffoldError on any invariant violation (bad name, unknown
-    template, git failure, target exists, etc).
+    template, git failure, target exists without sentinel, etc).
     """
     # ── Pre-flight ────────────────────────────────────────────────
     if not _SAFE_NAME_RE.match(project_slug):
@@ -116,20 +123,22 @@ async def clone_template(
 
     target = parent_path / project_slug
     if target.exists():
-        # The target already has stuff. Two cases:
+        # The target already has stuff. Three cases:
+        #  - overwrite=True (repair flow): force-delete and re-clone
+        #    regardless of who put files there. Caller already confirmed
+        #    with the user via the audit modal.
         #  - scaffold_status='failed' carry-over: previous run partially
-        #    populated it; clean and re-clone.
+        #    populated it; clean and re-clone if our sentinel is there.
         #  - User stuffed their own files there: refuse to overwrite.
-        # Discriminate via a sentinel file we drop after successful
-        # clone (`.mycrew_scaffolded`). Absence => not our prior run,
-        # don't touch.
         sentinel = target / ".mycrew_scaffolded"
-        if sentinel.exists():
+        if overwrite or sentinel.exists():
+            why = ("repair mode（用户确认覆盖）" if overwrite
+                   else "本工具历史克隆 — 删除后重克")
             await _progress(on_progress, "skip",
-                            f"{target} 已存在且为本工具历史克隆 — 删除后重克")
+                            f"{target} 已存在且为 {why}")
             try:
-                shutil.rmtree(target)
-            except OSError as exc:
+                _safe_rmtree(target)
+            except Exception as exc:
                 raise ScaffoldError(
                     f"清理旧克隆失败：{target}（{exc}）"
                 ) from exc
@@ -304,6 +313,46 @@ async def update_project_root(project_id: str, new_root: Path) -> None:
     })
 
 
+# ── Structure audit (2026-05-17) ──────────────────────────────────
+
+
+# Per-template list of MINIMUM paths that must exist after a successful
+# clone. Keep narrow — user decision 2026-05-17: only the 4 critical
+# anchors below (not the full directory_skeleton, which includes
+# recommended-but-optional dirs like Assets/Fonts/).
+_AUDIT_REQUIRED_PATHS = (
+    "Assets",  # The Unity Assets/ tree exists at all (any kind of project)
+    "Packages/manifest.json",  # Package manifest — Unity refuses to open without it
+    "ProjectSettings/ProjectVersion.txt",  # Editor version pin
+    ".mycrew_scaffolded",  # Our own sentinel — drops after successful clone
+)
+
+
+def audit_against_skeleton(project_root: Path) -> list[str]:
+    """Verify a scaffolded Unity project hasn't been corrupted /
+    half-deleted between scaffold time and the first 开始 click.
+
+    Returns a list of MISSING relative paths. Empty list = audit passed.
+    Used by the new GET /workflow/projects/{id}/scaffold-audit route
+    and by TaskHeader's first-start gate before allowing PM to run.
+
+    template_id-agnostic for V1: all 4 Unity templates share the same
+    4 critical anchors (Universal 2D/3D, AR Mobile, MR Core all use
+    Assets + Packages/manifest.json + ProjectSettings/ProjectVersion.txt
+    + the .mycrew_scaffolded marker). If template-specific audit rules
+    are ever needed, add a per-template override in unity_templates.py.
+    """
+    if not project_root.exists() or not project_root.is_dir():
+        # Whole root gone — report all paths missing so the repair flow
+        # kicks in immediately.
+        return list(_AUDIT_REQUIRED_PATHS)
+    missing: list[str] = []
+    for rel in _AUDIT_REQUIRED_PATHS:
+        if not (project_root / rel).exists():
+            missing.append(rel)
+    return missing
+
+
 __all__ = [
     "TEMPLATE_REPO_URL",
     "TEMPLATE_ID_TO_DIR",
@@ -311,4 +360,5 @@ __all__ = [
     "clone_template",
     "mark_scaffold_status",
     "update_project_root",
+    "audit_against_skeleton",
 ]

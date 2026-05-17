@@ -6,6 +6,8 @@ import {
   usePauseProject,
   useResumeProject,
   useRequiredMcps,
+  useScaffoldAudit,
+  useRepairScaffold,
   type RequiredMcp,
 } from "../../queries/useWorkflowQuery";
 import {
@@ -16,25 +18,7 @@ import { useEvent } from "../../hooks/useEvent";
 import { apiFetch, ApiError } from "../../net/api";
 import { useDismissibleConfirm } from "../common/ConfirmDialog";
 import { askPauseConfirm } from "../../lib/pauseConfirm";
-import ScaffoldConfigModal from "./ScaffoldConfigModal";
-
-// V5+ scaffold flow — registry of {template_id → human label} for the
-// modal header. Mirrors backend's TEMPLATE_ID_TO_DIR keys.
-const TEMPLATE_LABELS: Record<string, string> = {
-  unity_universal_2d: "Universal 2D",
-  unity_universal_3d: "Universal 3D",
-  unity_ar_mobile: "AR Mobile",
-  unity_mr_core: "MR Core",
-};
-
-// Best-effort slug derivation from project name: if the name is already
-// ASCII-safe, pre-fill it. Chinese / mixed names → empty, user fills it.
-function deriveSlugFromName(name: string): string {
-  const cleaned = name.replace(/[^A-Za-z0-9_-]/g, "");
-  if (!cleaned) return "";
-  // Ensure first char is alnum (slug regex requirement)
-  return /^[A-Za-z0-9]/.test(cleaned) ? cleaned.slice(0, 64) : "";
-}
+import ScaffoldAuditModal from "./ScaffoldAuditModal";
 
 const mcpDotColor: Record<string, string> = {
   connected: "#10b981",
@@ -86,12 +70,17 @@ function TaskHeader({ project, selectedTask }: Props) {
   const confirm = useDismissibleConfirm();
   const connectMcp = useConnectMcpServer();
 
-  // ── V5+ scaffold UI state ──────────────────────────────────────
-  const [scaffoldModalOpen, setScaffoldModalOpen] = useState(false);
-  // Live progress message piped in from WS project.scaffold_progress
-  // events while scaffold_status === 'in_progress'. Empty until first
-  // event arrives.
+  // ── V5+ scaffold UI state (2026-05-17 redesign) ────────────────
+  // The "config" modal moved to ProjectCard. TaskHeader now only owns:
+  //   - the live "正在构建项目雏形" progress strip
+  //   - the first-start structure audit + ScaffoldAuditModal popup
   const [scaffoldProgress, setScaffoldProgress] = useState<string>("");
+  const [auditModalOpen, setAuditModalOpen] = useState(false);
+  const [auditMissing, setAuditMissing] = useState<string[]>([]);
+  const repairScaffold = useRepairScaffold();
+  // Audit query — runs lazily when we manually refetch on first-start.
+  // Don't auto-poll; cheap stat but not free.
+  const scaffoldAudit = useScaffoldAudit(project.id);
 
   // MCP servers this project's tasks actually need (server-side walk
   // through tasks → agents → tools → mcp_servers). Refetched on every
@@ -180,16 +169,38 @@ function TaskHeader({ project, selectedTask }: Props) {
   const isBlockedByTasks = isStalled || blockingTasks.length > 0;
 
   async function handlePrimary() {
-    // V5+ scaffold gating: project that needs a clone first. Show the
-    // ScaffoldConfigModal; the actual start mutation runs from its
-    // onSubmit (handleScaffoldSubmit below).
+    // V5+ scaffold gating (2026-05-17 redesign):
+    //   - pending/failed: scaffold must be triggered on the home card,
+    //     not here. Tell the user where to click.
+    //   - in_progress: clicking is a no-op; the spinner conveys "wait".
     if (scaffoldPending) {
-      setScaffoldModalOpen(true);
+      alert(
+        "项目尚未构建雏形。请回主页项目卡片【路径】按钮，"
+        + "选好父目录 + 英文项目名后等下载完成，再回来启动。",
+      );
       return;
     }
-    // Already scaffolding — clicking is a no-op; the spinner conveys
-    // "wait". (We don't auto-cancel because cleanup is non-trivial.)
     if (scaffoldInProgress) return;
+
+    // First-start structure audit. Runs only on Unity-template projects
+    // (audit-applicable=true). If 4 critical anchors are missing, pop
+    // the ScaffoldAuditModal instead of starting; user can repair from
+    // there. We refetch on each click so a manual mid-session delete
+    // gets caught too.
+    if (isReady && project.template_id) {
+      try {
+        const auditResult = await scaffoldAudit.refetch();
+        const data = auditResult.data;
+        if (data?.applicable && data.missing.length > 0) {
+          setAuditMissing(data.missing);
+          setAuditModalOpen(true);
+          return;
+        }
+      } catch (exc) {
+        console.error("[TaskHeader] scaffold audit failed", exc);
+        // Don't block start on audit error — fall through.
+      }
+    }
 
     // Stalled or has blocking tasks → tell the user to fix them first.
     // The watchdog parked the project here because something needs human
@@ -283,24 +294,18 @@ function TaskHeader({ project, selectedTask }: Props) {
     }
   }
 
-  /** ScaffoldConfigModal submit. Fires the start mutation with the
-   *  scaffold args, which on the backend triggers a background clone
-   *  and then a regular start. WS events flow back to update the
-   *  progress text under the start button. */
-  async function handleScaffoldSubmit({
-    rootParentPath, slug,
-  }: { rootParentPath: string; slug: string }) {
-    setScaffoldModalOpen(false);
-    setScaffoldProgress("准备脚手架…");
+  /** Handler for ScaffoldAuditModal's 「一键修复」 button. Fires the
+   *  repair mutation (POST /scaffold-repair) and closes the modal —
+   *  WS events drive the rest of the UI (spinner, progress text,
+   *  eventual scaffold_complete). */
+  async function handleRepair(): Promise<void> {
+    setAuditModalOpen(false);
+    setScaffoldProgress("正在重新下载…");
     try {
-      await start.mutateAsync({
-        projectId: project.id,
-        root_parent_path: rootParentPath,
-        slug,
-      });
+      await repairScaffold.mutateAsync(project.id);
     } catch (exc) {
       setScaffoldProgress("");
-      alert((exc as Error).message ?? "项目雏形构建失败");
+      alert((exc as Error).message ?? "修复失败");
     }
   }
 
@@ -337,7 +342,7 @@ function TaskHeader({ project, selectedTask }: Props) {
   const primaryTitle = scaffoldInProgress
     ? "正在构建项目雏形…"
     : scaffoldPending
-      ? "需要先构建项目雏形（首次启动）"
+      ? "项目尚未构建雏形 — 请在主页项目卡【路径】按钮配置"
       : isBlockedByTasks && !isRunning && !isPaused
         ? `项目受阻（${blockingTasks.length || "stalled"}）— 点击查看详情`
         : isReady
@@ -532,15 +537,12 @@ function TaskHeader({ project, selectedTask }: Props) {
         </div>
       )}
 
-      {scaffoldModalOpen && (
-        <ScaffoldConfigModal
-          defaultSlug={deriveSlugFromName(project.name)}
-          defaultParent={project.root_parent_path ?? project.root_path ?? ""}
-          templateLabel={
-            project.template_id ? TEMPLATE_LABELS[project.template_id] : undefined
-          }
-          onSubmit={handleScaffoldSubmit}
-          onCancel={() => setScaffoldModalOpen(false)}
+      {auditModalOpen && (
+        <ScaffoldAuditModal
+          missing={auditMissing}
+          rootPath={project.root_path}
+          onRepair={handleRepair}
+          onCancel={() => setAuditModalOpen(false)}
         />
       )}
     </div>

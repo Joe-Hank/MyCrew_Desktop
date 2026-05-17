@@ -226,6 +226,74 @@ export interface RequiredMcp {
   missing_tools: string[];
 }
 
+// ── PM v5+ scaffold flow (2026-05-17) ───────────────────────────────
+//
+// New hooks for the scaffold redesign — trigger lives on the project
+// card's 「路径」 button now (not the task header start button). All
+// three hooks talk to /workflow/projects/{id}/scaffold[*] routes.
+
+export function useScaffoldProject() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (params: {
+      projectId: string;
+      root_parent_path: string;
+      slug: string;
+    }) =>
+      apiFetch(`/workflow/projects/${params.projectId}/scaffold`, {
+        method: "POST",
+        body: JSON.stringify({
+          root_parent_path: params.root_parent_path,
+          slug: params.slug,
+        }),
+      }),
+    onSuccess: (_d, params) => {
+      qc.invalidateQueries({ queryKey: ["project", params.projectId] });
+      qc.invalidateQueries({ queryKey: ["projects"] });
+    },
+  });
+}
+
+export function useRepairScaffold() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (projectId: string) =>
+      apiFetch(`/workflow/projects/${projectId}/scaffold-repair`, {
+        method: "POST",
+      }),
+    onSuccess: (_d, projectId) => {
+      qc.invalidateQueries({ queryKey: ["project", projectId] });
+      qc.invalidateQueries({ queryKey: ["projects"] });
+    },
+  });
+}
+
+export interface ScaffoldAudit {
+  applicable: boolean;
+  scaffold_status: string | null;
+  root_path?: string;
+  missing: string[];
+}
+
+/** Audit the scaffolded project root vs the 4 critical anchor paths.
+ *  Used by TaskHeader's first-start gate: if missing.length > 0, the
+ *  ScaffoldAuditModal pops with a 一键修复 button. */
+export function useScaffoldAudit(projectId: string | undefined) {
+  return useQuery({
+    queryKey: ["scaffoldAudit", projectId],
+    queryFn: async () => {
+      if (!projectId) return null;
+      const res = await apiFetch<ScaffoldAudit>(
+        `/workflow/projects/${projectId}/scaffold-audit`,
+      );
+      return res.data ?? null;
+    },
+    // Re-fetch on every TaskHeader mount — cheap (just stat 4 paths).
+    enabled: !!projectId,
+    staleTime: 0,
+  });
+}
+
 export interface FailureAnalysis {
   status: "ready" | "pending" | "not_failed";
   text: string | null;
