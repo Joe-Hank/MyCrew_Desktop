@@ -141,9 +141,9 @@ SEED_AGENTS: list[dict] = [
     },
     {
         "role": "ComfyUI Image Generator",
-        "goal": "对 task.output_paths 中每一个 PNG 路径，调 ComfyUI 真生图。严禁 write_file 写空 png 占位。",
-        "backstory": "Art / UI Crew 的图像 Executor。一份 output_paths = 一份调用。",
-        "tools": _UNIVERSAL + _COMFYUI,
+        "goal": "对 task.output_paths 中每一个 PNG 路径，按 task.output_schema 的 width/height 调 ComfyUI 真生图。严禁 write_file 写空 png 占位。",
+        "backstory": "Art / UI Crew 的图像 Executor。一份 output_paths = 一份调用。尺寸来自 PM 契约（task.output_schema.width/height），不是 Head spec。",
+        "tools": _UNIVERSAL + _COMFYUI + ["verify_image_dimensions"],
     },
     {
         "role": "Technical Artist",
@@ -231,10 +231,13 @@ SEED_AGENTS: list[dict] = [
         # a runnable artifact (script / scene), QA can fire Unity's
         # test runner to confirm — much stronger signal than "file
         # exists + size > 0".
+        # +verify_image_dimensions: Art/UI Crew QA reads PNG IHDR and
+        # compares to task.output_schema.width/height (PM contract).
         "tools": (
             _UNIVERSAL
             + ["find_in_file", "read_console", "manage_editor"]
             + ["run_tests", "get_test_job"]
+            + ["verify_image_dimensions"]
         ),
     },
     # ── Standalone single agents (not part of any Crew) ────────────
@@ -299,8 +302,8 @@ SEED_CREWS: list[dict] = [
         "sequence": [
             _seq_step(
                 "Art Director",
-                "把 task.output_paths 里的每一项转化为「产物执行规格」：分辨率（默认 64x64，按 task.detail 推断）、风格关键词 + 配色码、命名差异点。"
-                "把 spec 写到一个 dict 里调 emit_output(payload=spec)，供下游使用。",
+                "把 task.output_paths 里的每一项转化为「产物执行规格」：**尺寸从 task.output_schema 读 width / height（PM 已定，不要重定）**、风格关键词 + 配色码、命名差异点。"
+                "把 spec 写到一个 dict 里调 emit_output(payload={'width': <from output_schema>, 'height': <from output_schema>, 'style': ..., 'palette': ..., 'naming': ...})，供下游使用。",
                 step_role="head",
                 progress_template="制定 {n} 项美术规格",
             ),
@@ -315,9 +318,11 @@ SEED_CREWS: list[dict] = [
             _seq_step(
                 "ComfyUI Image Generator",
                 "对 task.output_paths 中**每一个**目标路径，调 comfy_create_workflow_from_template + comfy_enqueue_workflow 真生 PNG。"
-                "参数取 Head spec、视觉参考取 Concept Artist 的 reference_paths。"
+                "**width / height 必须显式从 task.output_schema 读取并传给 params**（不是 Head spec）—— 例如 params={'width': task.output_schema.width, 'height': task.output_schema.height, 'positive_prompt': ...}。"
+                "风格/配色取 Head spec，视觉参考取 Concept Artist 的 reference_paths。"
+                "生成后建议自调 verify_image_dimensions 一遍，确保尺寸符契约再 emit。"
                 "严禁用 write_file 写空 png 占位。"
-                "调 emit_output(payload={'file_paths': [全部 task.output_paths]}) 报告。",
+                "调 emit_output(payload={'file_paths': [全部 task.output_paths], 'width': <契约值>, 'height': <契约值>}) 报告。",
                 step_role="executor",
                 progress_template="生成 ({count}/{total}) PNG",
             ),
@@ -332,7 +337,9 @@ SEED_CREWS: list[dict] = [
             _seq_step(
                 "QA Engineer",
                 "对照 PM 契约验收：1) task.output_paths 每个文件存在且 size > 0；2) 是合法 PNG（首 8 字节 == \\x89PNG\\r\\n\\x1a\\n）；"
-                "3) 同名 .meta 文件已生成。**不参考 Head spec 作为补充验收**。"
+                "3) 同名 .meta 文件已生成；"
+                "4) **对每个图像文件调 verify_image_dimensions(file_path=<路径>, expected_width=task.output_schema.width, expected_height=task.output_schema.height)，返回 ok=false 直接 verdict=fail，issues 必须带实际 actual_width × actual_height 与契约尺寸的对比**。"
+                "**不参考 Head spec 作为补充验收**——尺寸 source of truth 是 task.output_schema。"
                 "调 emit_output(payload={'verdict': 'pass'|'fail', 'file_paths': [...], 'issues': [...], 'summary': '...'})。",
                 step_role="qa",
                 progress_template="验收 {n} 个 PNG",
@@ -489,15 +496,19 @@ SEED_CREWS: list[dict] = [
         "sequence": [
             _seq_step(
                 "UI/UX Designer",
-                "把 task.output_paths（UI Prefab + UI 图片路径）转化为 UI 规格：布局（Canvas size / 锚点 / 层级）、图片资源清单（每元素一张图 + 分辨率）、交互行为。"
-                "调 emit_output(payload=spec) 提交。",
+                "把 task.output_paths（UI Prefab + UI 图片路径）转化为 UI 规格：布局（Canvas size / 锚点 / 层级）、交互行为。"
+                "**图片尺寸不要重定** —— 从 task.output_schema 读 width/height（PM 已定），你只补"
+                "「每元素对应哪张图 + 在 Canvas 里怎么摆 + 交互」。"
+                "调 emit_output(payload={'layout': ..., 'asset_mapping': ..., 'width': <from output_schema>, 'height': <from output_schema>, 'interactions': ...}) 提交。",
                 step_role="head",
                 progress_template="制定 UI 规格",
             ),
             _seq_step(
                 "ComfyUI Image Generator",
-                "对 task.output_paths 中的 UI 图片路径，按 Head spec 真生 PNG。"
-                "调 emit_output(payload={'file_paths': [...]}) 报告。",
+                "对 task.output_paths 中的 UI 图片路径真生 PNG。"
+                "**width/height 必须显式从 task.output_schema 读并传给 comfy_create_workflow_from_template params**（不是 Head spec）。"
+                "生成后建议自调 verify_image_dimensions 校验一遍再 emit。"
+                "调 emit_output(payload={'file_paths': [...], 'width': <契约值>, 'height': <契约值>}) 报告。",
                 step_role="executor",
                 progress_template="生成 ({count}/{total}) UI 图",
             ),
@@ -511,7 +522,11 @@ SEED_CREWS: list[dict] = [
             ),
             _seq_step(
                 "QA Engineer",
-                "对照 PM 契约验收 UI prefab 完整性 + 图片 reference 解析 OK + .meta 齐全。"
+                "对照 PM 契约验收："
+                "1) UI prefab 完整性（manage_scene load 不抛 missing reference）；"
+                "2) 图片 reference 解析 OK；"
+                "3) .meta 齐全；"
+                "4) **每个 UI 图片调 verify_image_dimensions(file_path=..., expected_width=task.output_schema.width, expected_height=task.output_schema.height)，ok=false → verdict=fail，issues 带实际 actual_w × actual_h**。"
                 "调 emit_output(payload={'verdict': ..., 'file_paths': [...], 'issues': [...]})。",
                 step_role="qa",
                 progress_template="验收 UI prefab",

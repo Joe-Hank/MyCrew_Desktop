@@ -150,10 +150,37 @@ schema 必须跟它对齐，否则 'file_path is required' 类校验会卡死单
 }
 ```
 
+# 图像类任务的额外字段（强制）
+如果 output_paths 含 .png / .jpg / .jpeg 后缀（即任务产物含图像），
+output_schema.properties 必须**额外**含：
+- `width` (integer, > 0)：图像像素宽
+- `height` (integer, > 0)：图像像素高
+
+`required` 必须扩展为 `["file_paths", "width", "height"]`。
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "file_paths": {"type": "array", "items": {"type": "string"}},
+    "width": {"type": "integer", "minimum": 1, "description": "像素宽，例如 64 / 128 / 256 / 512 / 1024"},
+    "height": {"type": "integer", "minimum": 1, "description": "像素高"},
+    "summary": {"type": "string"}
+  },
+  "required": ["file_paths", "width", "height"]
+}
+```
+
+**跨任务一致性由你保证**：所有 UI 图标统一一个尺寸、所有 sprite 统一
+一个尺寸、所有概念图统一一个尺寸。常用规格：UI 图标 128/256，sprite
+64/128，概念图 1024，UI 大图 512×768。Crew QA 会调
+`verify_image_dimensions` 读 PNG IHDR 跟这两个字段位级比对，不一致 fail。
+
 # 硬约束
 - 不要扩张任务范围 — 只修不加
 - 每个非 final_qa 任务必须有 file_paths（数组形式，单文件也是 [x]）
 - **禁止用 file_path 单数键** —— 这会与 Crew QA 模板的复数形式失配
+- **含图像扩展名（.png/.jpg/.jpeg）的任务，output_schema 必须含 width/height int 字段** —— 见上节
 - acceptance_notes 要具体（"QA 用 read_file_local 验证 Assets/Scripts/Foo.cs 存在且含 Update() 方法"），不要写"代码质量好"这种空话
 - 调完一句中文确认收尾"""
 

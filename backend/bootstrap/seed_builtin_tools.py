@@ -71,6 +71,7 @@ BUILTIN_TOOLS: list[tuple[str, str]] = [
     ("read_file_local", "src/tools/builtin/local/workspace.py"),
     ("list_directory_local", "src/tools/builtin/local/workspace.py"),
     ("synth_8bit_sfx", "src/tools/builtin/local/synth_8bit_sfx.py"),
+    ("verify_image_dimensions", "src/tools/builtin/local/verify_image_dimensions.py"),
     # Unity MCP (34) — connects to Unity-side `MCP for Unity` bridge at
     # http://127.0.0.1:8090/mcp (override via UNITY_MCP_URL). Tool
     # instances live in src/tools/builtin/unity/__init__.TOOL_MAP and
