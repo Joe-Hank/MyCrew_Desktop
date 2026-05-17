@@ -47,15 +47,29 @@ class ProjectService:
         return project
 
     async def create_project(self, data: dict) -> dict:
+        # PM v5+ (2026-05-17): when a Unity template is bound to the
+        # project, mark scaffold_status='pending' so workflow_svc.start
+        # demands a root_parent_path + slug from the user before the
+        # first run. Plain (no-template) projects skip scaffold entirely.
+        from services.template_cloner_svc import TEMPLATE_ID_TO_DIR
+        tmpl = data.get("template_id")
+        scaffold_status = (
+            "pending"
+            if tmpl in TEMPLATE_ID_TO_DIR else None
+        )
         row = await crud.insert("projects", {
             "name": data["name"],
             "root_path": data.get("root_path"),
+            "template_id": tmpl,
             "state": "ready",
             "is_running": 0,
             "progress_pct": 0,
             "execution_kind": data.get("execution_kind", "sequential"),
+            "scaffold_status": scaffold_status,
         }, id_prefix="proj_")
-        log.info("project.created", id=row["id"], name=data["name"])
+        log.info("project.created",
+                 id=row["id"], name=data["name"],
+                 template_id=tmpl, scaffold_status=scaffold_status)
         return row
 
     async def create_project_with_tasks(self, data: dict, tasks: list[dict]) -> dict:

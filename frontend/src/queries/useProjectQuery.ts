@@ -18,6 +18,21 @@ export interface Project {
    *  just-unstarred project to the head of the non-favorites tier — same
    *  position a freshly created project would land in. */
   unfavorited_at: string | null;
+  /** PM v5+ scaffold flow (2026-05-17):
+   *    null         — no template / no scaffold needed
+   *    'pending'    — template bound; first start needs user to pick
+   *                   root_parent_path + slug
+   *    'in_progress'— clone running; UI shows 「正在构建项目雏形」
+   *    'done'       — scaffold finished; root_path now points at child
+   *    'failed'     — clone errored; user can retry via the same modal
+   */
+  scaffold_status?: "pending" | "in_progress" | "done" | "failed" | null;
+  /** The parent dir the user picked. After scaffold, root_path is
+   *  <root_parent_path>/<slug>. Kept around for iterate / re-scaffold. */
+  root_parent_path?: string | null;
+  /** Inception-chosen template id (e.g. 'unity_universal_2d').
+   *  Drives which subfolder of github.com/Joe-Hank/Templates is cloned. */
+  template_id?: string | null;
   task_count?: number;
   done_count?: number;
   tasks?: Task[];

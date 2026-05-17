@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import type { Project, Task } from "../../queries/useProjectQuery";
 import {
@@ -16,6 +16,25 @@ import { useEvent } from "../../hooks/useEvent";
 import { apiFetch, ApiError } from "../../net/api";
 import { useDismissibleConfirm } from "../common/ConfirmDialog";
 import { askPauseConfirm } from "../../lib/pauseConfirm";
+import ScaffoldConfigModal from "./ScaffoldConfigModal";
+
+// V5+ scaffold flow — registry of {template_id → human label} for the
+// modal header. Mirrors backend's TEMPLATE_ID_TO_DIR keys.
+const TEMPLATE_LABELS: Record<string, string> = {
+  unity_universal_2d: "Universal 2D",
+  unity_universal_3d: "Universal 3D",
+  unity_ar_mobile: "AR Mobile",
+  unity_mr_core: "MR Core",
+};
+
+// Best-effort slug derivation from project name: if the name is already
+// ASCII-safe, pre-fill it. Chinese / mixed names → empty, user fills it.
+function deriveSlugFromName(name: string): string {
+  const cleaned = name.replace(/[^A-Za-z0-9_-]/g, "");
+  if (!cleaned) return "";
+  // Ensure first char is alnum (slug regex requirement)
+  return /^[A-Za-z0-9]/.test(cleaned) ? cleaned.slice(0, 64) : "";
+}
 
 const mcpDotColor: Record<string, string> = {
   connected: "#10b981",
@@ -67,6 +86,13 @@ function TaskHeader({ project, selectedTask }: Props) {
   const confirm = useDismissibleConfirm();
   const connectMcp = useConnectMcpServer();
 
+  // ── V5+ scaffold UI state ──────────────────────────────────────
+  const [scaffoldModalOpen, setScaffoldModalOpen] = useState(false);
+  // Live progress message piped in from WS project.scaffold_progress
+  // events while scaffold_status === 'in_progress'. Empty until first
+  // event arrives.
+  const [scaffoldProgress, setScaffoldProgress] = useState<string>("");
+
   // MCP servers this project's tasks actually need (server-side walk
   // through tasks → agents → tools → mcp_servers). Refetched on every
   // mcp.status_changed WS event so the chips track real-time pool state.
@@ -76,6 +102,28 @@ function TaskHeader({ project, selectedTask }: Props) {
     qc.invalidateQueries({ queryKey: ["workflow", "requiredMcps", project.id] });
   }, [qc, project.id]);
   useEvent("mcp.status_changed", handleMcpEvent);
+
+  // Scaffold WS lifecycle — placed after `qc` so the invalidation
+  // closure resolves. Each event invalidates the project query so the
+  // row's scaffold_status / root_path stay fresh.
+  useEvent("project.scaffold_progress", (msg) => {
+    const payload = msg.payload as { project_id?: string; message?: string };
+    if (payload?.project_id !== project.id) return;
+    if (typeof payload.message === "string") setScaffoldProgress(payload.message);
+  });
+  useEvent("project.scaffold_complete", (msg) => {
+    const payload = msg.payload as { project_id?: string };
+    if (payload?.project_id !== project.id) return;
+    setScaffoldProgress("");
+    qc.invalidateQueries({ queryKey: ["project", project.id] });
+  });
+  useEvent("project.scaffold_failed", (msg) => {
+    const payload = msg.payload as { project_id?: string; error?: string };
+    if (payload?.project_id !== project.id) return;
+    setScaffoldProgress("");
+    qc.invalidateQueries({ queryKey: ["project", project.id] });
+    alert(`项目雏形构建失败：${payload?.error ?? "未知错误"}`);
+  });
 
   /** Walk the required-MCP list; for each offline one, call connect;
    *  after all attempts settle, refetch and try again up to
@@ -112,6 +160,13 @@ function TaskHeader({ project, selectedTask }: Props) {
   const isStalled = project.state === "stalled";
   const isTerminal = ["completed", "completed_with_warnings", "completed_with_issues", "aborted"]
     .includes(project.state);
+  // V5+ scaffold gating: when scaffold_status is 'pending', clicking
+  // 开始 must show the config modal first. While 'in_progress' the
+  // start button reads as a busy spinner.
+  const scaffoldStatus = project.scaffold_status ?? null;
+  const scaffoldPending =
+    scaffoldStatus === "pending" || scaffoldStatus === "failed";
+  const scaffoldInProgress = scaffoldStatus === "in_progress";
 
   // Tasks in any of these statuses are blocking the workflow — the user
   // needs to manually fix them (edit detail / change agent / retry)
@@ -125,6 +180,17 @@ function TaskHeader({ project, selectedTask }: Props) {
   const isBlockedByTasks = isStalled || blockingTasks.length > 0;
 
   async function handlePrimary() {
+    // V5+ scaffold gating: project that needs a clone first. Show the
+    // ScaffoldConfigModal; the actual start mutation runs from its
+    // onSubmit (handleScaffoldSubmit below).
+    if (scaffoldPending) {
+      setScaffoldModalOpen(true);
+      return;
+    }
+    // Already scaffolding — clicking is a no-op; the spinner conveys
+    // "wait". (We don't auto-cancel because cleanup is non-trivial.)
+    if (scaffoldInProgress) return;
+
     // Stalled or has blocking tasks → tell the user to fix them first.
     // The watchdog parked the project here because something needs human
     // intervention; restarting without fixing it would just stall again.
@@ -217,6 +283,27 @@ function TaskHeader({ project, selectedTask }: Props) {
     }
   }
 
+  /** ScaffoldConfigModal submit. Fires the start mutation with the
+   *  scaffold args, which on the backend triggers a background clone
+   *  and then a regular start. WS events flow back to update the
+   *  progress text under the start button. */
+  async function handleScaffoldSubmit({
+    rootParentPath, slug,
+  }: { rootParentPath: string; slug: string }) {
+    setScaffoldModalOpen(false);
+    setScaffoldProgress("准备脚手架…");
+    try {
+      await start.mutateAsync({
+        projectId: project.id,
+        root_parent_path: rootParentPath,
+        slug,
+      });
+    } catch (exc) {
+      setScaffoldProgress("");
+      alert((exc as Error).message ?? "项目雏形构建失败");
+    }
+  }
+
   /** Open the project's root_path in the OS file explorer.
    *  Surfaces a clean alert when the path is missing or not configured
    *  instead of a generic failure toast. */
@@ -245,16 +332,21 @@ function TaskHeader({ project, selectedTask }: Props) {
     return 0;
   })();
 
-  const primaryDisabled = start.isPending || pause.isPending || resume.isPending;
-  const primaryTitle = isBlockedByTasks && !isRunning && !isPaused
-    ? `项目受阻（${blockingTasks.length || "stalled"}）— 点击查看详情`
-    : isReady
-      ? "启动项目"
-      : isRunning
-        ? "暂停项目"
-        : isPaused
-          ? "继续项目"
-          : "已结束";
+  const primaryDisabled =
+    start.isPending || pause.isPending || resume.isPending || scaffoldInProgress;
+  const primaryTitle = scaffoldInProgress
+    ? "正在构建项目雏形…"
+    : scaffoldPending
+      ? "需要先构建项目雏形（首次启动）"
+      : isBlockedByTasks && !isRunning && !isPaused
+        ? `项目受阻（${blockingTasks.length || "stalled"}）— 点击查看详情`
+        : isReady
+          ? "启动项目"
+          : isRunning
+            ? "暂停项目"
+            : isPaused
+              ? "继续项目"
+              : "已结束";
 
   return (
     // No background, no border — sits directly on the page. Everything
@@ -281,28 +373,58 @@ function TaskHeader({ project, selectedTask }: Props) {
       )}
 
       {/* Inline progress bar + percentage — short, just enough to read
-          quickly. Width 96px keeps the cluster compact. */}
-      {selectedTask && (
+          quickly. Width 96px keeps the cluster compact.
+          V5+ override: while scaffolding, the slot reads
+          「正在构建项目雏形」 + the live WS progress message instead of
+          the per-task progress percentage. */}
+      {(scaffoldInProgress || selectedTask) && (
         <div className="flex items-center gap-1.5">
-          <div
-            className="h-1 w-24 overflow-hidden rounded-full"
-            style={{ backgroundColor: "var(--color-surface-alt)" }}
-            title={`任务进度 ${Math.round(taskProgress)}%`}
-          >
-            <div
-              className="h-full rounded-full transition-all"
-              style={{
-                width: `${taskProgress}%`,
-                backgroundColor: "var(--color-brand-500)",
-              }}
-            />
-          </div>
-          <span
-            className="text-[11px] tabular-nums"
-            style={{ color: "var(--color-ink-muted)" }}
-          >
-            {Math.round(taskProgress)}%
-          </span>
+          {scaffoldInProgress ? (
+            <>
+              <div
+                className="h-1 w-32 overflow-hidden rounded-full"
+                style={{ backgroundColor: "var(--color-surface-alt)" }}
+                title="正在构建项目雏形"
+              >
+                {/* Indeterminate progress — animate a band sliding
+                    across the track since we don't have a discrete %
+                    from the cloner. */}
+                <div className="scaffold-progress-band h-full rounded-full" />
+              </div>
+              <span
+                className="truncate text-[11px]"
+                style={{
+                  color: "var(--color-brand-500)",
+                  maxWidth: "260px",
+                }}
+                title={scaffoldProgress || "正在构建项目雏形"}
+              >
+                正在构建项目雏形{scaffoldProgress ? ` · ${scaffoldProgress}` : "…"}
+              </span>
+            </>
+          ) : selectedTask ? (
+            <>
+              <div
+                className="h-1 w-24 overflow-hidden rounded-full"
+                style={{ backgroundColor: "var(--color-surface-alt)" }}
+                title={`任务进度 ${Math.round(taskProgress)}%`}
+              >
+                <div
+                  className="h-full rounded-full transition-all"
+                  style={{
+                    width: `${taskProgress}%`,
+                    backgroundColor: "var(--color-brand-500)",
+                  }}
+                />
+              </div>
+              <span
+                className="text-[11px] tabular-nums"
+                style={{ color: "var(--color-ink-muted)" }}
+              >
+                {Math.round(taskProgress)}%
+              </span>
+            </>
+          ) : null}
         </div>
       )}
 
@@ -318,17 +440,26 @@ function TaskHeader({ project, selectedTask }: Props) {
             className="flex h-7 w-7 items-center justify-center rounded-lg transition-colors disabled:opacity-50"
             style={{
               backgroundColor: "var(--color-card)",
-              border: isBlockedByTasks && !isRunning && !isPaused
-                ? "1px solid #f59e0b"  // amber border = needs attention
-                : "1px solid var(--color-border-soft)",
-              color: isBlockedByTasks && !isRunning && !isPaused
-                ? "#f59e0b"
-                : isRunning
-                  ? "var(--color-brand-500)"
-                  : "var(--color-ink-muted)",
+              border: scaffoldInProgress
+                ? "1px solid var(--color-brand-500)"
+                : isBlockedByTasks && !isRunning && !isPaused
+                  ? "1px solid #f59e0b"  // amber border = needs attention
+                  : "1px solid var(--color-border-soft)",
+              color: scaffoldInProgress
+                ? "var(--color-brand-500)"
+                : isBlockedByTasks && !isRunning && !isPaused
+                  ? "#f59e0b"
+                  : isRunning
+                    ? "var(--color-brand-500)"
+                    : "var(--color-ink-muted)",
             }}
           >
-            {isRunning ? <PauseIcon /> : <PlayIcon />}
+            {scaffoldInProgress ? (
+              <span
+                className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current"
+                style={{ borderTopColor: "transparent" }}
+              />
+            ) : isRunning ? <PauseIcon /> : <PlayIcon />}
           </button>
         ) : (
           <span
@@ -399,6 +530,18 @@ function TaskHeader({ project, selectedTask }: Props) {
             }}
           />
         </div>
+      )}
+
+      {scaffoldModalOpen && (
+        <ScaffoldConfigModal
+          defaultSlug={deriveSlugFromName(project.name)}
+          defaultParent={project.root_parent_path ?? project.root_path ?? ""}
+          templateLabel={
+            project.template_id ? TEMPLATE_LABELS[project.template_id] : undefined
+          }
+          onSubmit={handleScaffoldSubmit}
+          onCancel={() => setScaffoldModalOpen(false)}
+        />
       )}
     </div>
   );

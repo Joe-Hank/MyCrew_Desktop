@@ -4,9 +4,28 @@ import { apiFetch } from "../net/api";
 export function useStartProject() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (projectId: string) =>
-      apiFetch(`/workflow/projects/${projectId}/start`, { method: "POST" }),
-    onSuccess: (_d, projectId) => {
+    mutationFn: (params: string | {
+      projectId: string;
+      // PM v5+ scaffold args. Required ONLY when project.scaffold_status
+      // is 'pending' (or 'failed' for retry). For already-scaffolded
+      // projects pass just the projectId string.
+      root_parent_path?: string;
+      slug?: string;
+    }) => {
+      const projectId = typeof params === "string" ? params : params.projectId;
+      const body = typeof params === "string"
+        ? undefined
+        : {
+            root_parent_path: params.root_parent_path,
+            slug: params.slug,
+          };
+      return apiFetch(`/workflow/projects/${projectId}/start`, {
+        method: "POST",
+        body: body ? JSON.stringify(body) : undefined,
+      });
+    },
+    onSuccess: (_d, params) => {
+      const projectId = typeof params === "string" ? params : params.projectId;
       qc.invalidateQueries({ queryKey: ["project", projectId] });
       qc.invalidateQueries({ queryKey: ["projects"] });
     },

@@ -218,3 +218,15 @@ body {
   outline: 1.5px solid var(--color-brand-500);
   outline-offset: 1px;
 }
+
+/* TaskHeader scaffold progress — indeterminate sliding band while the
+ * git clone is in flight (no discrete % available from the cloner). */
+@keyframes scaffold-band-slide {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(300%); }
+}
+.scaffold-progress-band {
+  width: 33%;
+  background-color: var(--color-brand-500);
+  animation: scaffold-band-slide 1.4s ease-in-out infinite;
+}

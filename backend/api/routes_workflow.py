@@ -10,10 +10,25 @@ from bootstrap.paths import OUTPUT_DIR
 router = APIRouter(prefix="/workflow", tags=["workflow"])
 
 
+class StartProjectBody(BaseModel):
+    """Optional scaffold args. Required ONLY when the project's
+    scaffold_status is 'pending' (or 'failed' — retry). For already-
+    scaffolded projects the body can be omitted (start is idempotent).
+    The English `slug` becomes the on-disk folder name; root_parent_path
+    is the user-chosen parent dir under which the clone lands."""
+    root_parent_path: str | None = None
+    slug: str | None = None
+
+
 @router.post("/projects/{project_id}/start")
-async def start_project(project_id: str):
+async def start_project(project_id: str, body: StartProjectBody | None = None):
+    body = body or StartProjectBody()
     try:
-        await workflow_svc.start(project_id)
+        await workflow_svc.start(
+            project_id,
+            root_parent_path=body.root_parent_path,
+            slug=body.slug,
+        )
         return {"ok": True, "data": {"project_id": project_id, "state": "running"}}
     except KeyError:
         raise HTTPException(404, detail="project not found")

@@ -38,7 +38,7 @@ async def test_lock_serialises_same_project_starts():
     svc = WorkflowService()
     sequence: list[str] = []
 
-    async def fake_start_locked(project_id: str):
+    async def fake_start_locked(project_id: str, **_kwargs):
         sequence.append(f"enter:{project_id}")
         # Yield to the loop so the other coroutine has a chance to
         # *not* race past us — the lock should prevent it.
@@ -62,7 +62,7 @@ async def test_lock_does_not_serialise_different_projects():
     in_flight: set[str] = set()
     max_concurrent = 0
 
-    async def fake_start_locked(project_id: str):
+    async def fake_start_locked(project_id: str, **_kwargs):
         nonlocal max_concurrent
         in_flight.add(project_id)
         max_concurrent = max(max_concurrent, len(in_flight))
