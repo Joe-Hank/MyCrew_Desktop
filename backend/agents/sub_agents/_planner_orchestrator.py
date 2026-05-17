@@ -985,8 +985,13 @@ def _need_run(phase: str, start_from: str | None) -> bool:
     if start_from is None:
         return True
     # Both "completeness" → 0; phases ordered as defined.
+    # 2026-05-17: added 'code_contract' (PM v5) between project_mgmt
+    # and agent_assignment. Forgetting to update this list breaks
+    # 「从断点重来」 with a confusing "'code_contract' is not in list"
+    # error — the restart endpoint passes start_from='code_contract'
+    # but the resume gate couldn't locate it in the phase order.
     all_phases = ["completeness", "concept", "system_design", "review",
-                  "project_mgmt", "agent_assignment"]
+                  "project_mgmt", "code_contract", "agent_assignment"]
     return all_phases.index(phase) >= all_phases.index(start_from)
 
 
