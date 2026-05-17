@@ -104,6 +104,24 @@ class MCPConnection:
         log.info("mcp.pool.reconnecting",
                  server_id=self.server_id, attempt=self._reconnect_count, delay=delay)
         await asyncio.sleep(delay)
+
+        # 2026-05-17: TCP preflight for HTTP transport. _safe_connect
+        # does this at startup; without it here, every heartbeat tries
+        # to reconnect a dead HTTP MCP (Unity Editor closed → port 8090
+        # refused) by going straight to the SDK's streamable_http_client,
+        # which blocks the entire heartbeat loop for ~30s (SDK default
+        # timeout) per cycle. Probe first; bail fast if no listener.
+        if self.config.get("transport") == "http":
+            from infra.mcp.subprocess_reaper import http_url_reachable
+            url = self.config.get("url") or ""
+            if url and not http_url_reachable(url, timeout_s=2.0):
+                self.status = "error"
+                self.error_message = (
+                    f"{url} refused TCP connect — backing server "
+                    "(Unity Editor + MCP Bridge / similar) not running."
+                )
+                return False
+
         try:
             await self.disconnect()
             await self.connect()
