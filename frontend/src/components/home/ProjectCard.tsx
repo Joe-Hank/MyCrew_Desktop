@@ -244,7 +244,6 @@ function ProjectCard({ project }: { project: Project }) {
     const fullLlmId = modelId ? `${llmId}:${modelId}` : llmId;
     const res = await createSession.mutateAsync({
       llm_id: fullLlmId,
-      thinking_mode: usePrefsStore.getState().inceptionThinking,
       mode: "iterate",
       parent_project_id: project.id,
     });

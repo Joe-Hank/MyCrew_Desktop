@@ -85,6 +85,23 @@ PHASES = (
 )
 
 
+# Hardcoded per-phase thinking defaults. Only Phase 1 (concept) is on —
+# it emits long-form narrative concept doc and benefits from extended
+# thinking. The other five phases must call a strict-schema submit tool;
+# thinking forces temperature=1.0 + eats budget on Anthropic, which has
+# been observed to make the agent fail to call the submit tool at all
+# (`未捕获到合法输出，焦点修复中…`). Always gated by the pro model's
+# cached supports_thinking — unsupported models stay off regardless.
+PHASE_THINKING_DEFAULTS: dict[str, bool] = {
+    "concept": True,
+    "system_design": False,
+    "review": False,
+    "project_mgmt": False,
+    "code_contract": False,
+    "agent_assignment": False,
+}
+
+
 # ── Public entry ────────────────────────────────────────────────────
 
 

@@ -129,7 +129,6 @@ export function useCreateInceptionSession() {
   return useMutation({
     mutationFn: (data: {
       llm_id: string;
-      thinking_mode?: boolean;
       mode?: "create" | "iterate";
       parent_project_id?: string;
       template_id?: string;

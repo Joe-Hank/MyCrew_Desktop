@@ -49,10 +49,8 @@ function InceptionDrawer() {
 
   const selectedLlm = usePrefsStore((s) => s.inceptionLlm) ?? "";
   const selectedModel = usePrefsStore((s) => s.inceptionModel) ?? "";
-  const thinking = usePrefsStore((s) => s.inceptionThinking);
   const setSelectedLlm = usePrefsStore((s) => s.setInceptionLlm);
   const setSelectedModel = usePrefsStore((s) => s.setInceptionModel);
-  const setThinking = usePrefsStore((s) => s.setInceptionThinking);
 
   const [input, setInput] = useState("");
   const [reEvaluating, setReEvaluating] = useState(false);
@@ -128,7 +126,6 @@ function InceptionDrawer() {
     const fullLlmId = selectedModel ? `${selectedLlm}:${selectedModel}` : selectedLlm;
     const res = await createSession.mutateAsync({
       llm_id: fullLlmId,
-      thinking_mode: thinking,
     });
     if (res.ok && res.data) {
       const id = (res.data as { id: string }).id;
@@ -714,21 +711,6 @@ function InceptionDrawer() {
             ))}
           </select>
 
-          <div className="flex items-center gap-1 text-xs" style={{ color: "var(--color-ink-label)" }}>
-            <span>思考</span>
-            <button
-              onClick={() => !activeSessionId && setThinking(!thinking)}
-              disabled={!!activeSessionId}
-              className="relative inline-flex h-4 w-7 items-center rounded-full transition-colors disabled:opacity-60"
-              style={{ backgroundColor: thinking ? "#10b981" : "var(--color-surface-alt)" }}
-            >
-              <span
-                className="absolute h-3 w-3 rounded-full bg-white shadow-sm transition-transform"
-                style={{ transform: thinking ? "translateX(14px)" : "translateX(2px)" }}
-              />
-            </button>
-          </div>
-
           <div className="ml-auto flex items-center gap-1">
             <div className="relative">
               <button
@@ -867,7 +849,6 @@ function InceptionDrawer() {
                       try {
                         const res = await createSession.mutateAsync({
                           llm_id: fullLlmId,
-                          thinking_mode: thinking,
                           mode: "create",
                           template_id: templateId,
                         });

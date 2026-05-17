@@ -26,7 +26,6 @@ interface PrefsState {
   // Inception drawer
   inceptionLlm: string | null;      // provider id, e.g. "prov_xxx"
   inceptionModel: string | null;    // model_name, e.g. "deepseek-v4-pro"
-  inceptionThinking: boolean;
 
   // Log drawer
   logDrawerExpanded: boolean;
@@ -50,7 +49,6 @@ interface PrefsState {
   // Setters
   setInceptionLlm: (v: string | null) => void;
   setInceptionModel: (v: string | null) => void;
-  setInceptionThinking: (v: boolean) => void;
   setLogDrawerExpanded: (v: boolean) => void;
   setLogDrawerActiveTab: (v: LogTab) => void;
   setLogDrawerHeight: (v: number) => void;
@@ -66,7 +64,6 @@ export const usePrefsStore = create<PrefsState>()(
     (set) => ({
       inceptionLlm: null,
       inceptionModel: null,
-      inceptionThinking: false,
       logDrawerExpanded: false,
       logDrawerActiveTab: "后端日志",
       logDrawerHeight: 224,
@@ -78,7 +75,6 @@ export const usePrefsStore = create<PrefsState>()(
 
       setInceptionLlm: (v) => set({ inceptionLlm: v }),
       setInceptionModel: (v) => set({ inceptionModel: v }),
-      setInceptionThinking: (v) => set({ inceptionThinking: v }),
       setLogDrawerExpanded: (v) => set({ logDrawerExpanded: v }),
       setLogDrawerActiveTab: (v) => set({ logDrawerActiveTab: v }),
       // Clamp 120..600px — below 120 nothing's visible, above 600 the
