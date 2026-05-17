@@ -65,12 +65,36 @@ class LlmGateway:
         if temperature is not None:
             kwargs["temperature"] = temperature
 
-        # Broadcast call_started event (best-effort; doesn't fail the call)
+        # T2 (2026-05-17): assign a call_id and broadcast richer
+        # llm.call.detail events so the LogDrawer's 「LLM 调用」 tab can
+        # pair request + response per call and show messages preview /
+        # token use / latency without the user having to read .mycrew/
+        # files manually.
+        import secrets
+        call_id = secrets.token_hex(6)
+        call_started_at = asyncio.get_event_loop().time()
+
+        # Backward-compat: the legacy llm.call_started / _finished /
+        # _failed events stay broadcast so any old listeners (LogDrawer
+        # 应用日志 tab pre-rewrite, internal dashboards, etc.) keep
+        # working. The new llm.call.detail is additive.
         await self._broadcast_event("llm.call_started", {
             "provider_id": provider_id,
             "model": model_name,
             "thinking_mode": thinking_mode,
             "json_mode": json_mode,
+        })
+        await self._broadcast_event("llm.call.detail", {
+            "call_id": call_id,
+            "phase": "request",
+            "provider_id": provider_id,
+            "model": model_name,
+            "thinking_mode": thinking_mode,
+            "json_mode": json_mode,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "messages_preview": _preview_messages(messages),
+            "messages_count": len(messages),
         })
 
         try:
@@ -97,6 +121,16 @@ class LlmGateway:
                 "error": f"timeout after {LLM_CALL_TIMEOUT_SECONDS}s — "
                          "LLM provider unreachable or hung",
             })
+            await self._broadcast_event("llm.call.detail", {
+                "call_id": call_id,
+                "phase": "error",
+                "provider_id": provider_id,
+                "model": model_name,
+                "error": f"timeout after {LLM_CALL_TIMEOUT_SECONDS}s",
+                "latency_ms": int(
+                    (asyncio.get_event_loop().time() - call_started_at) * 1000
+                ),
+            })
             # Re-raise as a TimeoutError with a clearer message — the
             # workflow_svc error classifier picks this up as kind=network.
             raise TimeoutError(
@@ -109,12 +143,36 @@ class LlmGateway:
                 "model": model_name,
                 "error": str(exc),
             })
+            await self._broadcast_event("llm.call.detail", {
+                "call_id": call_id,
+                "phase": "error",
+                "provider_id": provider_id,
+                "model": model_name,
+                "error": str(exc)[:500],
+                "latency_ms": int(
+                    (asyncio.get_event_loop().time() - call_started_at) * 1000
+                ),
+            })
             raise
 
+        latency_ms = int(
+            (asyncio.get_event_loop().time() - call_started_at) * 1000
+        )
         await self._broadcast_event("llm.call_finished", {
             "provider_id": provider_id,
             "model": model_name,
             "tokens": response.usage.total_tokens if response.usage else 0,
+        })
+        await self._broadcast_event("llm.call.detail", {
+            "call_id": call_id,
+            "phase": "response",
+            "provider_id": provider_id,
+            "model": model_name,
+            "tokens": response.usage.total_tokens if response.usage else 0,
+            "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
+            "completion_tokens": response.usage.completion_tokens if response.usage else 0,
+            "latency_ms": latency_ms,
+            "text_preview": _preview_text(response.text or ""),
         })
         return response
 
@@ -240,6 +298,55 @@ class LlmGateway:
             supports_thinking=supports_thinking,
             thinking_mode=thinking_mode and supports_thinking,
         )
+
+
+# ── Message preview helpers for llm.call.detail events ───────────
+
+
+# Cap on each message body's preview. Big enough to capture system
+# prompt + task context, small enough to keep WS frames manageable
+# and the LogDrawer scroll usable. Cap == head+tail size; middle gets
+# replaced by an "…[N chars]…" elision marker.
+_PREVIEW_HEAD = 1500
+_PREVIEW_TAIL = 500
+
+
+def _preview_one(text: str) -> str:
+    """Truncate a single message body. Keeps the first 1500 chars and
+    the last 500, with an elision marker in between. Short messages
+    pass through unchanged."""
+    if not isinstance(text, str):
+        text = str(text)
+    if len(text) <= _PREVIEW_HEAD + _PREVIEW_TAIL + 32:
+        return text
+    head = text[:_PREVIEW_HEAD]
+    tail = text[-_PREVIEW_TAIL:]
+    omitted = len(text) - _PREVIEW_HEAD - _PREVIEW_TAIL
+    return f"{head}\n…[{omitted} chars omitted]…\n{tail}"
+
+
+def _preview_messages(messages: list) -> list[dict]:
+    """Format LlmMessage list for the llm.call.detail request phase.
+    Each entry: {role, content} with content truncated. Defensive
+    against shapes that aren't LlmMessage (dict / namedtuple)."""
+    out: list[dict] = []
+    for m in messages:
+        role = getattr(m, "role", None)
+        content = getattr(m, "content", None)
+        if role is None and isinstance(m, dict):
+            role = m.get("role")
+            content = m.get("content")
+        out.append({
+            "role": str(role) if role is not None else "",
+            "content": _preview_one(content if content is not None else ""),
+        })
+    return out
+
+
+def _preview_text(text: str) -> str:
+    """Format response text for the llm.call.detail response phase.
+    Same head+tail elision rule. Empty / None safe."""
+    return _preview_one(text or "")
 
 
 # Singleton instance

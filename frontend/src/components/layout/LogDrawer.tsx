@@ -27,6 +27,36 @@ interface AgentLog {
   message: string;
 }
 
+// ── T2: LLM call pairing types ─────────────────────────────────────
+
+interface LLMMessagePreview {
+  role: string;
+  content: string;
+}
+
+interface LLMCallEntry {
+  call_id: string;
+  ts_request: string;
+  ts_response?: string;
+  provider_id: string;
+  model: string;
+  // Request side
+  thinking_mode?: boolean;
+  json_mode?: boolean;
+  max_tokens?: number | null;
+  temperature?: number | null;
+  messages_preview?: LLMMessagePreview[];
+  messages_count?: number;
+  // Response side
+  status: "pending" | "ok" | "error";
+  tokens?: number;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  latency_ms?: number;
+  text_preview?: string;
+  error?: string;
+}
+
 // ── Agent-tab summary builder (kept from prior LogDrawer) ──────────
 
 function truncate(s: string, n: number): string {
@@ -123,6 +153,74 @@ function LogDrawer() {
         ? prev : [...prev, entry.source!].sort());
     }
   }, [sources]));
+
+  // ── T2: LLM call pairing ────────────────────────────────────────
+  // llm.call.detail fires twice per LLM call (request + response/error).
+  // Pair by call_id to render one row per call with timing + tokens.
+  const [llmCalls, setLlmCalls] = useState<LLMCallEntry[]>([]);
+  useEvent("llm.call.detail", useCallback((msg: WsMessage) => {
+    const p = msg.payload as Record<string, unknown>;
+    const callId = typeof p.call_id === "string" ? p.call_id : "";
+    const phase = typeof p.phase === "string" ? p.phase : "";
+    if (!callId || !phase) return;
+    setLlmCalls((prev) => {
+      // Find existing row by call_id
+      const idx = prev.findIndex((c) => c.call_id === callId);
+      const next = prev.slice();
+      if (phase === "request") {
+        const entry: LLMCallEntry = {
+          call_id: callId,
+          ts_request: msg.ts,
+          provider_id: String(p.provider_id ?? ""),
+          model: String(p.model ?? ""),
+          thinking_mode: Boolean(p.thinking_mode),
+          json_mode: Boolean(p.json_mode),
+          max_tokens: (p.max_tokens as number | null) ?? null,
+          temperature: (p.temperature as number | null) ?? null,
+          messages_preview: (p.messages_preview as LLMMessagePreview[]) ?? [],
+          messages_count: (p.messages_count as number) ?? 0,
+          status: "pending",
+        };
+        if (idx >= 0) {
+          next[idx] = { ...next[idx], ...entry };
+        } else {
+          next.push(entry);
+          // Cap at 500 calls
+          if (next.length > 500) next.shift();
+        }
+      } else if (phase === "response" || phase === "error") {
+        const update: Partial<LLMCallEntry> = {
+          ts_response: msg.ts,
+          status: phase === "response" ? "ok" : "error",
+          tokens: (p.tokens as number) ?? 0,
+          prompt_tokens: (p.prompt_tokens as number) ?? 0,
+          completion_tokens: (p.completion_tokens as number) ?? 0,
+          latency_ms: (p.latency_ms as number) ?? 0,
+          text_preview: typeof p.text_preview === "string"
+            ? p.text_preview : undefined,
+          error: typeof p.error === "string" ? p.error : undefined,
+        };
+        if (idx >= 0) {
+          // Required fields already exist on next[idx]; cast the merge
+          // result to satisfy strictPropertyInitialization for the
+          // spread.
+          next[idx] = Object.assign({}, next[idx], update) as LLMCallEntry;
+        } else {
+          // Response without prior request — shouldn't happen unless
+          // we missed the request event. Synthesize a row.
+          const synth: LLMCallEntry = {
+            call_id: callId,
+            ts_request: msg.ts,
+            provider_id: String(p.provider_id ?? ""),
+            model: String(p.model ?? ""),
+            status: phase === "response" ? "ok" : "error",
+          };
+          next.push(Object.assign(synth, update));
+        }
+      }
+      return next;
+    });
+  }, []));
 
   // ── Agent-tab stream (legacy) ────────────────────────────────────
   const [agentLogs, setAgentLogs] = useState<AgentLog[]>([]);
@@ -331,7 +429,7 @@ function LogDrawer() {
             ? `${filteredBackend.length}/${backendLogs.length}`
             : activeTab === "Agent 输出"
               ? `${agentLogs.length}`
-              : "—"}
+              : `${llmCalls.length}`}
         </span>
         <button
           onClick={() => setExpanded(false)}
@@ -357,7 +455,7 @@ function LogDrawer() {
           <AgentLogs rows={agentLogs} />
         )}
         {activeTab === "LLM 调用" && (
-          <LLMCallsPlaceholder />
+          <LLMCalls rows={llmCalls} />
         )}
       </div>
     </div>
@@ -441,18 +539,169 @@ function AgentLogs({ rows }: { rows: AgentLog[] }) {
   );
 }
 
-function LLMCallsPlaceholder() {
-  // T2.2 not yet implemented — backend hasn't started broadcasting
-  // llm.call.detail yet. Placeholder so the tab is discoverable.
+function LLMCalls({ rows }: { rows: LLMCallEntry[] }) {
+  if (rows.length === 0) {
+    return (
+      <div style={{ color: "var(--color-ink-ghost)" }}>
+        &gt;_ 等首次 LLM 调用 — gateway.chat 时这里会出现 request/response 配对...
+      </div>
+    );
+  }
+  // Show newest at the bottom (matches scroll-pin behavior of other tabs)
+  return (
+    <div className="flex flex-col gap-1">
+      {rows.map((c) => (
+        <LLMCallRow key={c.call_id} call={c} />
+      ))}
+    </div>
+  );
+}
+
+function LLMCallRow({ call }: { call: LLMCallEntry }) {
+  const [open, setOpen] = useState(false);
+  const statusColor =
+    call.status === "ok" ? "#10b981"
+    : call.status === "error" ? "#dc2626"
+    : "var(--color-ink-ghost)";
+  const statusGlyph =
+    call.status === "ok" ? "✓"
+    : call.status === "error" ? "✗"
+    : "▶";
   return (
     <div
-      className="flex h-full flex-col items-center justify-center text-center text-xs"
-      style={{ color: "var(--color-ink-ghost)" }}
+      className="rounded px-2 py-1"
+      style={{
+        backgroundColor: open ? "var(--color-card-alt)" : "transparent",
+        border: open
+          ? "1px solid var(--color-border-soft)"
+          : "1px solid transparent",
+      }}
     >
-      <div className="mb-1">LLM 调用追踪即将启用</div>
-      <div className="text-[10px]" style={{ color: "var(--color-ink-faint)" }}>
-        T2 阶段会捕获每次 gateway.chat 的 messages preview + response + tokens + latency
-      </div>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-baseline gap-2 text-left text-[11px]"
+      >
+        <span
+          className="shrink-0 font-mono"
+          style={{ color: "var(--color-ink-ghost)" }}
+        >
+          {call.ts_request.substring(11, 19)}
+        </span>
+        <span className="shrink-0" style={{ color: statusColor }}>
+          {statusGlyph}
+        </span>
+        <span
+          className="shrink-0 font-mono"
+          style={{ color: "var(--color-ink-faint)" }}
+        >
+          {call.model || call.provider_id.slice(-12)}
+        </span>
+        {call.thinking_mode && (
+          <span className="shrink-0 text-[9px]" style={{ color: "#6366f1" }}>
+            think
+          </span>
+        )}
+        {call.json_mode && (
+          <span className="shrink-0 text-[9px]" style={{ color: "#a855f7" }}>
+            json
+          </span>
+        )}
+        <span
+          className="shrink-0 font-mono tabular-nums"
+          style={{ color: "var(--color-ink-soft)" }}
+        >
+          {call.tokens != null && call.tokens > 0
+            ? `${call.tokens} tok`
+            : (call.status === "pending" ? "…" : "?")}
+        </span>
+        <span
+          className="shrink-0 font-mono tabular-nums"
+          style={{ color: "var(--color-ink-faint)" }}
+        >
+          {call.latency_ms != null && call.latency_ms > 0
+            ? `${call.latency_ms}ms`
+            : ""}
+        </span>
+        <span className="ml-auto text-[10px]" style={{ color: "var(--color-ink-ghost)" }}>
+          {open ? "▾" : "▸"}
+        </span>
+      </button>
+      {open && (
+        <div className="mt-1.5 pl-6 text-[11px]">
+          {call.error && (
+            <div
+              className="mb-1 rounded p-1.5"
+              style={{
+                backgroundColor: "rgba(220, 38, 38, 0.08)",
+                color: "#b91c1c",
+              }}
+            >
+              <strong>error:</strong> {call.error}
+            </div>
+          )}
+          <div className="mb-2 text-[10px]" style={{ color: "var(--color-ink-ghost)" }}>
+            call_id={call.call_id} · prompt={call.prompt_tokens ?? 0}{" "}
+            · completion={call.completion_tokens ?? 0}
+            {call.max_tokens ? ` · max_tokens=${call.max_tokens}` : ""}
+            {call.temperature != null ? ` · temp=${call.temperature}` : ""}
+            {call.messages_count != null ? ` · msgs=${call.messages_count}` : ""}
+          </div>
+          {call.messages_preview && call.messages_preview.length > 0 && (
+            <details className="mb-1.5">
+              <summary
+                className="cursor-pointer select-none text-[10px]"
+                style={{ color: "var(--color-ink-ghost)" }}
+              >
+                请求 messages ({call.messages_preview.length})
+              </summary>
+              <div className="mt-1 flex flex-col gap-1">
+                {call.messages_preview.map((m, i) => (
+                  <div
+                    key={i}
+                    className="rounded p-1.5"
+                    style={{
+                      backgroundColor: "var(--color-surface-alt)",
+                      whiteSpace: "pre-wrap",
+                      wordBreak: "break-word",
+                    }}
+                  >
+                    <div
+                      className="mb-0.5 text-[9px] uppercase"
+                      style={{ color: "var(--color-ink-faint)" }}
+                    >
+                      {m.role}
+                    </div>
+                    <div style={{ color: "var(--color-ink-soft)" }}>
+                      {m.content}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
+          {call.text_preview && (
+            <details open>
+              <summary
+                className="cursor-pointer select-none text-[10px]"
+                style={{ color: "var(--color-ink-ghost)" }}
+              >
+                响应 text
+              </summary>
+              <div
+                className="mt-1 rounded p-1.5"
+                style={{
+                  backgroundColor: "var(--color-surface-alt)",
+                  color: "var(--color-ink-soft)",
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-word",
+                }}
+              >
+                {call.text_preview}
+              </div>
+            </details>
+          )}
+        </div>
+      )}
     </div>
   );
 }

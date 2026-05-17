@@ -59,6 +59,19 @@ SKIP_PERSIST_EVENT_TYPES = frozenset({
     "inception.probe",
     "llm.quota_changed",
     "agent.output",
+    # T2 (2026-05-17): llm.call.detail carries message + response
+    # previews up to 4KB per event. With hundreds of LLM calls per
+    # PM run, persisting these would bloat the events table fast.
+    # WS broadcast still fires for the live LogDrawer 「LLM 调用」 tab;
+    # for forensics the structlog file sink + the existing
+    # llm.call_started / _finished short events stay persisted.
+    "llm.call.detail",
+    # T1 (2026-05-17): structlog tap broadcasts log.line for the
+    # LogDrawer 后端日志 stream. Each broadcast IS already in the
+    # file + buffer sinks, so re-persisting to events would triple-
+    # store the same content. Keep events table for "what happened"
+    # business events, not raw log mirroring.
+    "log.line",
 })
 
 
