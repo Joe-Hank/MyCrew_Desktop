@@ -19,6 +19,13 @@ param(
 
 $ErrorActionPreference = "Continue"
 
+# Self-locate: cd to the directory holding this script (= backend/) so
+# the uvicorn invocation below resolves the bootstrap.app module path
+# regardless of where the user called the script from.
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+Set-Location $ScriptDir
+Write-Host "[restart] cwd = $ScriptDir" -ForegroundColor DarkGray
+
 Write-Host "[restart] killing any python on :$Port..." -ForegroundColor Cyan
 $lines = netstat -ano | Select-String ":$Port\s.*LISTENING"
 $pids = @{}
