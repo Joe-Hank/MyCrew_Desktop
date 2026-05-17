@@ -130,6 +130,64 @@ def _rescue_qa_json(text: str) -> dict | None:
     return None
 
 
+# 2026-05-17 P0: agent self-reported failure verdicts that workflow_svc
+# must respect. Anything outside this success set (case-insensitive) is
+# treated as a failure regardless of structural schema validation.
+_VERDICT_PASS = {"pass", "passed", "success", "succeeded", "ok"}
+
+
+def _collect_verdict_errors(extracted: dict) -> list[str]:
+    """If the captured payload includes a `verdict` field whose value
+    isn't one of the known-good tokens, treat the task as failed and
+    pull as much context out as we can:
+
+      - the raw verdict value
+      - up to 5 entries from the agent's `issues` field, with severity
+        prefixes preserved so the canvas tooltip and failure_analyzer
+        both have actionable text
+      - the `summary` line (if present) as a fallback when issues is
+        empty
+
+    Returns an empty list if the verdict is missing (legacy outputs
+    that didn't declare one) or marks pass. Callers append the
+    returned list to the existing `errors` so the normal
+    validation_failed branch handles persistence / UI / debugger
+    hand-off uniformly.
+    """
+    if not isinstance(extracted, dict):
+        return []
+    raw_verdict = extracted.get("verdict")
+    if raw_verdict is None:
+        return []
+    verdict = str(raw_verdict).strip().lower()
+    if not verdict or verdict in _VERDICT_PASS:
+        return []
+
+    out: list[str] = [
+        f"agent self-reported verdict='{raw_verdict}' (treated as failure)"
+    ]
+    issues = extracted.get("issues")
+    if isinstance(issues, list):
+        for iss in issues[:5]:
+            if isinstance(iss, dict):
+                sev = str(iss.get("severity", "")).upper()
+                detail = (iss.get("detail")
+                          or iss.get("message")
+                          or iss.get("description")
+                          or "")
+                if not detail:
+                    continue
+                detail = str(detail)[:240]
+                out.append(f"[{sev}] {detail}" if sev else detail)
+            elif isinstance(iss, str) and iss.strip():
+                out.append(iss.strip()[:240])
+    if len(out) == 1:  # no issues parsed — use summary as the body
+        summary = extracted.get("summary")
+        if isinstance(summary, str) and summary.strip():
+            out.append(summary.strip()[:240])
+    return out
+
+
 def _extract_output_paths(output_schema: dict, _detail: str = "") -> list[str]:
     """Best-effort recovery of the PM contract's output_paths list.
 
@@ -873,6 +931,18 @@ class WorkflowService:
             await self._save_contract_check_artifact(
                 project_id, task_id, contract_errors,
             )
+            # 2026-05-17 P0 verdict gating: an agent that emit_output'd
+            # `verdict: 'fail' / 'FAIL' / 'partial_fail' / 'error'` MUST
+            # not be allowed to silently pass just because the JSON
+            # structure satisfies output_schema. Without this gate, a
+            # Crew QA that returned {verdict: 'FAIL', file_paths: []}
+            # passed structural validation (file_paths is required, []
+            # is a list, schema satisfied) and the parent task moved
+            # to DONE — even though QA explicitly said "this failed".
+            # The 魔塔副本 audit caught 4/5 Crew QAs in this state.
+            verdict_errors = _collect_verdict_errors(extracted)
+            if verdict_errors:
+                errors = list(errors or []) + verdict_errors
 
             output = runner.process_output(task_id, raw_text, extracted, errors)
 
@@ -1149,6 +1219,38 @@ class WorkflowService:
                 step_instructions, prev_payload,
                 text, captured,
             )
+
+            # 2026-05-17 P0 Crew halt: an executor step that emit_output'd
+            # verdict='fail' / 'partial_fail' / 'error' means downstream
+            # work cannot meaningfully continue — typical case is MCP /
+            # ComfyUI unavailable, so the executor produced no real
+            # artifacts, but the Crew used to keep marching to QA, which
+            # then rubber-stamped pass because the PM contract was empty.
+            # Halt here, surface the executor's own issue list to the
+            # caller, skip QA entirely. QA's own verdict is handled by
+            # workflow_svc's _collect_verdict_errors after the Crew
+            # returns (so QA failures don't trigger this halt path —
+            # they go through the normal validation_failed flow).
+            if step_role in ("head", "executor") and isinstance(captured, dict):
+                exec_errors = _collect_verdict_errors(captured)
+                if exec_errors:
+                    await self._broadcast_sub_step(
+                        project_id, task_id, i, step_role,
+                        agent_id, agent_row.get("role", ""), "failed",
+                        error="; ".join(exec_errors)[:200],
+                    )
+                    log.warning(
+                        "crew.executor_verdict_fail_halt",
+                        task_id=task_id, step_index=i, role=step_role,
+                        verdict=captured.get("verdict"),
+                    )
+                    # Raise so _execute_task's outer except branch flips
+                    # the parent task to failed with this error chain.
+                    raise RuntimeError(
+                        f"Crew {step_role} step {i + 1} reported "
+                        f"verdict='{captured.get('verdict')}': "
+                        + "; ".join(exec_errors)[:400]
+                    )
 
             prev_payload = captured  # may be None — next step sees null
             step_summaries.append(

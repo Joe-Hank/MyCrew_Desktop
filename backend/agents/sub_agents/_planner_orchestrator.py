@@ -1071,6 +1071,15 @@ async def _validate_assignments(
     reject anything that doesn't resolve. Returns the validated list
     (passes through unchanged on success) or raises a ValueError that
     the planner orchestrator surfaces to the user.
+
+    2026-05-17 P0 override: tasks with kind='final_qa' must be assigned
+    to the QA Engineer agent regardless of what the LLM picked. The
+    魔塔副本 audit caught Phase 5 assigning Narrative Designer to
+    final_qa because the task detail mentioned "产出质检报告" —
+    sounds documentation-like, agent picked accordingly, but Narrative
+    Designer has no QA tooling or QA prompt context and just wrote
+    prose without running the actual checks. Hardcoded mapping is the
+    only way to keep the final gate sane.
     """
     # Build the live id allow-list from the same source list_performers uses
     from agents.sub_agents._list_performers_tool import _build_payload
@@ -1078,9 +1087,19 @@ async def _validate_assignments(
     agent_ids = {a["id"] for a in pool.get("agents", [])}
     crew_ids = {c["id"] for c in pool.get("crews", [])}
 
+    # Find the QA Engineer agent id from the live pool — used to
+    # force-override final_qa assignments. Match by role string (same
+    # key seed_crews._ensure_agent uses).
+    qa_agent_id: str | None = None
+    for a in pool.get("agents", []):
+        if (a.get("role") or "").strip().lower() == "qa engineer":
+            qa_agent_id = a["id"]
+            break
+
     bad: list[str] = []
     seen_indices: set[int] = set()
     setup_indices = {i for i, t in enumerate(pathed_tasks) if t.get("kind") == "setup"}
+    final_qa_indices = {i for i, t in enumerate(pathed_tasks) if t.get("kind") == "final_qa"}
 
     for a in raw_assignments:
         idx = a.get("task_index")
@@ -1094,6 +1113,20 @@ async def _validate_assignments(
             bad.append(f"task_index={idx} 缺失或重复")
             continue
         seen_indices.add(idx)
+        # Override before existence check — the LLM's pick is ignored
+        # for final_qa, we slot the QA Engineer in.
+        if idx in final_qa_indices:
+            if not qa_agent_id:
+                bad.append(
+                    f"task_index={idx} 是 final_qa 任务，但 agent pool 中"
+                    "找不到 role='QA Engineer' 的 agent（seed_crews 未跑？）"
+                )
+                continue
+            a["performer_ref"] = {"kind": "agent", "id": qa_agent_id}
+            kind = "agent"
+            pid = qa_agent_id
+            log.info("phase5.final_qa_overridden_to_qa_engineer",
+                     task_index=idx, agent_id=qa_agent_id)
         if kind == "agent":
             if pid not in agent_ids:
                 bad.append(f"task_index={idx}: agent id '{pid}' 不在可用池（list_performers 没列出）")

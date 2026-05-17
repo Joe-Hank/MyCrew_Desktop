@@ -244,6 +244,7 @@ performer 有两类：
    - 按 task.title + task.detail + output_paths 跟 performer 的 applicable_scenarios 做语义匹配
    - 优先选 Crew（如有合适的）— Crew 自带 QA，质量更稳；单 agent 留给纯文档任务
    - 例：要产 PNG → Art Crew；要产 .cs 脚本 → System Implementation Crew；要装配场景 → Scene Assembly Crew；要写文档 → Narrative Designer / Level Designer 等单 agent
+   - **`kind='final_qa'` 必须分给 role='QA Engineer' 的 agent**。即使任务描述里"产出质检报告"听起来像文档，它本质是综合验收 — Narrative Designer 不会用 read_file_local/find_in_file 做实际检查。后端会做硬覆盖，但请你自觉选对，留下正确的 reason。
 5. 调 `submit_assignments(assignments=[...])` 提交。每条 assignment：
    - `task_index`: 0-based 指向上游列表
    - `performer_ref`: {kind: "agent"|"crew", id: <list_performers 返回的真实 id>}
