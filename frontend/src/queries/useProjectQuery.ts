@@ -53,6 +53,29 @@ export interface Task {
   /** ID of the bound performer (agent_id or crew_id depending on
    *  performer_kind). Mirrors agent_id when performer_kind='agent'. */
   performer_id?: string | null;
+  /** PM v5 named-symbol contract. JSON string (backend stores as TEXT);
+   *  IO viewer parses on demand for the 代码契约 tab. Null/undefined =
+   *  non-code task (Art / Audio / pure prefab). */
+  code_contract?: string | null;
+}
+
+/** PM v5: shape of the parsed code_contract column. The DB stores the
+ *  JSON serialization; consumers (IoViewerDrawer / future contract
+ *  inspector) parse on demand. Keep in sync with backend
+ *  agents/sub_agents/_planner_models.CodeContract. */
+export interface CodeContract {
+  namespace?: string | null;
+  files: Array<{
+    path: string;
+    exports: Array<{
+      kind: string;  // class | interface | struct | enum | method | event | field | property
+      signature: string;
+    }>;
+  }>;
+  imports?: Array<{
+    from_task_index: number;
+    uses: string[];
+  }>;
 }
 
 export interface ProjectPage {

@@ -582,6 +582,19 @@ class WorkflowService:
                 extracted = {"_raw": raw_text}
                 errors = []
 
+            # V5 Stage B (2026-05-17): if the PM wrote a code_contract
+            # for this task, regex-verify that every .cs file produced
+            # actually contains every contracted public symbol. Missing
+            # signatures get reported as validation errors so the task
+            # moves to validation_failed with concrete "缺少签名 X"
+            # messages instead of silently shipping half-implemented
+            # code. Non-code tasks have NULL contract → no-op.
+            contract_errors = await self._verify_code_contract(
+                project_id, task_id,
+            )
+            if contract_errors:
+                errors = list(errors or []) + contract_errors
+
             output = runner.process_output(task_id, raw_text, extracted, errors)
 
             if output.is_valid:
@@ -1126,6 +1139,49 @@ class WorkflowService:
                                         harness: HarnessStateMachine) -> None:
         for task in harness.get_all_tasks():
             await self._persist_task_state(project_id, task["id"], harness)
+
+    async def _verify_code_contract(
+        self, project_id: str, task_id: str,
+    ) -> list[str]:
+        """V5 Stage B: if tasks.code_contract is non-null for this task,
+        regex-check the generated .cs files against the contracted
+        signatures. Returns a list of error strings (empty = pass, or
+        no contract at all). Never raises — any unexpected exception is
+        logged and swallowed so a malformed contract doesn't kill the
+        task path.
+        """
+        try:
+            task_row = await crud.get_by_id("tasks", task_id)
+            if not task_row:
+                return []
+            contract_raw = task_row.get("code_contract")
+            if not contract_raw:
+                return []
+            try:
+                contract = json.loads(contract_raw)
+            except (json.JSONDecodeError, TypeError):
+                log.warning("contract_verify.bad_json", task_id=task_id)
+                return []
+            if not isinstance(contract, dict) or not contract.get("files"):
+                return []
+
+            project = await crud.get_by_id("projects", project_id) or {}
+            root_str = project.get("root_path") or ""
+            if not root_str:
+                # No root path means the project hasn't been bound to a
+                # filesystem yet — skip rather than false-fail.
+                return []
+            from pathlib import Path
+            project_root = Path(root_str)
+            if not project_root.exists():
+                return []
+
+            from domain.qa.contract_validator import verify_contract
+            return verify_contract(contract, project_root)
+        except Exception as exc:  # noqa: BLE001
+            log.error("contract_verify.unhandled",
+                      task_id=task_id, error=str(exc))
+            return []
 
     async def _save_task_input(self, project_id: str, task_id: str,
                                 task_input: TaskInput) -> None:

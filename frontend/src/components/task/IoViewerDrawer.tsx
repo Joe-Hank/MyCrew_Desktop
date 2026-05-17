@@ -1,7 +1,9 @@
-import { useEffect, useRef, useState } from "react";
-import type { Task } from "../../queries/useProjectQuery";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { CodeContract, Task } from "../../queries/useProjectQuery";
 import { useTaskIO, useSubIO } from "../../queries/useWorkflowQuery";
 import { usePrefsStore } from "../../stores/usePrefsStore";
+
+type IoTab = "in" | "out" | "contract";
 
 /** Side drawer that shows a task's input + output payloads (structured
  *  JSON and raw text). The user can drag the left edge to widen / narrow
@@ -28,32 +30,52 @@ function IoViewerDrawer({
   stepIndex?: number;
   onClose: () => void;
 }) {
-  const [tab, setTab] = useState<"in" | "out">(initialDirection);
+  const [tab, setTab] = useState<IoTab>(initialDirection);
   const isSubStep = stepIndex !== undefined && stepIndex !== null;
+  // Only call the IO queries when the active tab actually needs them.
+  // Contract tab reads task.code_contract synchronously — no fetch.
+  const ioTab: "in" | "out" = tab === "contract" ? "out" : tab;
   const { data: taskIo, isLoading: taskLoading } = useTaskIO(
-    isSubStep ? null : task.id,
-    tab,
+    isSubStep || tab === "contract" ? null : task.id,
+    ioTab,
   );
   const { data: subIo, isLoading: subLoading } = useSubIO(
-    isSubStep ? task.id : null,
-    isSubStep ? stepIndex! : null,
+    isSubStep && tab !== "contract" ? task.id : null,
+    isSubStep && tab !== "contract" ? stepIndex! : null,
   );
   const io = isSubStep
     ? (subIo
         ? {
-            direction: tab,
-            structured: tab === "in" ? subIo.in : subIo.out,
+            direction: ioTab,
+            structured: ioTab === "in" ? subIo.in : subIo.out,
             // Pick the tab-specific raw markdown. `raw_in` / `raw_out`
             // landed 2026-05-17 — the legacy `raw` field served the
             // OUT md regardless of tab, which is exactly the bug being
             // fixed here (input tab showing output's raw).
-            raw: tab === "in"
+            raw: ioTab === "in"
               ? (subIo.raw_in ?? null)
               : (subIo.raw_out ?? subIo.raw ?? null),
           }
         : null)
     : taskIo;
-  const isLoading = isSubStep ? subLoading : taskLoading;
+  const isLoading = tab === "contract"
+    ? false
+    : (isSubStep ? subLoading : taskLoading);
+
+  // PM v5: parse task.code_contract once per task — stored as a JSON
+  // string in the row. Null / parse failure → no contract to show.
+  const contract = useMemo<CodeContract | null>(() => {
+    const raw = task.code_contract;
+    if (!raw) return null;
+    if (typeof raw !== "string") return null;
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === "object" ? parsed as CodeContract : null;
+    } catch {
+      return null;
+    }
+  }, [task.code_contract]);
+  const hasContract = !!contract;
 
   const width = usePrefsStore((s) => s.ioViewerWidth);
   const setWidth = usePrefsStore((s) => s.setIoViewerWidth);
@@ -159,11 +181,25 @@ function IoViewerDrawer({
       <div className="flex" style={{ borderBottom: "1px solid var(--color-border-soft)" }}>
         <TabBtn label="输入" active={tab === "in"} onClick={() => setTab("in")} />
         <TabBtn label="输出" active={tab === "out"} onClick={() => setTab("out")} />
+        {/* PM v5: contract tab only appears for code tasks (the column
+            is NULL for Art / Audio / pure-prefab tasks). Hides itself
+            cleanly without disabling the layout for the common case. */}
+        {hasContract && (
+          <TabBtn
+            label="代码契约"
+            active={tab === "contract"}
+            onClick={() => setTab("contract")}
+          />
+        )}
       </div>
 
       {/* Content */}
       <div className="flex-1 overflow-auto p-3">
-        {isLoading && (
+        {tab === "contract" && contract && (
+          <ContractView contract={contract} />
+        )}
+
+        {tab !== "contract" && isLoading && (
           <div
             className="py-8 text-center text-xs"
             style={{ color: "var(--color-ink-faint)" }}
@@ -172,7 +208,7 @@ function IoViewerDrawer({
           </div>
         )}
 
-        {!isLoading && !io?.structured && !io?.raw && (
+        {tab !== "contract" && !isLoading && !io?.structured && !io?.raw && (
           <div
             className="py-8 text-center text-xs"
             style={{ color: "var(--color-ink-faint)" }}
@@ -181,7 +217,7 @@ function IoViewerDrawer({
           </div>
         )}
 
-        {!isLoading && io?.structured && (
+        {tab !== "contract" && !isLoading && io?.structured && (
           <div className="mb-3">
             <h4
               className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider"
@@ -207,7 +243,7 @@ function IoViewerDrawer({
           </div>
         )}
 
-        {!isLoading && io?.raw && (
+        {tab !== "contract" && !isLoading && io?.raw && (
           <div>
             <h4
               className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider"
@@ -233,6 +269,199 @@ function IoViewerDrawer({
       </div>
     </div>
   );
+}
+
+/** Render task.code_contract — PM v5 named-symbol contract.
+ *
+ *  Layout mirrors the .mycrew/code_contract.md style:
+ *    - one heading per .cs file
+ *    - a 2-column table of (kind / signature) per export
+ *    - imports section at the bottom listing cross-task symbol pulls
+ *
+ *  Read-only by design. Editing the contract requires re-running the
+ *  PM iterate flow; opening the IO viewer should make that clear by
+ *  framing the panel as a reference, not a workspace. */
+function ContractView({ contract }: { contract: CodeContract }) {
+  const files = contract.files ?? [];
+  const imports = contract.imports ?? [];
+  return (
+    <div className="flex flex-col gap-4">
+      <div
+        className="rounded p-2 text-[11px] leading-relaxed"
+        style={{
+          backgroundColor: "rgba(99, 102, 241, 0.08)",
+          color: "var(--color-ink-muted)",
+          border: "1px solid rgba(99, 102, 241, 0.2)",
+        }}
+      >
+        PM v5 在规划时为这个任务钉死了下列公共符号。
+        Crew QA 会逐条 regex 验证生成的 .cs 是否都包含这些签名；
+        缺一项 → 任务进 validation_failed。想改 → 走「迭代」让 PM 重跑。
+      </div>
+
+      {contract.namespace && (
+        <div>
+          <h4
+            className="mb-1 text-[10px] font-semibold uppercase tracking-wider"
+            style={{ color: "var(--color-ink-ghost)" }}
+          >
+            Namespace
+          </h4>
+          <code
+            className="rounded px-1.5 py-0.5 text-[12px]"
+            style={{
+              backgroundColor: "var(--color-card-alt)",
+              color: "var(--color-ink)",
+            }}
+          >
+            {contract.namespace}
+          </code>
+        </div>
+      )}
+
+      {files.length === 0 && (
+        <div
+          className="py-4 text-center text-xs"
+          style={{ color: "var(--color-ink-faint)" }}
+        >
+          契约为空（PM 标记了非代码任务但仍写了 contract — 异常状态）
+        </div>
+      )}
+
+      {files.map((f, fi) => (
+        <div key={`${f.path}-${fi}`}>
+          <div
+            className="mb-1.5 flex items-baseline gap-2 text-[10px] font-semibold uppercase tracking-wider"
+            style={{ color: "var(--color-ink-ghost)" }}
+          >
+            <span>文件</span>
+          </div>
+          <code
+            className="inline-block break-all rounded px-1.5 py-0.5 text-[12px]"
+            style={{
+              backgroundColor: "var(--color-card-alt)",
+              color: "var(--color-ink)",
+            }}
+          >
+            {f.path}
+          </code>
+          <ul className="mt-2 flex flex-col gap-1">
+            {(f.exports ?? []).map((exp, ei) => (
+              <li
+                key={ei}
+                className="flex items-start gap-2 rounded p-1.5 text-[12px]"
+                style={{
+                  backgroundColor: "var(--color-card-alt)",
+                  border: "1px solid var(--color-border-soft)",
+                }}
+              >
+                <span
+                  className="shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium uppercase"
+                  style={{
+                    backgroundColor: kindBg(exp.kind),
+                    color: kindFg(exp.kind),
+                  }}
+                >
+                  {exp.kind}
+                </span>
+                <code
+                  className="flex-1 break-all"
+                  style={{
+                    color: "var(--color-ink)",
+                    fontFamily: "ui-monospace, SFMono-Regular, monospace",
+                  }}
+                >
+                  {exp.signature}
+                </code>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
+
+      {imports.length > 0 && (
+        <div>
+          <h4
+            className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider"
+            style={{ color: "var(--color-ink-ghost)" }}
+          >
+            依赖（imports — 引用其他任务的符号）
+          </h4>
+          <ul className="flex flex-col gap-1">
+            {imports.map((imp, ii) => (
+              <li
+                key={ii}
+                className="rounded p-2 text-[12px]"
+                style={{
+                  backgroundColor: "var(--color-card-alt)",
+                  border: "1px solid var(--color-border-soft)",
+                }}
+              >
+                <span style={{ color: "var(--color-ink-muted)" }}>
+                  来自任务索引 {imp.from_task_index} 的：
+                </span>
+                <div className="mt-1 flex flex-wrap gap-1">
+                  {imp.uses.map((u, ui) => (
+                    <code
+                      key={ui}
+                      className="rounded px-1.5 py-0.5 text-[11px]"
+                      style={{
+                        backgroundColor: "var(--color-surface-alt)",
+                        color: "var(--color-ink)",
+                        fontFamily: "ui-monospace, SFMono-Regular, monospace",
+                      }}
+                    >
+                      {u}
+                    </code>
+                  ))}
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Color-code each symbol kind so a scan of the contract list
+ *  immediately distinguishes classes / methods / events / fields. */
+function kindBg(kind: string): string {
+  switch (kind) {
+    case "class":
+    case "interface":
+    case "struct":
+    case "enum":
+      return "rgba(12, 140, 233, 0.14)";  // brand-ish blue
+    case "method":
+      return "rgba(99, 102, 241, 0.14)";  // indigo
+    case "event":
+      return "rgba(245, 158, 11, 0.16)";  // amber
+    case "field":
+    case "property":
+      return "rgba(16, 185, 129, 0.14)";  // emerald
+    default:
+      return "var(--color-surface-alt)";
+  }
+}
+
+function kindFg(kind: string): string {
+  switch (kind) {
+    case "class":
+    case "interface":
+    case "struct":
+    case "enum":
+      return "var(--color-brand-500)";
+    case "method":
+      return "#4f46e5";
+    case "event":
+      return "#92400e";
+    case "field":
+    case "property":
+      return "#065f46";
+    default:
+      return "var(--color-ink-muted)";
+  }
 }
 
 function TabBtn({
