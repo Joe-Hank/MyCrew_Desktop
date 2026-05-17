@@ -60,7 +60,7 @@ log = structlog.get_logger()
 #        b) Or push local staged dir: see backend/scripts/mirror_to_gitee.sh
 TEMPLATE_REPO_URL = os.getenv(
     "MYCREW_TEMPLATE_REPO_URL",
-    "https://gitee.com/Joe-Hank/Templates.git",
+    "https://gitee.com/SoloSlow/Templates.git",
 )
 # Branch name is preserved on Gitee "导入仓库" from GitHub — we used
 # 'main' on the GitHub source, so the Gitee mirror also gets 'main'.
