@@ -27,19 +27,22 @@ Set-Location $ScriptDir
 Write-Host "[restart] cwd = $ScriptDir" -ForegroundColor DarkGray
 
 Write-Host "[restart] killing any python on :$Port..." -ForegroundColor Cyan
+# Note: $pid is a PowerShell built-in (current process ID) and is
+# read-only; never use it as a loop var or it explodes with
+# "VariableNotWritable" — we use $procPid here for the kill loop.
 $lines = netstat -ano | Select-String ":$Port\s.*LISTENING"
-$pids = @{}
+$procPids = @{}
 foreach ($line in $lines) {
     $parts = ($line.ToString() -split "\s+") | Where-Object { $_ -ne "" }
     if ($parts.Length -ge 5) {
-        $pids[[int]$parts[-1]] = $true
+        $procPids[[int]$parts[-1]] = $true
     }
 }
-foreach ($pid in $pids.Keys) {
-    Write-Host "  → kill pid $pid"
-    try { Stop-Process -Id $pid -Force -ErrorAction Stop } catch { Write-Host "    (already gone)" }
+foreach ($procPid in $procPids.Keys) {
+    Write-Host "  → kill pid $procPid"
+    try { Stop-Process -Id $procPid -Force -ErrorAction Stop } catch { Write-Host "    (already gone)" }
 }
-if ($pids.Count -gt 0) { Start-Sleep -Milliseconds 400 }
+if ($procPids.Count -gt 0) { Start-Sleep -Milliseconds 400 }
 
 Write-Host "[restart] launching fresh uvicorn on :$Port..." -ForegroundColor Cyan
 # No --reload. Manual restart only. Set $env:MYCREW_DEV_RELOAD = "1"
