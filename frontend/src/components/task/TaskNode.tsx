@@ -16,7 +16,7 @@ export type TaskAction =
   | { kind: "view_failure_reason"; task: Task }
   | { kind: "view_io"; task: Task; direction: "in" | "out" };
 
-const STATUS_DOT: Record<string, string> = {
+export const STATUS_DOT: Record<string, string> = {
   pending: "#cbd5e1",
   running: "var(--color-brand-500)",
   paused: "#facc15",
@@ -25,6 +25,7 @@ const STATUS_DOT: Record<string, string> = {
   aborted: "#737373",
   validation_failed: "#f59e0b",
   blocked: "#a78bfa",
+  stalled: "#ef4444",
 };
 
 function TaskNode({

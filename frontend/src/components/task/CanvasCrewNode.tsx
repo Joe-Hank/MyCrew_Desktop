@@ -3,7 +3,7 @@ import { Handle, Position, type NodeProps } from "@xyflow/react";
 import type { Task } from "../../queries/useProjectQuery";
 import { useCrews, type CrewSequenceStep } from "../../queries/useTeamQuery";
 import { useEvent } from "../../hooks/useEvent";
-import TaskNode, { type TaskAction } from "./TaskNode";
+import TaskNode, { STATUS_DOT, type TaskAction } from "./TaskNode";
 import SubAgentCard, { type SubStepStatus, type SubStepAction } from "./SubAgentCard";
 
 export interface CanvasCrewNodeData extends Record<string, unknown> {
@@ -120,12 +120,24 @@ function CanvasCrewNode({ data, selected }: NodeProps) {
     }
   }, [expanded, d, sequence.length, task.id]);
 
+  // Halo class derived from the parent task's status — promoted to the
+  // outermost wrapper (rather than the inner TaskNode) so the box-shadow
+  // paints at the React Flow node root, matching the way ProjectCard
+  // hangs `card-halo-running` on its top-level div. 2026-05-17 fix: the
+  // previous placement on TaskNode's inner div looked visually identical
+  // for regular tasks (CanvasTaskNode wraps TaskNode at the same depth)
+  // but for Crew tasks the extra nesting + the toggle-button overlay
+  // ate the glow.
+  const haloClass =
+    (task.status === "running" ? "task-halo-running " : "") +
+    (task.status === "stalled" ? "task-halo-stalled " : "");
+
   // Collapsed mode: render the existing TaskNode + an ⊕ button overlay.
   // Functions just like a regular task card; the toggle reveals the
   // step pipeline.
   if (!expanded) {
     return (
-      <div className="relative">
+      <div className={"relative " + haloClass}>
         <Handle
           type="target"
           position={Position.Left}
@@ -187,18 +199,13 @@ function CanvasCrewNode({ data, selected }: NodeProps) {
   }
 
   // Expanded mode: outer frame around N sub-cards in a row, head-first.
-  const dotColor =
-    task.status === "running" ? "var(--color-brand-500)"
-      : task.status === "done" ? "#10b981"
-      : task.status === "failed" || task.status === "validation_failed" ? "#ef4444"
-      : task.status === "paused" ? "#facc15"
-      : "#cbd5e1";
-
-  const showRunningHalo = task.status === "running";
-  const showStalledHalo = task.status === "stalled";
+  // Status dot — same mapping as TaskNode so stalled/aborted/blocked
+  // render with the right tone (previously they fell through to gray
+  // because this ternary only covered the five "happy path" states).
+  const dotColor = STATUS_DOT[task.status] ?? STATUS_DOT.pending;
 
   return (
-    <div className="relative">
+    <div className={"relative " + haloClass}>
       <Handle
         type="target"
         position={Position.Left}
@@ -213,11 +220,7 @@ function CanvasCrewNode({ data, selected }: NodeProps) {
         <HandleDot />
       </Handle>
       <div
-        className={
-          "rounded-xl p-3 transition-shadow " +
-          (showRunningHalo ? "task-halo-running " : "") +
-          (showStalledHalo ? "task-halo-stalled " : "")
-        }
+        className="rounded-xl p-3 transition-shadow"
         style={{
           backgroundColor: "var(--color-surface-alt)",
           border: `1px solid ${selected ? "var(--color-brand-500)" : "var(--color-border-soft)"}`,
