@@ -55,6 +55,81 @@ _ERROR_KIND_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
 ]
 
 
+def _rescue_qa_json(text: str) -> dict | None:
+    """Salvage a QA step's intended structured payload when the agent
+    forgot to call emit_output and instead dumped the JSON as its
+    final answer text. Returns a parsed dict or None.
+
+    Two strategies:
+      1. Direct json.loads on the trimmed text.
+      2. Find the first ```json ... ``` fenced block and parse that.
+      3. Find the first top-level {...} via balanced-brace scan and
+         parse it. Handles cases like "Result: { ... } — done".
+    """
+    if not text:
+        return None
+    s = text.strip()
+    # Strip a leading "```" / "```json" wrapper if present.
+    if s.startswith("```"):
+        nl = s.find("\n")
+        if nl > 0:
+            s = s[nl + 1:]
+        if s.endswith("```"):
+            s = s[:-3]
+        s = s.strip()
+    # Strategy 1: direct parse
+    try:
+        parsed = json.loads(s)
+        if isinstance(parsed, dict):
+            return parsed
+    except (json.JSONDecodeError, TypeError):
+        pass
+    # Strategy 2: fenced ```json block anywhere in the text
+    import re
+    m = re.search(r"```json\s*\n(.*?)\n```", text, re.DOTALL)
+    if m:
+        try:
+            parsed = json.loads(m.group(1))
+            if isinstance(parsed, dict):
+                return parsed
+        except (json.JSONDecodeError, TypeError):
+            pass
+    # Strategy 3: balanced-brace scan — find the first {...} that parses
+    start = text.find("{")
+    while start != -1:
+        depth = 0
+        in_str = False
+        esc = False
+        for i in range(start, len(text)):
+            c = text[i]
+            if esc:
+                esc = False
+                continue
+            if c == "\\":
+                esc = True
+                continue
+            if c == '"':
+                in_str = not in_str
+                continue
+            if in_str:
+                continue
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = text[start:i + 1]
+                    try:
+                        parsed = json.loads(candidate)
+                        if isinstance(parsed, dict):
+                            return parsed
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                    break
+        start = text.find("{", start + 1)
+    return None
+
+
 def _extract_output_paths(output_schema: dict, _detail: str = "") -> list[str]:
     """Best-effort recovery of the PM contract's output_paths list.
 
@@ -977,6 +1052,32 @@ class WorkflowService:
                     error=err[:200],
                 )
                 raise
+
+            # 2026-05-17 fix: QA agents sometimes "forget" to call
+            # emit_output and instead dump the structured payload as
+            # their plain-text final answer. Without rescue, captured
+            # stays None → workflow_svc's downstream pop_output fails
+            # → fallback _extract_structured_output runs on the Crew's
+            # step_summaries markdown (which has no file_paths) →
+            # validate_output_schema raises "'file_paths' is a
+            # required property" even though the QA agent did produce
+            # the right structure. Detected on 魔塔·第一层 / 黄金矿工
+            # in production.
+            #
+            # Heuristic rescue: if a QA step returned no captured but
+            # its final-answer text parses as a JSON object, treat
+            # that JSON as if it had been emit_output'd. Only for QA
+            # — intermediate steps have looser schemas and their
+            # raw answers aren't reliably JSON.
+            if step_role == "qa" and captured is None and text:
+                rescued = _rescue_qa_json(text)
+                if rescued is not None:
+                    captured = rescued
+                    from src.tools.builtin.local._output_capture import set_output
+                    set_output(task_id, rescued)
+                    log.info("crew.qa_rescued_json",
+                             task_id=task_id, step_index=i,
+                             keys=list(rescued.keys())[:8])
 
             # Persist sub-step IO
             await self._save_sub_step_io(
