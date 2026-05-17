@@ -424,6 +424,37 @@ PHASE_CC_BACKSTORY = """# 身份
 4. 一次性调 `submit_code_contracts(contracts=[...])` 提交
 5. 校验失败时（imports 引用了不存在的符号 / 路径不在 output_paths / 数量不对），按错误信息精修后再提交
 
+# 🔴 硬约束：类名 == 文件名（Unity 强制要求）
+
+Unity 在 MonoBehaviour 场景里**根据文件名查找类**来 AddComponent；类名跟
+文件名不一致会让脚本组件挂不上 GameObject，运行时崩。所以：
+
+- **每个 .cs 的主 public class 名必须 == 文件名（去 .cs 后缀）**
+- **imports 引用上游符号时，ClassName 必须 == 上游那个 .cs 文件的文件名**
+- 不许根据"领域语义"自己重命名类（如把 `GhostAI.cs` 起名 `GhostType`、
+  把 `GameManager.cs` 起名 `GameState`）— LLM 最容易犯这个错
+
+例子：
+```
+output_paths = ["Assets/Scripts/AI/GhostAI.cs"]
+→ exports 的主类 signature 必须是: "public class GhostAI : MonoBehaviour"
+→ 下游 imports 写 `GhostAI.OnGhostKilled` 才能匹配到
+
+output_paths = ["Assets/Scripts/Manager/GameManager.cs"]
+→ exports 的主类 signature 必须是: "public class GameManager : MonoBehaviour"
+→ 下游 imports 写 `GameManager.TotalScore` 才能匹配到
+```
+
+# 写作顺序建议（避免命名漂移）
+
+为防止"task 3 写 exports 时叫 GhostAI、task 4 写 imports 时按印象叫
+GhostController"，**按下面顺序写**：
+
+1. 第一遍：**只为每个 .cs task 写 exports**（主类签名 + 关键 public 成员）
+   — 主类名严格抄文件名
+2. 第二遍：**再写 imports** — 引用时把上游 .cs 的文件名当类名直接用，
+   不要自己创造"应该是"什么名字
+
 # 签名规范（**v5 MVP regex 验证依赖**，必须遵守）
 - **单行**：一个 signature 一行结束，不允许换行
 - **C# 标准格式**：完整 `public 修饰符 类型 名称(参数)` 形式
@@ -460,6 +491,12 @@ PHASE_CC_BACKSTORY = """# 身份
 
 // ❌ 引用了 from_task 没暴露的符号
 { "from_task_index": 3, "uses": ["PlayerController.JumpHigher"] }  // PlayerController 没声明 JumpHigher
+
+// ❌ 类名跟文件名不一致（最常见的错）
+// output_paths: ["Assets/Scripts/AI/GhostAI.cs"]
+// exports: [{ "kind": "class", "signature": "public class GhostType : MonoBehaviour" }]
+// 然后下游又写 uses: ["GhostAI.OnGhostKilled"] — 自己跟自己对不上，validator 必拒
+// ✓ 正确：exports 的类签名也用 GhostAI
 
 // ❌ 给 .png/.wav task 写了 contract
 { "task_index": 5, "code_contract": { "files": [{ "path": "Assets/Sprites/x.png", "exports": [...] }] } }
