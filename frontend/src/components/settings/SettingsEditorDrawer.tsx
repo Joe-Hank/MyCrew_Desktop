@@ -1,7 +1,10 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   useCreateLlmProvider,
   useUpdateLlmProvider,
+  useCreateLlmModel,
+  useUpdateLlmModel,
+  useProbeThinking,
   LLM_TYPES,
   type LlmProvider,
 } from "../../queries/useLlmQuery";
@@ -48,19 +51,109 @@ function SettingsEditorDrawer({
 
 // ── LLM Form ────────────────────────────────────────────────────────
 
+/** Mirror of `LlmService._heuristic_supports_thinking` (backend). Used as
+ * an instant-feedback fallback when the user is creating a brand-new
+ * provider and we don't yet have a provider_id to anchor a real probe
+ * call. The backend's authoritative check still runs once the row is
+ * saved (handleSave caches it via createModel's supports_thinking). */
+function heuristicSupportsThinking(providerType: string, modelName: string): boolean {
+  const name = modelName.toLowerCase();
+  const t = providerType.toLowerCase();
+  if (t === "anthropic") {
+    if (name.includes("claude-3-7") || name.includes("claude-3.7")) return true;
+    if (name.includes("claude-opus-4") || name.includes("claude-sonnet-4") || name.includes("claude-haiku-4")) return true;
+    if (name.startsWith("claude-4-") || name.startsWith("claude-5-")) return true;
+    return false;
+  }
+  if (t === "openai") {
+    if (name.startsWith("o1") || name.startsWith("o3") || name.startsWith("o4")) return true;
+    if (name.startsWith("gpt-5")) return true;
+    return false;
+  }
+  if (t === "deepseek") {
+    return name.includes("reasoner") || name.endsWith("-r1");
+  }
+  if (t === "qwen") {
+    return name.includes("qwq") || name.includes("reasoner") || name.includes("-thinking");
+  }
+  if (t === "gemini") {
+    return name.includes("2.5") && name.includes("thinking");
+  }
+  return false;
+}
+
+
 function LlmForm({ data, onDone }: { data: LlmProvider | null; onDone: () => void }) {
   const isEdit = !!data?.id;
   const create = useCreateLlmProvider();
   const update = useUpdateLlmProvider();
+  const createModel = useCreateLlmModel();
+  const updateModel = useUpdateLlmModel();
+  const probe = useProbeThinking();
+
+  const firstModel = data?.models?.[0];
 
   const [name, setName] = useState(data?.name ?? "");
   const [type, setType] = useState(data?.type ?? "openai");
   const [apiKey, setApiKey] = useState(data?.api_key_ref ?? "");
   const [baseUrl, setBaseUrl] = useState(data?.base_url ?? "");
-  const [model, setModel] = useState(data?.models?.[0]?.model_name ?? "");
+  const [model, setModel] = useState(firstModel?.model_name ?? "");
   const [moreOpen, setMoreOpen] = useState(false);
 
-  const saving = create.isPending || update.isPending;
+  // Thinking-mode capability:
+  //   - Initial value comes from the persisted model row (if any) — that
+  //     value was last cached by either an earlier probe OR by a seed.
+  //   - The toggle is `disabled` whenever the current (type, model)
+  //     combination's supports_thinking is false. The user can still
+  //     re-probe by editing the model field; we run the probe on
+  //     debounced text changes so picking a different model variant
+  //     unlocks the toggle without saving first.
+  //   - When the probed result flips to false, we automatically pull
+  //     the toggle back down so a stale "on" value can't outlive the
+  //     model name change.
+  const [supportsThinking, setSupportsThinking] = useState<boolean>(
+    firstModel?.supports_thinking ?? false,
+  );
+
+  const saving =
+    create.isPending || update.isPending ||
+    createModel.isPending || updateModel.isPending;
+
+  // Debounced probe: 400ms after the user stops typing in the model
+  // field (or changes provider type), re-resolve supports_thinking.
+  const probeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (!model.trim()) {
+      setSupportsThinking(false);
+      return;
+    }
+    if (probeTimer.current) clearTimeout(probeTimer.current);
+    probeTimer.current = setTimeout(() => {
+      const payload = firstModel?.id
+        ? { model_id: firstModel.id }
+        : data?.id
+          ? { provider_id: data.id, model_name: model.trim() }
+          : null;
+      // No provider id yet (creating a brand-new provider): probe with
+      // a synthetic call — backend tolerates "provider_id + model_name"
+      // but needs a real provider row to cache. Skip until the
+      // provider is created (handleSave runs the probe on the new id).
+      if (!payload) {
+        // Heuristic-only fallback: replicate the backend rule so the
+        // toggle still reacts to model typing even before first save.
+        setSupportsThinking(heuristicSupportsThinking(type, model));
+        return;
+      }
+      probe.mutate(payload, {
+        onSuccess: (res) => {
+          setSupportsThinking(res.supports_thinking);
+        },
+      });
+    }, 400);
+    return () => {
+      if (probeTimer.current) clearTimeout(probeTimer.current);
+    };
+  }, [model, type, data?.id, firstModel?.id]);
 
   async function handleSave() {
     const payload = {
@@ -69,10 +162,37 @@ function LlmForm({ data, onDone }: { data: LlmProvider | null; onDone: () => voi
       api_key_ref: apiKey || undefined,
       base_url: baseUrl || undefined,
     };
+    let providerId = data?.id;
     if (isEdit) {
       await update.mutateAsync({ id: data!.id, ...payload });
     } else {
-      await create.mutateAsync(payload);
+      const created = (await create.mutateAsync(payload)) as unknown as {
+        data?: { id?: string };
+      };
+      providerId = created.data?.id ?? providerId;
+    }
+
+    // Persist (or update) the first model row so supports_thinking
+    // sticks. The legacy form only edited the provider; without this
+    // the model field had no destination and the toggle had nothing
+    // to bind to. Falls back to a fresh `createModel` if the provider
+    // had no model row yet (true for any provider edited before this
+    // feature shipped).
+    const wantedModelName = model.trim();
+    if (providerId && wantedModelName) {
+      if (firstModel?.id) {
+        await updateModel.mutateAsync({
+          id: firstModel.id,
+          model_name: wantedModelName,
+          supports_thinking: supportsThinking,
+        });
+      } else {
+        await createModel.mutateAsync({
+          provider_id: providerId,
+          model_name: wantedModelName,
+          supports_thinking: supportsThinking,
+        });
+      }
     }
     onDone();
   }
@@ -112,6 +232,50 @@ function LlmForm({ data, onDone }: { data: LlmProvider | null; onDone: () => voi
         <input value={model} onChange={(e) => setModel(e.target.value)} className={inputCls} style={inputStyle} placeholder="gpt-4 / claude-opus..." />
       </FormField>
 
+      <FormField label="思考模式">
+        <div className="flex items-center gap-3">
+          {/* The toggle here reflects the *model's capability* — it is
+              the destination of the /llm/probe-thinking call and what
+              gets persisted on llm_models.supports_thinking. The user
+              can override (e.g. enable for a forward-compat new model
+              the heuristic doesn't know yet), but the default state
+              tracks the probe so 99% of users don't have to think. */}
+          <button
+            type="button"
+            onClick={() => !probe.isPending && setSupportsThinking((v) => !v)}
+            disabled={probe.isPending}
+            title={
+              probe.isPending
+                ? "正在探测能力…"
+                : supportsThinking
+                  ? "该模型支持思考模式（点击可手动取消标记）"
+                  : "该模型不支持思考模式（点击可手动覆盖）"
+            }
+            className="relative inline-flex h-5 w-9 items-center rounded-full"
+            style={{
+              backgroundColor: supportsThinking ? "#10b981" : "#cbd5e1",
+              opacity: probe.isPending ? 0.55 : 1,
+              cursor: probe.isPending ? "wait" : "pointer",
+            }}
+          >
+            <span
+              className="absolute h-4 w-4 rounded-full bg-white shadow-sm transition-transform"
+              style={{ transform: supportsThinking ? "translateX(18px)" : "translateX(2px)" }}
+            />
+          </button>
+          <span
+            className="text-[11px]"
+            style={{ color: "var(--color-ink-faint)" }}
+          >
+            {probe.isPending
+              ? "探测中…"
+              : supportsThinking
+                ? "支持 — Agent 可启用思考模式"
+                : "不支持 — Agent 思考开关将锁定"}
+          </span>
+        </div>
+      </FormField>
+
       <div className="mb-4 ml-12">
         <button
           onClick={() => setMoreOpen((v) => !v)}
@@ -122,7 +286,7 @@ function LlmForm({ data, onDone }: { data: LlmProvider | null; onDone: () => voi
         </button>
         {moreOpen && (
           <div className="mt-2 rounded-lg bg-white p-3 text-xs" style={{ color: "var(--color-ink-faint)" }}>
-            额外的模型管理（多模型 / 思考模式 / 最大 token）将在后续版本支持。
+            额外的模型管理（多模型 / 最大 token）将在后续版本支持。
           </div>
         )}
       </div>

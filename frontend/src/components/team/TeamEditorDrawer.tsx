@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   useCreateAgent, useUpdateAgent,
   useCreateCrew, useUpdateCrew,
@@ -7,7 +7,7 @@ import {
   useAgents,
   type Agent, type Crew, type Tool,
 } from "../../queries/useTeamQuery";
-import { useLlmProviders } from "../../queries/useLlmQuery";
+import { useLlmProviders, useProbeThinking } from "../../queries/useLlmQuery";
 import SideDrawer, { DrawerFooter, FormField, inputCls, inputStyle } from "../common/SideDrawer";
 import AutoTextarea from "../common/AutoTextarea";
 
@@ -183,11 +183,58 @@ function AgentForm({ data, onDone }: { data: Partial<Agent> | null; onDone: () =
   const providerList = (providers as unknown as Array<{
     id: string;
     name: string;
-    models?: Array<{ model_name: string; label?: string | null }>;
+    models?: Array<{
+      id?: string;
+      model_name: string;
+      label?: string | null;
+      supports_thinking?: boolean;
+    }>;
   }>) ?? [];
   const currentProvider = providerList.find((p) => p.id === providerId);
   const modelOptions = currentProvider?.models ?? [];
   const toolList = allTools ?? [];
+
+  // Gate the 思考 toggle on the currently-bound LLM's capability.
+  //   - Read the cached value off the picked model row first (fast,
+  //     no network).
+  //   - When the user changes provider/model, fire a fresh probe so a
+  //     just-renamed-but-not-yet-saved model is honored without a
+  //     full providers refetch.
+  //   - When the resolved capability flips to false, force the
+  //     thinking_mode toggle back to off — the backend already
+  //     defends against a stale on-toggle hitting a non-reasoning
+  //     model, but locking it client-side matches user expectations
+  //     ("我换了模型，思考开关自己关掉了").
+  const probe = useProbeThinking();
+  const pickedModel = modelOptions.find((m) => m.model_name === modelName);
+  const [llmSupportsThinking, setLlmSupportsThinking] = useState<boolean>(
+    pickedModel?.supports_thinking ?? false,
+  );
+
+  // Keep llmSupportsThinking aligned with the picked row whenever the
+  // selection or upstream data changes, then re-probe to catch values
+  // the backend learned since the providers list was fetched.
+  const lastProbedRef = useRef<string>("");
+  useEffect(() => {
+    setLlmSupportsThinking(pickedModel?.supports_thinking ?? false);
+    if (!providerId || !modelName) return;
+    const key = `${providerId}:${modelName}`;
+    if (lastProbedRef.current === key) return;
+    lastProbedRef.current = key;
+    const payload = pickedModel?.id
+      ? { model_id: pickedModel.id }
+      : { provider_id: providerId, model_name: modelName };
+    probe.mutate(payload, {
+      onSuccess: (res) => setLlmSupportsThinking(res.supports_thinking),
+    });
+  }, [providerId, modelName, pickedModel?.id, pickedModel?.supports_thinking]);
+
+  // Auto-lock toggle when the bound model loses support.
+  useEffect(() => {
+    if (!llmSupportsThinking && thinkingMode) {
+      setThinkingMode(false);
+    }
+  }, [llmSupportsThinking, thinkingMode]);
 
   const saving = create.isPending || update.isPending;
 
@@ -268,7 +315,19 @@ function AgentForm({ data, onDone }: { data: Partial<Agent> | null; onDone: () =
               className="rounded-lg bg-white px-2 py-1 text-xs"
             />
           )}
-          <ToggleRow label="思考" on={thinkingMode} onChange={setThinkingMode} />
+          <ToggleRow
+            label="思考"
+            on={thinkingMode && llmSupportsThinking}
+            onChange={setThinkingMode}
+            disabled={!llmSupportsThinking || probe.isPending}
+            disabledHint={
+              probe.isPending
+                ? "正在探测已绑定模型的能力…"
+                : !providerId || !modelName
+                  ? "先在下方绑定 LLM"
+                  : "已绑定模型不支持思考模式"
+            }
+          />
         </div>
       </div>
 
@@ -419,22 +478,41 @@ function ToggleRow({
   label,
   on,
   onChange,
+  disabled = false,
+  disabledHint,
 }: {
   label: string;
   on: boolean;
   onChange: (v: boolean) => void;
+  disabled?: boolean;
+  disabledHint?: string;
 }) {
   return (
     <div className="flex items-center gap-2">
-      <span className="text-sm" style={{ color: "var(--color-ink-label)" }}>· {label}</span>
+      <span
+        className="text-sm"
+        style={{
+          color: disabled
+            ? "var(--color-ink-disabled, #9ca3af)"
+            : "var(--color-ink-label)",
+        }}
+      >
+        · {label}
+      </span>
       <button
-        onClick={() => onChange(!on)}
+        onClick={() => !disabled && onChange(!on)}
+        disabled={disabled}
+        title={disabled ? disabledHint : undefined}
         className="relative inline-flex h-5 w-9 items-center rounded-full"
-        style={{ backgroundColor: on ? "#10b981" : "#cbd5e1" }}
+        style={{
+          backgroundColor: on && !disabled ? "#10b981" : "#cbd5e1",
+          opacity: disabled ? 0.5 : 1,
+          cursor: disabled ? "not-allowed" : "pointer",
+        }}
       >
         <span
           className="absolute h-4 w-4 rounded-full bg-white shadow-sm transition-transform"
-          style={{ transform: on ? "translateX(18px)" : "translateX(2px)" }}
+          style={{ transform: on && !disabled ? "translateX(18px)" : "translateX(2px)" }}
         />
       </button>
     </div>

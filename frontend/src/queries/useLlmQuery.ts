@@ -102,6 +102,50 @@ export function useDeleteLlmModel() {
   });
 }
 
+// ── Thinking-mode capability probe ────────────────────────────────
+//
+// Used by both editors:
+//   - LLM settings → "选模型 / 保存模型" hits this with model_id (when
+//     editing an existing row) OR provider_id+model_name (when typing
+//     a new one). The result drives whether the 思考模式 toggle in the
+//     drawer is interactive.
+//   - Team / Agent settings → when the user changes the bound LLM, the
+//     drawer probes the newly-picked (provider_id, model_name) so the
+//     toggle locks instantly without waiting for the next list refetch.
+//
+// The backend caches the result on `llm_models.supports_thinking`, so
+// subsequent reads from `useLlmProviders` already reflect it.
+
+export interface ThinkingProbeResult {
+  supports_thinking: boolean;
+  provider_type: string;
+  model_name: string;
+  cached: boolean;
+}
+
+export function useProbeThinking() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (
+      payload: { model_id: string } | { provider_id: string; model_name: string },
+    ) => {
+      const res = await apiFetch<ThinkingProbeResult>("/llm/probe-thinking", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      return res.data!;
+    },
+    onSuccess: (data) => {
+      // If the probe wrote back to the DB (model row exists), refresh
+      // the providers list so any other surface that reads
+      // supports_thinking sees the new value.
+      if (data.cached) {
+        qc.invalidateQueries({ queryKey: ["llm", "providers"] });
+      }
+    },
+  });
+}
+
 // ── Quota / Token monitoring (plan §11.2) ─────────────────────────
 
 export type QuotaDisplay = "percent" | "tokens_m" | "available" | "unavailable";
