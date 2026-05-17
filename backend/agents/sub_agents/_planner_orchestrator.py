@@ -1087,14 +1087,20 @@ async def _validate_assignments(
     agent_ids = {a["id"] for a in pool.get("agents", [])}
     crew_ids = {c["id"] for c in pool.get("crews", [])}
 
-    # Find the QA Engineer agent id from the live pool — used to
-    # force-override final_qa assignments. Match by role string (same
-    # key seed_crews._ensure_agent uses).
-    qa_agent_id: str | None = None
-    for a in pool.get("agents", []):
-        if (a.get("role") or "").strip().lower() == "qa engineer":
-            qa_agent_id = a["id"]
-            break
+    # Find the QA Engineer agent id by querying the agents table
+    # directly — _build_payload filters to _STANDALONE_AGENT_ROLES
+    # (Narrative/Level/System Designer + Art Director) so the Phase 5
+    # LLM doesn't see Crew-internal agents in its selection menu, but
+    # the final_qa hard-override needs QA Engineer regardless. Direct
+    # lookup keeps the LLM's pool clean and the override deterministic.
+    qa_rows = await crud.get_all(
+        "agents", "role = ?", ("QA Engineer",),
+    )
+    qa_agent_id: str | None = qa_rows[0]["id"] if qa_rows else None
+    # Whitelist the QA Engineer's id for the existence check below so
+    # the override doesn't fail validation against the filtered pool.
+    if qa_agent_id:
+        agent_ids = agent_ids | {qa_agent_id}
 
     bad: list[str] = []
     seen_indices: set[int] = set()
