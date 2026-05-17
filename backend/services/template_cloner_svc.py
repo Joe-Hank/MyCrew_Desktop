@@ -28,6 +28,7 @@ bug, not a recovery path.
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import shutil
 import subprocess
@@ -43,10 +44,27 @@ log = structlog.get_logger()
 # ── Configuration ─────────────────────────────────────────────────
 
 
-# Default template repo URL. Override via projects table or env if a
-# fork/mirror is ever needed; not exposed in the UI for now.
-TEMPLATE_REPO_URL = "https://github.com/Joe-Hank/Templates.git"
-TEMPLATE_REPO_BRANCH = "main"
+# Default template repo URL. 2026-05-17: switched from GitHub to Gitee
+# because GitHub clone routinely fails for CN users behind flaky
+# Clash/V2Ray proxies (RPC failed / Connection reset midway through
+# blob fetch). Gitee mirrors the same content but lives inside the GFW
+# so it's reachable directly without proxy.
+#
+# Override via env var if the user has a private mirror:
+#   $env:MYCREW_TEMPLATE_REPO_URL = "https://gitee.com/<acct>/Templates.git"
+#
+# Mirror setup (do this once on Gitee):
+#   1. Create empty public repo Joe-Hank/Templates on gitee.com
+#   2. Either:
+#        a) Gitee's "导入仓库" UI → paste GitHub URL → "立即克隆"
+#        b) Or push local staged dir: see backend/scripts/mirror_to_gitee.sh
+TEMPLATE_REPO_URL = os.getenv(
+    "MYCREW_TEMPLATE_REPO_URL",
+    "https://gitee.com/Joe-Hank/Templates.git",
+)
+# Branch name is preserved on Gitee "导入仓库" from GitHub — we used
+# 'main' on the GitHub source, so the Gitee mirror also gets 'main'.
+TEMPLATE_REPO_BRANCH = os.getenv("MYCREW_TEMPLATE_REPO_BRANCH", "main")
 
 # Maps the seed template id (used by inception drawer + Plan Maker) to
 # the corresponding subdir in the Templates repo. Slugs are derived
@@ -153,24 +171,87 @@ async def clone_template(
                     f"从 {TEMPLATE_REPO_URL} 拉取 {sub_dir} 模板…")
     staging = parent_path / f".mycrew_clone_{project_slug}_{_short_id()}"
     try:
-        await _run_git([
-            "clone",
-            "--depth", "1",
-            "--filter=blob:none",
-            "--no-checkout",
-            "--branch", TEMPLATE_REPO_BRANCH,
-            TEMPLATE_REPO_URL,
-            str(staging),
-        ])
-        await _run_git(
-            ["sparse-checkout", "init", "--cone"],
-            cwd=staging,
-        )
-        await _run_git(
-            ["sparse-checkout", "set", sub_dir],
-            cwd=staging,
-        )
-        await _run_git(["checkout", TEMPLATE_REPO_BRANCH], cwd=staging)
+        # 2026-05-17: clone in two flavors with auto-retry. Phase 1 tries
+        # the lightweight --filter=blob:none + sparse-checkout combo (200
+        # MB instead of 600 MB total). If the checkout step ever trips on
+        # an "RPC failed" / "Connection reset" (very common with flaky
+        # CN proxies because checkout-time blob fetch is a second, long-
+        # lived HTTP body), phase 2 falls back to a plain --depth 1
+        # clone without filter — slower but a single continuous fetch
+        # that survives intermittent resets better.
+        sparse_failed = False
+        last_err: ScaffoldError | None = None
+        for attempt in range(1, 4):
+            try:
+                await _run_git([
+                    "clone",
+                    "--depth", "1",
+                    "--filter=blob:none",
+                    "--no-checkout",
+                    "--branch", TEMPLATE_REPO_BRANCH,
+                    TEMPLATE_REPO_URL,
+                    str(staging),
+                ])
+                await _run_git(
+                    ["sparse-checkout", "init", "--cone"],
+                    cwd=staging,
+                )
+                await _run_git(
+                    ["sparse-checkout", "set", sub_dir],
+                    cwd=staging,
+                )
+                await _run_git(["checkout", TEMPLATE_REPO_BRANCH], cwd=staging)
+                last_err = None
+                break
+            except ScaffoldError as exc:
+                last_err = exc
+                _safe_rmtree(staging)
+                msg = str(exc).lower()
+                if any(k in msg for k in (
+                    "connection reset", "rpc failed", "early eof",
+                    "fetch-pack", "could not fetch",
+                )):
+                    sparse_failed = True
+                    if attempt < 3:
+                        await _progress(
+                            on_progress, "retry",
+                            f"网络中断（attempt {attempt}/3），{2**attempt}s 后重试…",
+                        )
+                        await asyncio.sleep(2 ** attempt)
+                        continue
+                    # Final retry of sparse path also dead — break out
+                    # to fallback below.
+                    break
+                # Non-network error → fail fast, no retry
+                raise
+
+        if last_err and sparse_failed:
+            # Fallback: full --depth 1 clone (no blob filter). One
+            # continuous fetch, much harder to half-disconnect midway.
+            # We still sparse-checkout afterwards to avoid working-tree
+            # bloat from sibling templates.
+            await _progress(
+                on_progress, "fallback",
+                f"sparse-checkout 多次失败，改用全量浅克隆（更稳但更慢）…",
+            )
+            _safe_rmtree(staging)
+            await _run_git([
+                "clone",
+                "--depth", "1",
+                "--no-checkout",
+                "--branch", TEMPLATE_REPO_BRANCH,
+                TEMPLATE_REPO_URL,
+                str(staging),
+            ])
+            await _run_git(
+                ["sparse-checkout", "init", "--cone"],
+                cwd=staging,
+            )
+            await _run_git(
+                ["sparse-checkout", "set", sub_dir],
+                cwd=staging,
+            )
+            await _run_git(["checkout", TEMPLATE_REPO_BRANCH], cwd=staging)
 
         sub_path = staging / sub_dir
         if not sub_path.exists():
@@ -214,9 +295,34 @@ async def clone_template(
 # ── Internal helpers ──────────────────────────────────────────────
 
 
+# Per-call git http tweaks that make the clone tolerant of flaky
+# proxies (Clash / V2Ray etc commonly used in CN). These get injected
+# only for network-talking commands (clone / fetch / checkout). Tuning:
+#   - http.postBuffer = 500 MB: don't switch to chunked encoding for big
+#     bodies, fewer round-trips
+#   - http.lowSpeedLimit / lowSpeedTime: tolerate up to 10 minutes of
+#     trickle before aborting, instead of git's default ~20s @ 1B/s
+_GIT_HTTP_TWEAKS = [
+    "-c", "http.postBuffer=524288000",
+    "-c", "http.lowSpeedLimit=0",
+    "-c", "http.lowSpeedTime=600",
+]
+_NET_VERBS = {"clone", "fetch", "checkout", "pull", "remote"}
+
+
 async def _run_git(args: list[str], *, cwd: Path | None = None) -> str:
-    """Run a git subprocess; raise ScaffoldError on non-zero exit."""
-    cmd = ["git", *args]
+    """Run a git subprocess; raise ScaffoldError on non-zero exit.
+
+    Network-touching verbs (clone / fetch / checkout / pull) get the
+    proxy-tolerant http.* tweaks injected automatically. Local-only
+    verbs (sparse-checkout init / set) don't need them so we skip to
+    keep the command line readable in logs.
+    """
+    verb = args[0] if args else ""
+    if verb in _NET_VERBS:
+        cmd = ["git", *_GIT_HTTP_TWEAKS, *args]
+    else:
+        cmd = ["git", *args]
     log.debug("git.exec", cmd=" ".join(cmd), cwd=str(cwd) if cwd else None)
     proc = await asyncio.create_subprocess_exec(
         *cmd,
