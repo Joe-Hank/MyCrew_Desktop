@@ -369,6 +369,27 @@ async def get_task_crew_progress(task_id: str):
     steps = []
     for idx in sorted(by_index.keys()):
         slot = by_index[idx]
+        role = slot["role"]
+        # Synthetic contract step is fail-aware: read the json's
+        # `passed` flag because the contract check has no _in.json
+        # half-state — it's binary pass/fail.
+        if role == "contract" and slot["has_out"]:
+            out_path = sub_dir / f"{idx}_contract_out.json"
+            try:
+                payload = json.loads(out_path.read_text(encoding="utf-8"))
+                passed = bool(payload.get("passed"))
+                errors = payload.get("errors") or []
+            except (OSError, json.JSONDecodeError, TypeError):
+                passed = True
+                errors = []
+            steps.append({
+                "step_index": idx,
+                "role": "contract",
+                "status": "completed" if passed else "failed",
+                "errors": errors,
+            })
+            continue
+
         if slot["has_out"]:
             status = "completed"
         elif slot["has_in"]:
@@ -382,7 +403,7 @@ async def get_task_crew_progress(task_id: str):
             status = "pending"
         steps.append({
             "step_index": idx,
-            "role": slot["role"],
+            "role": role,
             "status": status,
         })
 

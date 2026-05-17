@@ -864,6 +864,15 @@ class WorkflowService:
             )
             if contract_errors:
                 errors = list(errors or []) + contract_errors
+            # 2026-05-17: render the contract verdict as a synthetic
+            # post-QA sub-step so the canvas Crew card has a status
+            # indicator for it (without this, the "all sub-cards green
+            # but parent red" mismatch confuses users — QA approved,
+            # contract caught what QA missed). Only fires when the task
+            # actually has a code_contract bound.
+            await self._save_contract_check_artifact(
+                project_id, task_id, contract_errors,
+            )
 
             output = runner.process_output(task_id, raw_text, extracted, errors)
 
@@ -1535,6 +1544,70 @@ class WorkflowService:
             log.error("contract_verify.unhandled",
                       task_id=task_id, error=str(exc))
             return []
+
+    async def _save_contract_check_artifact(
+        self, project_id: str, task_id: str, contract_errors: list[str],
+    ) -> None:
+        """Write a synthetic Crew sub-step artifact for the V5 code-
+        contract verification. The frontend reads this through the
+        existing crew_progress endpoint and renders a small status card
+        appended after QA. No-op for tasks without a code_contract.
+
+        File naming follows the existing sub-step convention
+        (`<step_index>_<role>_out.json`) so the crew_progress glob picks
+        it up automatically; the role is the literal "contract" — a
+        reserved sentinel the frontend special-cases.
+
+        step_index is one past the QA step. We resolve it from the
+        Crew's agent_sequence length (the QA step is the last entry).
+        """
+        try:
+            task_row = await crud.get_by_id("tasks", task_id)
+            if not task_row or not task_row.get("code_contract"):
+                return
+            performer_id = task_row.get("performer_id")
+            if task_row.get("performer_kind") != "crew" or not performer_id:
+                return
+            crew_row = await crud.get_by_id("crews", performer_id)
+            if not crew_row:
+                return
+            seq_raw = crew_row.get("agent_sequence") or "[]"
+            try:
+                sequence = json.loads(seq_raw) if isinstance(seq_raw, str) else seq_raw
+            except (json.JSONDecodeError, TypeError):
+                return
+            if not isinstance(sequence, list) or not sequence:
+                return
+            step_index = len(sequence)  # one past QA
+
+            from bootstrap.paths import OUTPUT_DIR
+            sub_dir = OUTPUT_DIR / project_id / task_id / "sub"
+            sub_dir.mkdir(parents=True, exist_ok=True)
+
+            passed = not contract_errors
+            payload = {
+                "step_index": step_index,
+                "step_role": "contract",
+                "passed": passed,
+                "errors": contract_errors,
+            }
+            (sub_dir / f"{step_index}_contract_out.json").write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+            # Live update so an already-open canvas lights the new card
+            # the instant the verification finishes (mirrors the head /
+            # executor / qa broadcasts the Crew runner emits per step).
+            await self._broadcast_sub_step(
+                project_id, task_id, step_index, "contract",
+                None, "contract_check",
+                "completed" if passed else "failed",
+                error="; ".join(contract_errors)[:200] if contract_errors else "",
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("contract_artifact_save_failed",
+                        task_id=task_id, error=str(exc))
 
     async def _save_task_input(self, project_id: str, task_id: str,
                                 task_input: TaskInput) -> None:

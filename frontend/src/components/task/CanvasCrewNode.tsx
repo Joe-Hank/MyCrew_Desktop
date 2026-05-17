@@ -6,6 +6,7 @@ import { useEvent } from "../../hooks/useEvent";
 import { apiFetch } from "../../net/api";
 import TaskNode, { STATUS_DOT, type TaskAction } from "./TaskNode";
 import SubAgentCard, { type SubStepStatus, type SubStepAction } from "./SubAgentCard";
+import ContractCheckCard from "./ContractCheckCard";
 
 export interface CanvasCrewNodeData extends Record<string, unknown> {
   task: Task;
@@ -60,6 +61,13 @@ function CanvasCrewNode({ data, selected }: NodeProps) {
   // Live status per step, updated via the task.sub_step WS event below.
   const [subStepStatus, setSubStepStatus] = useState<Record<number, SubStepStatus>>({});
   const [subStepErrors, setSubStepErrors] = useState<Record<number, string>>({});
+  // Contract-check step (V5 Stage B) is a synthetic sub-step appended
+  // after QA. Its presence + errors come from the crew_progress endpoint
+  // (which reads <task_dir>/sub/<N>_contract_out.json). null = no
+  // contract bound for this task; never renders the contract card.
+  const [contractStep, setContractStep] = useState<
+    { stepIndex: number; status: SubStepStatus; errors: string[] } | null
+  >(null);
 
   const { data: crews } = useCrews();
   const crew = useMemo(
@@ -96,7 +104,10 @@ function CanvasCrewNode({ data, selected }: NodeProps) {
     async function loadProgress() {
       try {
         const res = await apiFetch<{
-          steps: { step_index: number; role: string; status: SubStepStatus }[];
+          steps: {
+            step_index: number; role: string; status: SubStepStatus;
+            errors?: string[];
+          }[];
         }>(`/tasks/${task.id}/crew_progress`);
         if (cancelled) return;
         const data = res?.data;
@@ -109,6 +120,17 @@ function CanvasCrewNode({ data, selected }: NodeProps) {
           }
           return next;
         });
+        // Pull the contract step out of the same response — it's just
+        // another sub-step on disk, but the frontend renders it with a
+        // dedicated card next to the agent triplet.
+        const contract = data.steps.find((s) => s.role === "contract");
+        if (contract) {
+          setContractStep({
+            stepIndex: contract.step_index,
+            status: contract.status,
+            errors: contract.errors ?? [],
+          });
+        }
       } catch {
         // Non-fatal — sub-cards just stay at their default pending state
         // until the next WS event lands.
@@ -126,6 +148,7 @@ function CanvasCrewNode({ data, selected }: NodeProps) {
     const payload = msg.payload as {
       task_id: string;
       step_index: number;
+      role?: string;
       status: SubStepStatus;
       error?: string;
     };
@@ -137,25 +160,41 @@ function CanvasCrewNode({ data, selected }: NodeProps) {
     if (payload.status === "failed" && payload.error) {
       setSubStepErrors((prev) => ({ ...prev, [payload.step_index]: payload.error! }));
     }
+    // Contract check broadcasts the same event shape but with
+    // role="contract" — promote it into the dedicated contract state
+    // so the card appears the moment verification finishes, without
+    // waiting for the next crew_progress refetch.
+    if (payload.role === "contract") {
+      const liveErrors = payload.error
+        ? payload.error.split("; ").filter(Boolean)
+        : [];
+      setContractStep({
+        stepIndex: payload.step_index,
+        status: payload.status,
+        errors: liveErrors,
+      });
+    }
   });
 
   // Width broadcast — fire whenever expanded toggles. CanvasBlueprint
   // uses this to shift downstream nodes (Q-design "B 自动平移下游").
+  // The contract card counts as a regular-width sub-card when present.
   const handleToggle = useCallback(() => {
     const next = !expanded;
     setExpanded(next);
     if (d.onWidthChange) {
       if (next) {
+        const visibleCount = sequence.length + (contractStep ? 1 : 0);
         const expandedWidth =
           EXPANDED_PADDING_X * 2
-          + sequence.length * SUB_CARD_WIDTH
-          + Math.max(0, sequence.length - 1) * SUB_CARD_GAP;
+          + visibleCount * SUB_CARD_WIDTH
+          + Math.max(0, visibleCount - 1) * SUB_CARD_GAP;
         d.onWidthChange(task.id, Math.max(0, expandedWidth - COLLAPSED_WIDTH));
       } else {
         d.onWidthChange(task.id, 0);
       }
     }
-  }, [expanded, d, sequence.length, task.id]);
+  }, [expanded, d, sequence.length, contractStep, task.id]);
 
   // Halo class derived from the parent task's status — promoted to the
   // outermost wrapper (rather than the inner TaskNode) so the box-shadow
@@ -317,7 +356,10 @@ function CanvasCrewNode({ data, selected }: NodeProps) {
           </button>
         </div>
 
-        {/* Sub-cards in a row */}
+        {/* Sub-cards in a row. The contract check (V5 Stage B) is
+            rendered as a synthetic post-QA card when present — it isn't
+            an agent step, but visually slots into the same flow so the
+            user sees the "agent triplet → final gate" pipeline. */}
         <div className="flex" style={{ gap: SUB_CARD_GAP }}>
           {sequence.map((step, i) => (
             <SubAgentCard
@@ -326,13 +368,30 @@ function CanvasCrewNode({ data, selected }: NodeProps) {
               stepIndex={i}
               stepRole={step.role}
               agentId={step.agent_id}
-              totalSteps={sequence.length}
+              totalSteps={sequence.length + (contractStep ? 1 : 0)}
               status={subStepStatus[i] ?? (task.status === "done" ? "completed" : "pending")}
               errorText={subStepErrors[i]}
               progressTemplate={step.progress_template}
               onAction={onSubStepAction}
             />
           ))}
+          {contractStep && (
+            <ContractCheckCard
+              key={`${task.id}-contract`}
+              task={task}
+              stepIndex={contractStep.stepIndex}
+              totalSteps={sequence.length + 1}
+              status={contractStep.status}
+              errors={contractStep.errors}
+              onViewDetail={() =>
+                onSubStepAction({
+                  kind: "sub_view_failure_reason",
+                  task,
+                  stepIndex: contractStep.stepIndex,
+                })
+              }
+            />
+          )}
         </div>
       </div>
       <Handle
