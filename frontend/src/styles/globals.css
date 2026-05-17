@@ -207,3 +207,16 @@ body {
 .task-halo-stalled {
   box-shadow: 0 0 12px 2px rgba(239, 68, 68, 0.45) !important;
 }
+
+/* CanvasCrewNode expand / collapse toggle — quiet at rest, lifts to
+ * brand color on hover. Replaces the prior bright ⊕ / ⊖ buttons that
+ * fought TaskNode's bottom icon row for attention. */
+.canvas-crew-toggle:hover {
+  background-color: var(--color-brand-500) !important;
+  border-color: var(--color-brand-500) !important;
+  color: #ffffff !important;
+}
+.canvas-crew-toggle:focus-visible {
+  outline: 2px solid var(--color-brand-500);
+  outline-offset: 2px;
+}

@@ -153,14 +153,25 @@ function CanvasCrewNode({ data, selected }: NodeProps) {
               e.stopPropagation();
               handleToggle();
             }}
-            title={`展开 Crew (${sequence.length} 步)`}
-            // Moved from bottom-right → top-right 2026-05-17: TaskNode's
-            // action row (edit / pause / retry / chat / IO) lives at the
-            // bottom; the expand button was sitting on top of the IO icon.
-            className="absolute right-2 top-2 z-10 flex h-6 w-6 items-center justify-center rounded-full text-[11px] font-bold text-white shadow-md transition-colors"
-            style={{ backgroundColor: "var(--color-brand-500)" }}
+            title={`展开 Crew (${sequence.length} 步子任务)`}
+            // 2026-05-17 redesign: replaces the heavy bright-blue ⊕
+            // button. New pill is a quiet ghost-button matching the
+            // visual weight of TaskNode's bottom icon row — a count
+            // label + chevron-down. Hover lifts it to brand color so
+            // it's discoverable without dominating the card at rest.
+            className="canvas-crew-toggle absolute right-2 top-2 z-10 flex items-center gap-1 rounded-md px-1.5 py-1 text-[10px] font-medium transition-colors"
+            style={{
+              backgroundColor: "var(--color-card)",
+              color: "var(--color-ink-muted)",
+              border: "1px solid var(--color-border-soft)",
+            }}
           >
-            ⊕
+            <span>{sequence.length} 步</span>
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" strokeWidth="2.5"
+                 strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="6 9 12 15 18 9" />
+            </svg>
           </button>
         </div>
         <Handle
@@ -252,15 +263,20 @@ function CanvasCrewNode({ data, selected }: NodeProps) {
               e.stopPropagation();
               handleToggle();
             }}
-            title="收起"
-            className="flex h-6 w-6 items-center justify-center rounded-full text-[11px] font-bold"
+            title="收起 Crew"
+            className="canvas-crew-toggle flex items-center gap-1 rounded-md px-1.5 py-1 text-[10px] font-medium transition-colors"
             style={{
               backgroundColor: "var(--color-card)",
               color: "var(--color-ink-muted)",
               border: "1px solid var(--color-border-soft)",
             }}
           >
-            ⊖
+            <span>收起</span>
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" strokeWidth="2.5"
+                 strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="18 15 12 9 6 15" />
+            </svg>
           </button>
         </div>
 
