@@ -161,7 +161,7 @@ function CanvasCrewNode({ data, selected }: NodeProps) {
             // 2026-05-17 v2: 极简版 — 单个右向实心三角形。展开 = 向右，
             // 收起 = 向左（见下方展开态）。没有文字、没有边框、纯灰色
             // SVG，hover 才变蓝。
-            className="canvas-crew-toggle absolute right-1.5 top-1.5 z-10 flex h-4 w-4 items-center justify-center rounded transition-colors"
+            className="canvas-crew-toggle absolute right-1.5 top-3.5 z-10 flex h-4 w-4 items-center justify-center rounded transition-colors"
             style={{ color: "var(--color-ink-faint)" }}
           >
             <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
