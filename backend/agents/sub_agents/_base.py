@@ -138,6 +138,21 @@ async def run_crewai_agent(
         step_callback=_step_cb,
     )
     result = await asyncio.to_thread(crew.kickoff)
+
+    # Token accounting — sub-agents always run during the PM phase, so
+    # we tag with session_id (no project exists yet). Best-effort.
+    try:
+        from services.crewai_runner import _record_crew_usage
+        await _record_crew_usage(
+            crew_obj=crew,
+            project_id=None,
+            session_id=session_id,
+            provider_id=provider.get("id", ""),
+            model_name=model_name,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
     return str(getattr(result, "raw", result) or "").strip()
 
 

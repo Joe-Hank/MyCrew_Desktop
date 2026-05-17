@@ -579,6 +579,22 @@ async def run_task_with_crewai(
     output_text = str(result.raw if hasattr(result, "raw") else result)
     log.info("crewai_runner.finished", task_id=task_input.task_id,
              output_len=len(output_text))
+
+    # ── Token accounting (CrewAI bypasses our gateway, so we read its
+    # own UsageMetrics after kickoff). Best-effort: anything that goes
+    # wrong here must not break the task output.
+    try:
+        await _record_crew_usage(
+            crew_obj=crew,
+            project_id=project_id,
+            session_id=None,
+            provider_id=provider_id,
+            model_name=model_name,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("crewai_runner.metrics_failed",
+                    task_id=task_input.task_id, error=str(exc))
+
     return output_text
 
 
@@ -790,6 +806,21 @@ async def run_crew_step_with_crewai(
 
     output_text = str(result.raw if hasattr(result, "raw") else result)
 
+    # Token accounting for this step. Same caveats as run_task_with_crewai
+    # above — best-effort, never breaks the caller.
+    try:
+        await _record_crew_usage(
+            crew_obj=crew,
+            project_id=project_id,
+            session_id=None,
+            provider_id=provider_id,
+            model_name=model_name,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("crew_step.metrics_failed",
+                    parent_task=parent_task_id, step=step_index,
+                    error=str(exc))
+
     # Pull whatever the step emitted via emit_output (may be None if the
     # agent forgot to call it — orchestrator decides how to handle).
     #
@@ -812,3 +843,45 @@ async def run_crew_step_with_crewai(
              parent_task=parent_task_id, step_index=step_index,
              captured=captured is not None, output_len=len(output_text))
     return output_text, (captured if isinstance(captured, dict) else None)
+
+
+# ── Token accounting helper ───────────────────────────────────────
+#
+# CrewAI 1.14 doesn't route through our LlmGateway — kickoff() drives
+# litellm directly — so usage doesn't flow through gateway.chat()'s
+# metrics hook. We instead read `crew.usage_metrics` (a UsageMetrics
+# pydantic model) AFTER kickoff returns. The attribute name varies by
+# version; we look at both `usage_metrics` and `token_usage`. When
+# neither is present (older / newer than tested) we silently bail —
+# this is a "nice to have"-class hook, never a hard requirement.
+
+async def _record_crew_usage(
+    *,
+    crew_obj: Any,
+    project_id: str | None,
+    session_id: str | None,
+    provider_id: str,
+    model_name: str,
+) -> None:
+    """Pull (prompt, completion) tokens off a Crew after kickoff and hand
+    them to metrics_svc. No-op when neither project_id nor session_id is
+    set, or when CrewAI didn't surface usage."""
+    if not project_id and not session_id:
+        return
+    usage = getattr(crew_obj, "usage_metrics", None) \
+        or getattr(crew_obj, "token_usage", None)
+    if usage is None:
+        return
+    prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
+    completion = int(getattr(usage, "completion_tokens", 0) or 0)
+    if prompt <= 0 and completion <= 0:
+        return
+    try:
+        from services import metrics_svc
+        await metrics_svc.record_llm_usage(
+            project_id=project_id, session_id=session_id,
+            provider_id=provider_id, model_name=model_name,
+            prompt_tokens=prompt, completion_tokens=completion,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("crewai_runner.record_usage_failed", error=str(exc))

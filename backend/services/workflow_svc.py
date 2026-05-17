@@ -1393,6 +1393,7 @@ class WorkflowService:
         response = await llm_gateway.chat(
             provider_id, model_name, messages,
             thinking_mode=thinking_mode,
+            project_id=project_id,
         )
         log.info("workflow.agent_executed_via_llm",
                  project_id=project_id, task_id=task_id,
@@ -1508,6 +1509,7 @@ class WorkflowService:
                 provider_id, model_name, messages,
                 json_mode=True,
                 temperature=0.1,
+                project_id=project_id,
             )
             extracted = json.loads(response.text)
             if isinstance(extracted, dict):
@@ -1581,13 +1583,21 @@ class WorkflowService:
                                    harness: HarnessStateMachine) -> None:
         task = harness.get_task(task_id)
         updates: dict[str, Any] = {"status": task["status"]}
+        # Read the previous status off the DB row so we can detect
+        # transitions OUT of running (paused / aborted / done / failed)
+        # and accumulate runtime onto the project counter. The harness
+        # already mutated its in-memory status, so it can't tell us the
+        # previous value — the DB still holds it.
+        prev_row = await crud.get_by_id("tasks", task_id) or {}
+        prev_status = prev_row.get("status")
+        now_iso_str = None  # lazily computed below if needed
         if task["status"] == TaskState.RUNNING and not task.get("started_at"):
             from datetime import datetime, timezone
-            now_iso = datetime.now(timezone.utc).isoformat()
-            updates["started_at"] = now_iso
+            now_iso_str = datetime.now(timezone.utc).isoformat()
+            updates["started_at"] = now_iso_str
             # Seed last_activity_at so the watchdog has a baseline before
             # the first step callback fires.
-            updates["last_activity_at"] = now_iso
+            updates["last_activity_at"] = now_iso_str
         # All terminal states must stamp finished_at — previously
         # VALIDATION_FAILED was missing, so QA-failed projects looked
         # like they never wrapped up.
@@ -1596,8 +1606,30 @@ class WorkflowService:
             TaskState.VALIDATION_FAILED,
         ):
             from datetime import datetime, timezone
-            updates["finished_at"] = datetime.now(timezone.utc).isoformat()
+            if now_iso_str is None:
+                now_iso_str = datetime.now(timezone.utc).isoformat()
+            updates["finished_at"] = now_iso_str
         await crud.update_by_id("tasks", task_id, updates)
+
+        # ── Runtime accumulator (project total_runtime_seconds) ──
+        # We split the "stamp open" half (a single column write) from
+        # the "close + accumulate" half (which reads-then-updates) so
+        # the existing UPDATE above isn't interleaved with metric writes.
+        from services import metrics_svc
+        # Transition INTO running (from pending / paused / failed retry):
+        # open a new interval. The helper is idempotent over the column
+        # so re-entering running from a redundant transition is safe.
+        if task["status"] == TaskState.RUNNING and prev_status != TaskState.RUNNING:
+            await metrics_svc.task_run_started(task_id)
+        # Transition OUT of running (paused / done / failed / aborted /
+        # validation_failed / blocked): close the interval and add the
+        # elapsed seconds to the project. Pause counts as "stop the
+        # clock" per the user's spec: "暂停、卡顿、停止不算".
+        if (
+            prev_status == TaskState.RUNNING
+            and task["status"] != TaskState.RUNNING
+        ):
+            await metrics_svc.task_run_ended(task_id, project_id)
 
     async def _persist_all_task_states(self, project_id: str,
                                         harness: HarnessStateMachine) -> None:

@@ -35,6 +35,10 @@ class LlmModelCreate(BaseModel):
     label: str | None = None
     max_tokens: int | None = None
     supports_thinking: bool = False
+    # Pricing in integer 分人民币 per million tokens (migration 0017).
+    # null/0 means "do not charge for this model"; project cost stays 0.
+    input_price_cny_per_1m: int | None = None
+    output_price_cny_per_1m: int | None = None
 
 
 class LlmModelUpdate(BaseModel):
@@ -42,6 +46,8 @@ class LlmModelUpdate(BaseModel):
     label: str | None = None
     max_tokens: int | None = None
     supports_thinking: bool | None = None
+    input_price_cny_per_1m: int | None = None
+    output_price_cny_per_1m: int | None = None
 
 
 class LlmThinkingProbeRequest(BaseModel):

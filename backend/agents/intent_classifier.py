@@ -130,6 +130,8 @@ async def classify_intent(
         resp = await llm_gateway.chat(
             provider["id"], model_name, messages,
             max_tokens=DEFAULT_PARAMS["max_tokens"],
+            session_id=session.get("id"),
+            project_id=session.get("project_id"),
         )
     except Exception as exc:  # noqa: BLE001
         log.warning("intent_classifier.llm_call_failed", error=str(exc))

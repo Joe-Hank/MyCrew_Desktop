@@ -115,9 +115,31 @@ function LlmForm({ data, onDone }: { data: LlmProvider | null; onDone: () => voi
     firstModel?.supports_thinking ?? false,
   );
 
+  // Pricing — stored as integer 分 / 1M tokens server-side. Empty string
+  // input means "leave alone" (don't trample the seeded default); 0 means
+  // "explicitly disable billing".
+  const [inputPrice, setInputPrice] = useState<string>(
+    firstModel?.input_price_cny_per_1m == null
+      ? ""
+      : String(firstModel.input_price_cny_per_1m),
+  );
+  const [outputPrice, setOutputPrice] = useState<string>(
+    firstModel?.output_price_cny_per_1m == null
+      ? ""
+      : String(firstModel.output_price_cny_per_1m),
+  );
+
   const saving =
     create.isPending || update.isPending ||
     createModel.isPending || updateModel.isPending;
+
+  function parsePrice(s: string): number | undefined {
+    // Empty → don't send (server keeps existing value / seeded default).
+    if (s.trim() === "") return undefined;
+    const n = Number(s);
+    if (!Number.isFinite(n) || n < 0) return undefined;
+    return Math.floor(n);
+  }
 
   // Debounced probe: 400ms after the user stops typing in the model
   // field (or changes provider type), re-resolve supports_thinking.
@@ -162,9 +184,10 @@ function LlmForm({ data, onDone }: { data: LlmProvider | null; onDone: () => voi
       api_key_ref: apiKey || undefined,
       base_url: baseUrl || undefined,
     };
-    let providerId = data?.id;
+    let providerId: string | undefined = data?.id;
     if (isEdit) {
       await update.mutateAsync({ id: data!.id, ...payload });
+      providerId = data!.id;
     } else {
       const created = (await create.mutateAsync(payload)) as unknown as {
         data?: { id?: string };
@@ -172,28 +195,35 @@ function LlmForm({ data, onDone }: { data: LlmProvider | null; onDone: () => voi
       providerId = created.data?.id ?? providerId;
     }
 
-    // Persist (or update) the first model row so supports_thinking
-    // sticks. The legacy form only edited the provider; without this
-    // the model field had no destination and the toggle had nothing
-    // to bind to. Falls back to a fresh `createModel` if the provider
-    // had no model row yet (true for any provider edited before this
-    // feature shipped).
+    // Persist (or update) the first model row so supports_thinking +
+    // pricing both stick. The legacy form only edited the provider;
+    // without this the model field had no destination and the toggles
+    // had nothing to bind to. Falls back to `createModel` if the
+    // provider had no model row yet (true for any provider edited
+    // before this feature shipped).
     const wantedModelName = model.trim();
     if (providerId && wantedModelName) {
+      const inP = parsePrice(inputPrice);
+      const outP = parsePrice(outputPrice);
       if (firstModel?.id) {
         await updateModel.mutateAsync({
           id: firstModel.id,
           model_name: wantedModelName,
           supports_thinking: supportsThinking,
+          input_price_cny_per_1m: inP,
+          output_price_cny_per_1m: outP,
         });
       } else {
         await createModel.mutateAsync({
           provider_id: providerId,
           model_name: wantedModelName,
           supports_thinking: supportsThinking,
+          input_price_cny_per_1m: inP,
+          output_price_cny_per_1m: outP,
         });
       }
     }
+
     onDone();
   }
 
@@ -274,6 +304,30 @@ function LlmForm({ data, onDone }: { data: LlmProvider | null; onDone: () => voi
                 : "不支持 — Agent 思考开关将锁定"}
           </span>
         </div>
+      </FormField>
+      <FormField label="输入价">
+        <input
+          type="number"
+          min="0"
+          step="1"
+          value={inputPrice}
+          onChange={(e) => setInputPrice(e.target.value)}
+          className={inputCls}
+          style={inputStyle}
+          placeholder="如 1800 表示 ¥18 / 1M tokens；留空使用默认"
+        />
+      </FormField>
+      <FormField label="输出价">
+        <input
+          type="number"
+          min="0"
+          step="1"
+          value={outputPrice}
+          onChange={(e) => setOutputPrice(e.target.value)}
+          className={inputCls}
+          style={inputStyle}
+          placeholder="如 9000 表示 ¥90 / 1M tokens；0 = 不计费"
+        />
       </FormField>
 
       <div className="mb-4 ml-12">

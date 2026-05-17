@@ -459,6 +459,7 @@ async def _phase0_completeness(
     try:
         resp = await llm_gateway.chat(
             cheap_provider["id"], cheap_model, messages, max_tokens=10,
+            session_id=session_id,
         )
     except Exception as exc:  # noqa: BLE001
         log.warning("planner.completeness_llm_failed",

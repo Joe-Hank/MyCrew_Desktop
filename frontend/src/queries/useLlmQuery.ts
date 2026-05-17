@@ -10,6 +10,11 @@ export interface LlmModel {
   label: string | null;
   max_tokens: number | null;
   supports_thinking: boolean;
+  /** Cost per 1M input tokens, in 整数分人民币 (1800 = ¥18 / 1M).
+   *  null = not set; project metrics treat 0/null as "do not charge". */
+  input_price_cny_per_1m: number | null;
+  /** Cost per 1M output tokens, same unit as above. */
+  output_price_cny_per_1m: number | null;
 }
 
 export interface LlmProvider {
@@ -80,6 +85,8 @@ export function useCreateLlmModel() {
       label?: string;
       max_tokens?: number;
       supports_thinking?: boolean;
+      input_price_cny_per_1m?: number;
+      output_price_cny_per_1m?: number;
     }) => apiFetch("/llm/models", { method: "POST", body: JSON.stringify(data) }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["llm", "providers"] }),
   });

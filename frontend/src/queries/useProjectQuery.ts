@@ -36,6 +36,13 @@ export interface Project {
   task_count?: number;
   done_count?: number;
   tasks?: Task[];
+  /** Cumulative token / cost / runtime counters (migration 0017).
+   *  Populated by services/metrics_svc. Used by the ProjectCard header
+   *  badges; 0 = hide the badge entirely. */
+  total_input_tokens?: number;
+  total_output_tokens?: number;
+  total_cost_cents?: number;
+  total_runtime_seconds?: number;
 }
 
 export interface Task {

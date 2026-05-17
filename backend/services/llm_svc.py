@@ -59,13 +59,28 @@ class LlmService:
             "label": data.get("label"),
             "max_tokens": data.get("max_tokens"),
             "supports_thinking": 1 if data.get("supports_thinking") else 0,
+            # Pricing columns (migration 0017). Passing through unchanged
+            # lets the seed-on-migrate path fill defaults for well-known
+            # model names; explicit user values always win.
+            "input_price_cny_per_1m": data.get("input_price_cny_per_1m"),
+            "output_price_cny_per_1m": data.get("output_price_cny_per_1m"),
         }, id_prefix="mdl_")
         row["supports_thinking"] = bool(row.get("supports_thinking", 0))
         log.info("llm.model_created", id=row["id"])
         return row
 
     async def update_model(self, model_id: str, data: dict) -> dict | None:
-        fields = {k: v for k, v in data.items() if v is not None and k != "id"}
+        # Whitelist the columns we accept so a malformed body can't smuggle
+        # arbitrary keys into the UPDATE. Pricing columns may legitimately
+        # be set to 0 (user explicitly disables billing), so keep them
+        # alongside the existing "drop None" filter — but apply that
+        # filter per-column so 0 doesn't fall through the None hole.
+        ALLOWED = {
+            "model_name", "label", "max_tokens", "supports_thinking",
+            "input_price_cny_per_1m", "output_price_cny_per_1m",
+        }
+        fields = {k: v for k, v in data.items()
+                  if k in ALLOWED and v is not None}
         if "supports_thinking" in fields:
             fields["supports_thinking"] = 1 if fields["supports_thinking"] else 0
         result = await crud.update_by_id("llm_models", model_id, fields)

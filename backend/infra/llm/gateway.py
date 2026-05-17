@@ -54,6 +54,8 @@ class LlmGateway:
         max_tokens: int | None = None,
         temperature: float | None = None,
         json_mode: bool = False,
+        project_id: str | None = None,
+        session_id: str | None = None,
     ) -> LlmResponse:
         """Send a chat completion request."""
         adapter = await self._get_or_create_adapter(
@@ -174,6 +176,22 @@ class LlmGateway:
             "latency_ms": latency_ms,
             "text_preview": _preview_text(response.text or ""),
         })
+
+        # Best-effort token / cost accounting — only when caller passed
+        # a project or session tag. Failures here must never bubble up
+        # (the chat result is already valid; metrics is an aside).
+        if response.usage and (project_id or session_id):
+            try:
+                from services import metrics_svc
+                await metrics_svc.record_llm_usage(
+                    project_id=project_id, session_id=session_id,
+                    provider_id=provider_id, model_name=model_name,
+                    prompt_tokens=response.usage.prompt_tokens,
+                    completion_tokens=response.usage.completion_tokens,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("llm.metrics_failed", error=str(exc))
+
         return response
 
     @staticmethod

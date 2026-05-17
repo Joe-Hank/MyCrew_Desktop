@@ -22,6 +22,7 @@ import { usePrefsStore } from "../../stores/usePrefsStore";
 import { useEvent } from "../../hooks/useEvent";
 import { apiFetch, ApiError } from "../../net/api";
 import ScaffoldConfigModal from "../task/ScaffoldConfigModal";
+import { formatTokensAndCost, formatRuntime } from "../../lib/projectMetrics";
 
 // ── Card state machine ─────────────────────────────────────────────
 //
@@ -347,6 +348,7 @@ function ProjectCard({ project }: { project: Project }) {
           {project.name}
         </h3>
         <div className="ml-2 flex shrink-0 items-center gap-0.5">
+          <MetricsBadges project={project} />
           <button
             onClick={() => favMut.mutate({ id: project.id, favorited: !isFavorited })}
             disabled={favMut.isPending}
@@ -572,6 +574,51 @@ function ProjectCard({ project }: { project: Project }) {
           onSubmit={handleScaffoldSubmit}
           onCancel={() => setScaffoldModalOpen(false)}
         />
+      )}
+    </div>
+  );
+}
+
+/** Non-interactive "spent / time" badges sitting between the title and the
+ *  favorite button. Renders only the badges with non-zero data so a brand-new
+ *  project doesn't show "¥0.00 · 0 tok" noise. Styled per the design system:
+ *  border-soft outline, ink-muted text, xs font, tight padding — the spec
+ *  asked for "不显眼". */
+function MetricsBadges({ project }: { project: Project }) {
+  const moneyTok = formatTokensAndCost(
+    project.total_input_tokens ?? 0,
+    project.total_output_tokens ?? 0,
+    project.total_cost_cents ?? 0,
+  );
+  const runtime = formatRuntime(project.total_runtime_seconds ?? 0);
+  if (!moneyTok && !runtime) return null;
+
+  const badgeStyle: React.CSSProperties = {
+    border: "1px solid var(--color-border-soft)",
+    color: "var(--color-ink-muted)",
+    // Plain background so the badges blend with the card surface.
+    backgroundColor: "transparent",
+  };
+
+  return (
+    <div className="mr-1 flex items-center gap-1">
+      {moneyTok && (
+        <span
+          className="rounded-md px-1.5 py-0.5 text-[10px] leading-none whitespace-nowrap select-none"
+          style={badgeStyle}
+          title={`累计：input ${project.total_input_tokens ?? 0} · output ${project.total_output_tokens ?? 0} tokens；估算费用按 LLM 配置的单价计算`}
+        >
+          {moneyTok}
+        </span>
+      )}
+      {runtime && (
+        <span
+          className="rounded-md px-1.5 py-0.5 text-[10px] leading-none whitespace-nowrap select-none"
+          style={badgeStyle}
+          title="累计运行时长（不含暂停、卡死、停止）"
+        >
+          {runtime}
+        </span>
       )}
     </div>
   );

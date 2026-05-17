@@ -307,6 +307,7 @@ async def chat(
         resp = await llm_gateway.chat(
             provider["id"], model_name, messages,
             max_tokens=DEFAULT_PARAMS["max_tokens"],
+            project_id=task.get("project_id"),
         )
     except Exception as exc:  # noqa: BLE001
         log.error("task_guidance.llm_failed", error=str(exc), task_id=task_id)

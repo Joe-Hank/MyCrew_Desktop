@@ -103,6 +103,8 @@ async def check_compliance(
         resp = await llm_gateway.chat(
             provider["id"], model_name, messages,
             max_tokens=DEFAULT_PARAMS["max_tokens"],
+            session_id=session.get("id"),
+            project_id=session.get("project_id"),
         )
     except Exception as exc:  # noqa: BLE001
         log.warning("compliance_gate.llm_call_failed",

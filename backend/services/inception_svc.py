@@ -624,16 +624,28 @@ class InceptionService:
         # intent classifier + 5 sub-agents). The old monolithic Plan
         # Maker agent row is kept in DB for back-compat but no longer
         # executed; `_run_plan_maker` is dead code (kept for reference).
+        #
+        # Wrap the whole router invocation with PM-phase runtime markers
+        # so the home-card "运行时长" badge counts the time the LLM was
+        # actually thinking, not idle waiting for the next user message.
+        from services import metrics_svc
+        await metrics_svc.pm_phase_started(session_id)
         try:
             return await self._route_via_new_router(session_id, session, content)
         except Exception as exc:  # noqa: BLE001 — fall back to legacy on infra failure
             log.warning("inception.router_failed_using_legacy",
                         session_id=session_id, error=str(exc))
+        finally:
+            await metrics_svc.pm_phase_finished(session_id)
 
         # 3. Legacy fallback — direct LLM streaming
         log.warning("inception.plan_maker_missing_using_legacy",
                     session_id=session_id)
-        return await self._legacy_stream(session_id, session)
+        await metrics_svc.pm_phase_started(session_id)
+        try:
+            return await self._legacy_stream(session_id, session)
+        finally:
+            await metrics_svc.pm_phase_finished(session_id)
 
     async def _legacy_stream(self, session_id: str, session: dict) -> dict:
         """Old direct-LLM streaming path. Used only when Plan Maker is absent.
@@ -1117,6 +1129,21 @@ class InceptionService:
             result = await asyncio.to_thread(crew.kickoff)
             await self._probe(session_id, "kickoff_returned",
                               steps=step_count["n"])
+            # PM-phase token accounting — usage lives on `crew` after
+            # kickoff, never reaches our LlmGateway. Tag with session_id
+            # so the counts land on inception_sessions.pending_* and
+            # get transferred onto the project on finalize.
+            try:
+                from services.crewai_runner import _record_crew_usage
+                await _record_crew_usage(
+                    crew_obj=crew,
+                    project_id=None,
+                    session_id=session_id,
+                    provider_id=provider_id,
+                    model_name=model_name,
+                )
+            except Exception:  # noqa: BLE001
+                pass
         except Exception as exc:
             await self._probe(session_id, "kickoff_failed", error=str(exc)[:200])
             log.warning("inception.crewai_failed_falling_back_to_legacy",
@@ -1343,6 +1370,21 @@ class InceptionService:
             "project_id": project["id"],
         })
 
+        # Hand the PM-phase token / cost / runtime accumulators over to
+        # the freshly-created project row so the home-card badges have
+        # the full lifecycle from "用户写第一条 prompt" through "Done".
+        # Best-effort; failures must not block finalize.
+        try:
+            from services import metrics_svc
+            # Close any still-open PM interval before transfer so the
+            # in-flight seconds count too (user clicks Finalize while
+            # Plan Maker's last LLM round is technically still alive).
+            await metrics_svc.pm_phase_finished(session_id)
+            await metrics_svc.transfer_pending_to_project(session_id, project["id"])
+        except Exception as exc:  # noqa: BLE001
+            log.warning("inception.metrics_transfer_failed",
+                        session_id=session_id, error=str(exc))
+
         await manager.broadcast("inception.finalized", {
             "session_id": session_id,
             "project_id": project["id"],
@@ -1367,6 +1409,8 @@ class InceptionService:
             response = await llm_gateway.chat(
                 provider_id, model_name, messages,
                 thinking_mode=thinking_mode,
+                project_id=session.get("project_id"),
+                session_id=session_id,
             )
             log.info("inception.llm_called",
                      session_id=session_id,
