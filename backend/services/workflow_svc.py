@@ -823,6 +823,31 @@ class WorkflowService:
                     project_id, task_id, raw_text, task_input.output_schema
                 )
                 errors = validate_output_schema(extracted, task_input.output_schema)
+                # 2026-05-17 salvage: if the agent finished its real work
+                # (mkdir / file write / etc.) but forgot to call
+                # emit_output, raw_text often summarises what happened
+                # without restating the structured fields the schema
+                # demands. The generic extraction above sees no JSON in
+                # the prose and falls back to `{"_raw": ...}` →
+                # validation fails on the missing required keys. Make
+                # one more focused LLM pass that ALSO has the task's
+                # original instruction in context (so it can derive
+                # e.g. file_paths from the directories the agent was
+                # told to create). This is a text → JSON translation
+                # ONLY — no tools, no side effects, no re-running mkdir.
+                if errors:
+                    salvaged = await self._salvage_emit_output(
+                        task_id, raw_text, task_input,
+                    )
+                    if salvaged is not None:
+                        salvaged_errors = validate_output_schema(
+                            salvaged, task_input.output_schema)
+                        if not salvaged_errors:
+                            log.info("workflow.salvage_recovered",
+                                     project_id=project_id, task_id=task_id,
+                                     keys=list(salvaged.keys())[:8])
+                            extracted = salvaged
+                            errors = []
             else:
                 extracted = {"_raw": raw_text}
                 errors = []
@@ -1263,6 +1288,63 @@ class WorkflowService:
                  agent_id=task_input.agent_id,
                  tokens=response.usage.total_tokens)
         return response.text
+
+    async def _salvage_emit_output(
+        self, task_id: str, raw_text: str, task_input: Any,
+    ) -> dict | None:
+        """Last-chance JSON salvage for agents that finished their work
+        but forgot to call ``emit_output``. Re-uses the task's own LLM
+        for the salvage call, with a prompt that bundles the original
+        task instruction so the model can derive fields like
+        ``file_paths`` from the directories it was told to create — not
+        just from whatever the agent happened to echo back.
+
+        Returns the parsed dict on success, ``None`` if the LLM call
+        fails / produces non-JSON. Does NOT re-execute any of the
+        agent's tools; this is purely a text → JSON translation pass.
+        """
+        task = await crud.get_by_id("tasks", task_id)
+        agent_id = task.get("agent_id", "") if task else ""
+        agent = await crud.get_by_id("agents", agent_id) if agent_id else None
+        provider_id, model_name = await self._resolve_agent_llm(agent)
+
+        schema = task_input.output_schema or {}
+        salvage_prompt = (
+            "上一轮 Agent 完成了任务但忘了调用 emit_output 工具，"
+            "导致结构化输出缺失。请基于以下信息重建该 Agent 应该 emit "
+            "的 JSON，不要重新执行任何工具或副作用 —— 你的唯一任务是把"
+            "已经发生的事实转换成 schema 要求的 JSON。\n\n"
+            f"## 任务原始指令（Agent 应该完成的内容）\n{task_input.detail or '(无)'}\n\n"
+            f"## Agent 最终输出原文\n{raw_text[:4000]}\n\n"
+            f"## 目标 Schema（请严格匹配 required 字段）\n"
+            f"```json\n{json.dumps(schema, ensure_ascii=False, indent=2)}\n```\n\n"
+            "只输出纯 JSON 对象，不要 markdown、不要解释、不要额外字段。"
+            "对于 file_paths 这类字段：列出指令中提到的所有路径"
+            "（即便 Agent 输出没逐个回显），保留指令里的相对/绝对路径格式。"
+        )
+        messages = [
+            LlmMessage(role="system",
+                       content="你是结构化输出补救助手，只输出纯 JSON。"),
+            LlmMessage(role="user", content=salvage_prompt),
+        ]
+        try:
+            response = await llm_gateway.chat(
+                provider_id, model_name, messages,
+                json_mode=True, temperature=0.1,
+            )
+            parsed = json.loads(response.text)
+            if isinstance(parsed, dict):
+                # Also seed _output_capture so any downstream consumer
+                # that calls pop_output later (e.g. Crew QA chain) sees
+                # the same payload — keeps behaviour symmetric with the
+                # happy emit_output path.
+                from src.tools.builtin.local._output_capture import set_output
+                set_output(task_id, parsed)
+                return parsed
+        except (json.JSONDecodeError, TypeError, Exception) as exc:
+            log.warning("workflow.salvage_failed",
+                        task_id=task_id, error=str(exc))
+        return None
 
     async def _extract_structured_output(self, project_id: str, task_id: str,
                                           raw_text: str,
