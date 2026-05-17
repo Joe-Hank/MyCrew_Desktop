@@ -187,17 +187,56 @@ class ProjectService:
         if not source:
             raise KeyError(f"Project {project_id} not found")
 
+        # 2026-05-17: a Unity-template clone has to keep its template_id,
+        # otherwise ProjectCard.isScaffoldable goes false on the new card
+        # and the 「路径」 button falls through to the bare Tauri folder
+        # picker instead of opening ScaffoldConfigModal — the bug the
+        # user just reported as "复制出来的卡片第一次点路径没有正确弹窗".
+        # Reset scaffold_status to 'pending' so the user is prompted for
+        # a fresh parent_dir + slug (reusing the source's child dir
+        # would collide). Plain (no-template) clones leave both NULL.
+        from services.template_cloner_svc import TEMPLATE_ID_TO_DIR
+        source_tmpl = source.get("template_id")
+        scaffold_status = (
+            "pending" if source_tmpl in TEMPLATE_ID_TO_DIR else None
+        )
+
         new_project = await crud.insert("projects", {
             "name": f"{source['name']} (副本)",
+            "template_id": source_tmpl,
             "state": "ready",
             "is_running": 0,
             "progress_pct": 0,
             "execution_kind": source.get("execution_kind", "sequential"),
             "copied_from": project_id,
+            "scaffold_status": scaffold_status,
         }, id_prefix="proj_")
 
         old_to_new: dict[str, str] = {}
         for t in source.get("tasks", []):
+            # Preserve PM v4/v5 fields too: without performer_kind /
+            # performer_id the clone fails the _start_locked performer
+            # check; without code_contract / output_paths the Crew
+            # Executors see an empty contract and silently exit (the
+            # same root cause as the 魔塔 audio failure). Re-serialize
+            # the dict/list fields since _deserialize_task already
+            # parsed them on read.
+            src_contract = t.get("code_contract")
+            contract_json = (
+                json.dumps(src_contract, ensure_ascii=False)
+                if isinstance(src_contract, dict) else None
+            )
+            src_paths = t.get("output_paths")
+            if isinstance(src_paths, str) and src_paths:
+                try:
+                    src_paths = json.loads(src_paths)
+                except (json.JSONDecodeError, TypeError):
+                    src_paths = None
+            output_paths_json = (
+                json.dumps(src_paths, ensure_ascii=False)
+                if isinstance(src_paths, list) else None
+            )
+
             new_task = await crud.insert("tasks", {
                 "project_id": new_project["id"],
                 "title": t["title"],
@@ -207,6 +246,10 @@ class ProjectService:
                 "output_schema": json.dumps(t.get("output_schema", {})),
                 "status": "pending",
                 "deps": "[]",
+                "performer_kind": t.get("performer_kind"),
+                "performer_id": t.get("performer_id"),
+                "code_contract": contract_json,
+                "output_paths": output_paths_json,
             }, id_prefix="task_")
             old_to_new[t["id"]] = new_task["id"]
 
