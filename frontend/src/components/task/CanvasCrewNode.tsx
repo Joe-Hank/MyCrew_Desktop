@@ -1,8 +1,9 @@
-import { useMemo, useState, useCallback } from "react";
+import { useMemo, useState, useCallback, useEffect } from "react";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import type { Task } from "../../queries/useProjectQuery";
 import { useCrews, type CrewSequenceStep } from "../../queries/useTeamQuery";
 import { useEvent } from "../../hooks/useEvent";
+import { apiFetch } from "../../net/api";
 import TaskNode, { STATUS_DOT, type TaskAction } from "./TaskNode";
 import SubAgentCard, { type SubStepStatus, type SubStepAction } from "./SubAgentCard";
 
@@ -80,6 +81,42 @@ function CanvasCrewNode({ data, selected }: NodeProps) {
       return [];
     }
   }, [crew]);
+
+  // Seed subStepStatus from on-disk artifacts on mount (and whenever
+  // the parent task's status changes — e.g. a retry that flips an
+  // earlier "failed" Crew back to "running"). The WS-driven map alone
+  // is volatile: a hard page refresh while a Crew is mid-flight loses
+  // every "step N started/completed" event that fired before the
+  // refresh, leaving every sub-card gray-pending until the next
+  // sub_step event happens to fire. The backend route inspects
+  // output/<pid>/<tid>/sub/*.json and infers status from which files
+  // exist, so we can pre-populate without waiting.
+  useEffect(() => {
+    let cancelled = false;
+    async function loadProgress() {
+      try {
+        const res = await apiFetch<{
+          steps: { step_index: number; role: string; status: SubStepStatus }[];
+        }>(`/tasks/${task.id}/crew_progress`);
+        if (cancelled) return;
+        const data = res?.data;
+        if (!data?.steps) return;
+        setSubStepStatus((prev) => {
+          const next = { ...prev };
+          for (const s of data.steps) {
+            // Don't overwrite a fresher WS update with a stale disk read.
+            if (next[s.step_index] === undefined) next[s.step_index] = s.status;
+          }
+          return next;
+        });
+      } catch {
+        // Non-fatal — sub-cards just stay at their default pending state
+        // until the next WS event lands.
+      }
+    }
+    loadProgress();
+    return () => { cancelled = true; };
+  }, [task.id, task.status]);
 
   // Listen for task.sub_step events. Filter to events for THIS task and
   // update the status map; CanvasBlueprint also catches them but only

@@ -313,6 +313,82 @@ async def get_task_failure_analysis(task_id: str):
     }}
 
 
+@router.get("/tasks/{task_id}/crew_progress")
+async def get_task_crew_progress(task_id: str):
+    """Reconstruct each Crew sub-step's status from on-disk artifacts.
+
+    The task.sub_step WS event drives the live sub-card status, but the
+    frontend's subStepStatus map is kept entirely in component state —
+    a page refresh wipes it and you have to wait for the next sub_step
+    event to repopulate. This endpoint lets CanvasCrewNode seed the
+    map on mount by inspecting `output/<pid>/<tid>/sub/<i>_<role>_*`:
+
+      - has _out.json → completed
+      - has only _in.json
+          • parent task.status in failed/validation_failed/stalled → failed
+          • parent task.status in running → started (this is the live step)
+          • else → pending (probably never ran — shouldn't normally happen)
+      - no _in.json at all → pending
+    """
+    task = await crud.get_by_id("tasks", task_id)
+    if not task:
+        raise HTTPException(404, detail="task not found")
+
+    from bootstrap.paths import OUTPUT_DIR
+    parent_status = task.get("status") or "pending"
+    project_id = task.get("project_id") or ""
+    sub_dir = OUTPUT_DIR / project_id / task_id / "sub"
+
+    # Discover every step index that has at least one file on disk;
+    # gather their role from the filename. We cap at 20 to avoid
+    # surprises from a malformed directory.
+    by_index: dict[int, dict[str, bool | str]] = {}
+    if sub_dir.exists():
+        for entry in sub_dir.iterdir():
+            if not entry.is_file():
+                continue
+            # filename format: "<i>_<role>_<in|out>.<ext>"
+            name = entry.name
+            try:
+                idx_str, rest = name.split("_", 1)
+                idx = int(idx_str)
+            except ValueError:
+                continue
+            if idx < 0 or idx > 20:
+                continue
+            role = rest.split("_", 1)[0] if "_" in rest else "?"
+            slot = by_index.setdefault(idx, {"role": role, "has_in": False, "has_out": False})
+            if name.endswith("_in.json"):
+                slot["has_in"] = True
+            elif name.endswith("_out.json"):
+                slot["has_out"] = True
+
+    failed_parent = parent_status in ("failed", "validation_failed", "stalled", "aborted")
+    running_parent = parent_status == "running"
+
+    steps = []
+    for idx in sorted(by_index.keys()):
+        slot = by_index[idx]
+        if slot["has_out"]:
+            status = "completed"
+        elif slot["has_in"]:
+            if failed_parent:
+                status = "failed"
+            elif running_parent:
+                status = "started"
+            else:
+                status = "pending"
+        else:
+            status = "pending"
+        steps.append({
+            "step_index": idx,
+            "role": slot["role"],
+            "status": status,
+        })
+
+    return {"ok": True, "data": {"task_id": task_id, "steps": steps}}
+
+
 @router.get("/tasks/{task_id}/sub_io")
 async def get_task_sub_io(task_id: str, step_index: int = Query(..., ge=0)):
     """PM v4: read a single Crew sub-step's structured + markdown IO.
