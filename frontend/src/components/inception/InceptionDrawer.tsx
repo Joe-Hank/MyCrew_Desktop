@@ -605,13 +605,20 @@ function InceptionDrawer() {
   );
   const visiblePending = chat.pending.filter((p) => !recentUserContents.has(p.content));
 
-  // Right panel is shown whenever (a) we already have a blueprint, OR
+  // Right panel auto-show: (a) we already have a blueprint, OR
   // (b) a create/iterate sub-agent is mid-draft, OR (c) the PM v3
   // cache has any state besides idle (running / ready / failed /
-  // cancelled — all of which deserve the debug log panel). Drives
-  // drawer width.
+  // cancelled — all of which deserve the debug log panel).
   const pmActive = pmState.status !== "idle";
-  const showRightPanel = !!(createdProjectId && draftBlueprint) || !!drafting || pmActive;
+  const autoShowRightPanel =
+    !!(createdProjectId && draftBlueprint) || !!drafting || pmActive;
+  // Manual override (2026-05-17): top-header toggle button lets the
+  // user force the right panel open even when there's no PM activity
+  // (state 1 in the spec: 空栏 + 底部"左侧输入创作思路"提示) and
+  // force it closed at any time. null = follow auto rule.
+  const [manualRightPanelOpen, setManualRightPanelOpen] =
+    useState<boolean | null>(null);
+  const showRightPanel = manualRightPanelOpen ?? autoShowRightPanel;
   const drawerWidth = showRightPanel
     ? "min(64vw, 1100px)"
     : "min(38vw, 560px)";
@@ -740,6 +747,34 @@ function InceptionDrawer() {
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <line x1="12" y1="5" x2="12" y2="19" />
                 <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+            </button>
+
+            {/* 2026-05-17: manual right-panel toggle. Each click flips
+                between forced-open and forced-closed; null state (auto)
+                gets seeded by the user's first click based on current
+                effective state. Highlighted brand color when open so
+                it reads as a state indicator, not just an action. */}
+            <button
+              onClick={() =>
+                setManualRightPanelOpen(showRightPanel ? false : true)
+              }
+              className="flex h-7 w-7 items-center justify-center rounded transition-colors"
+              style={{
+                backgroundColor: showRightPanel
+                  ? "var(--color-brand-500)"
+                  : "white",
+                border: "1px solid var(--color-border-soft)",
+                color: showRightPanel ? "white" : "var(--color-ink-muted)",
+              }}
+              title={showRightPanel ? "关闭任务/LLM 日志栏" : "打开任务/LLM 日志栏"}
+            >
+              {/* Sidebar/panel-right icon */}
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none"
+                   stroke="currentColor" strokeWidth="2"
+                   strokeLinecap="round" strokeLinejoin="round">
+                <rect x="3" y="4" width="18" height="16" rx="2" />
+                <line x1="14" y1="4" x2="14" y2="20" />
               </svg>
             </button>
 
@@ -1085,42 +1120,67 @@ function InceptionDrawer() {
             </div>
           </div>
 
-          {/* Blueprint panel — shown either with the real blueprint editor
-              (after create_workflow lands) OR with a "drafting" skeleton
-              the moment a create/iterate sub-agent picks up the round.
-              Bottom action bar lives inside this column now (per spec:
-              重新生成 / 保存项目 belong with the blueprint, not the chat). */}
+          {/* Right panel — 3 explicit states per 2026-05-17 spec:
+              (1) empty: nothing happening yet → empty center + hint
+              (2) thinking: PMDebugLog (covers running / interrupted /
+                  failed — failure_analysis + 从断点重来 already wired)
+              (3) ready: TaskBlueprintEditor, OR "scheme lost" placeholder
+                  if pmState says ready but draftBlueprint is gone
+                  (history session opened without cached blueprint). */}
           {showRightPanel && (
             <div
               className="flex w-[45%] min-w-[360px] flex-col transition-all duration-200"
               style={{ backgroundColor: "var(--color-surface)" }}
             >
               <div className="min-h-0 flex-1 p-4">
-                {pmState.status === "ready" && draftBlueprint ? (
-                  // PM v3 draft is ready — show the editable task list
-                  // (mirrored from pmState.draft_blueprint via the
-                  // useEffect above). 保存项目 sends this version as
-                  // override_blueprint so user-side edits are honoured.
-                  // onReEvaluate/reEvaluating are legacy-iterate-only;
-                  // PM v3 users refine by sending another chat message.
-                  <TaskBlueprintEditor
-                    blueprint={draftBlueprint}
-                    onChange={setDraftBlueprint}
-                    onReEvaluate={() => {}}
-                    reEvaluating={false}
-                  />
-                ) : pmActive ? (
-                  <PMDebugLog state={pmState} />
-                ) : createdProjectId && draftBlueprint ? (
-                  <TaskBlueprintEditor
-                    blueprint={draftBlueprint}
-                    onChange={setDraftBlueprint}
-                    onReEvaluate={handleReEvaluate}
-                    reEvaluating={reEvaluating}
-                  />
-                ) : (
-                  <DraftingSkeleton mode={drafting?.mode ?? "create"} />
-                )}
+                {(() => {
+                  const status = pmState.status;
+                  // State 3: ready (or legacy iterate completion). Prefer
+                  // the editable blueprint; fall back to "lost" notice
+                  // when the data isn't on hand (e.g. user opened a
+                  // historical session that wasn't saved as a project).
+                  if (status === "ready") {
+                    if (draftBlueprint) {
+                      return (
+                        <TaskBlueprintEditor
+                          blueprint={draftBlueprint}
+                          onChange={setDraftBlueprint}
+                          onReEvaluate={() => {}}
+                          reEvaluating={false}
+                        />
+                      );
+                    }
+                    return <BlueprintLostPanel />;
+                  }
+                  // State 2: thinking. running / interrupted / failed
+                  // all map to the debug log; interrupted + failed get
+                  // their own breakpoint affordance in the bottom bar.
+                  if (
+                    status === "running"
+                    || status === "interrupted"
+                    || status === "failed"
+                  ) {
+                    return <PMDebugLog state={pmState} />;
+                  }
+                  // Legacy iterate path: project already saved + edits
+                  if (createdProjectId && draftBlueprint) {
+                    return (
+                      <TaskBlueprintEditor
+                        blueprint={draftBlueprint}
+                        onChange={setDraftBlueprint}
+                        onReEvaluate={handleReEvaluate}
+                        reEvaluating={reEvaluating}
+                      />
+                    );
+                  }
+                  // Drafting skeleton during create/iterate sub-agent
+                  if (drafting) {
+                    return <DraftingSkeleton mode={drafting.mode} />;
+                  }
+                  // State 1: empty — user manually opened the panel
+                  // before any PM activity happened.
+                  return <EmptyRightPanel />;
+                })()}
               </div>
               <div
                 className="px-4 py-3"
@@ -1130,7 +1190,11 @@ function InceptionDrawer() {
                 }}
               >
                 {/* PM v3 — buttons depend on cache status. status ===
-                    'idle' falls through to legacy iterate path. */}
+                    'idle' falls through to legacy iterate path.
+                    2026-05-17: when the right panel is open without any
+                    PM activity AND no draftBlueprint (manual-toggle
+                    empty state), hide the action bar entirely — there's
+                    nothing to regenerate or save yet. */}
                 {pmActive ? (
                   <PMActionButtons
                     state={pmState}
@@ -1144,7 +1208,7 @@ function InceptionDrawer() {
                     }}
                     onChanged={() => { void refetchPmState(); }}
                   />
-                ) : (
+                ) : (createdProjectId && draftBlueprint) || drafting ? (
                   <div className="flex gap-2">
                     <button
                       onClick={handleRegenerate}
@@ -1167,6 +1231,13 @@ function InceptionDrawer() {
                     >
                       保存项目
                     </button>
+                  </div>
+                ) : (
+                  <div
+                    className="text-center text-[11px]"
+                    style={{ color: "var(--color-ink-faint)" }}
+                  >
+                    ← 在左侧输入创作思路开始
                   </div>
                 )}
               </div>
@@ -1285,7 +1356,7 @@ function PMActionButtons({
       ?? "?";
     return (
       <div className="flex flex-col gap-2">
-        {isInterrupted && (
+        {isInterrupted ? (
           <div
             className="rounded-md px-2 py-1.5 text-[11px]"
             style={{
@@ -1295,6 +1366,17 @@ function PMActionButtons({
             }}
           >
             ⚠️ 后端进程意外终止（dev 热重载或崩溃）— 草稿已从磁盘恢复，但 PM 工作流需手动继续。
+          </div>
+        ) : (
+          <div
+            className="rounded-md px-2 py-1.5 text-[11px]"
+            style={{
+              backgroundColor: "rgba(239, 68, 68, 0.08)",
+              border: "1px solid rgba(239, 68, 68, 0.3)",
+              color: "#b91c1c",
+            }}
+          >
+            ⚠️ Phase「{resumePoint}」遇到问题（{state.error?.slice(0, 80) || "LLM 报错或关键 JSON 丢失"}）。请点下方重试。
           </div>
         )}
         <button
@@ -1384,6 +1466,71 @@ function DraftingSkeleton({ mode }: { mode: "create" | "iterate" }) {
             />
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+/** State 1 right-panel placeholder — shown when the user manually opened
+ *  the panel via the top-bar toggle but no PM activity has happened yet.
+ *  Center stays empty per spec; the bottom carries a gentle hint. */
+function EmptyRightPanel() {
+  return (
+    <div className="flex h-full flex-col items-center justify-between py-8">
+      <div />
+      <div
+        className="text-center text-[11px] leading-relaxed"
+        style={{ color: "var(--color-ink-ghost)", maxWidth: "260px" }}
+      >
+        <div
+          className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full"
+          style={{
+            backgroundColor: "var(--color-surface-alt)",
+            color: "var(--color-ink-faint)",
+          }}
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" strokeWidth="2"
+               strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="15 18 9 12 15 6" />
+          </svg>
+        </div>
+        在左侧输入你的创作思路，Plan Maker 会在这里实时显示任务规划进度。
+      </div>
+    </div>
+  );
+}
+
+/** State 3 fallback — pmState says ready but draftBlueprint is null
+ *  (history session opened without cached blueprint, or PM cache was
+ *  cleared after save). Center empty; bottom hint offers regenerate. */
+function BlueprintLostPanel() {
+  return (
+    <div className="flex h-full flex-col items-center justify-between py-8">
+      <div />
+      <div
+        className="text-center text-[11px] leading-relaxed"
+        style={{ color: "var(--color-ink-ghost)", maxWidth: "280px" }}
+      >
+        <div
+          className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full"
+          style={{
+            backgroundColor: "rgba(245, 158, 11, 0.12)",
+            color: "#b45309",
+          }}
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" strokeWidth="2"
+               strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="10" />
+            <line x1="12" y1="8" x2="12" y2="12" />
+            <line x1="12" y1="16" x2="12.01" y2="16" />
+          </svg>
+        </div>
+        <div className="mb-1" style={{ color: "var(--color-ink-muted)" }}>
+          历史方案已丢失
+        </div>
+        在底部输入新的需求让 Plan Maker 重新生成，或从聊天框继续追问以恢复上下文。
       </div>
     </div>
   );
