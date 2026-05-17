@@ -96,6 +96,25 @@ function levelColor(level: string): string {
   return "var(--color-ink-soft)";
 }
 
+/** Render an ISO timestamp (backend emits UTC via structlog
+ *  TimeStamper) as local hh:mm:ss. The previous `ts.substring(11, 19)`
+ *  rendered the UTC hours literally, which shows as 8 hours behind
+ *  Beijing wall-clock time and confuses users who expect the LogDrawer
+ *  to match what their system clock says. */
+function localHMS(iso: string | undefined | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) {
+    // Malformed / non-ISO — fall back to the raw substring so we don't
+    // drop information on the floor.
+    return typeof iso === "string" ? iso.substring(11, 19) : "";
+  }
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  const ss = String(d.getSeconds()).padStart(2, "0");
+  return `${hh}:${mm}:${ss}`;
+}
+
 // ── Main component ─────────────────────────────────────────────────
 
 function LogDrawer() {
@@ -487,7 +506,7 @@ function BackendLogs({ rows }: { rows: BackendLog[] }) {
       {visible.map((r, i) => (
         <div key={i} className="leading-5">
           <span style={{ color: "var(--color-ink-ghost)" }}>
-            {r.ts.substring(11, 19)}
+            {localHMS(r.ts)}
           </span>{" "}
           <span style={{
             color: levelColor(r.level),
@@ -529,7 +548,7 @@ function AgentLogs({ rows }: { rows: AgentLog[] }) {
       {rows.map((r, i) => (
         <div key={i} className="leading-5">
           <span style={{ color: "var(--color-ink-ghost)" }}>
-            {r.ts.substring(11, 19)}
+            {localHMS(r.ts)}
           </span>{" "}
           <span style={{ color: "var(--color-brand-500)" }}>[{r.type}]</span>{" "}
           {r.message}
@@ -585,7 +604,7 @@ function LLMCallRow({ call }: { call: LLMCallEntry }) {
           className="shrink-0 font-mono"
           style={{ color: "var(--color-ink-ghost)" }}
         >
-          {call.ts_request.substring(11, 19)}
+          {localHMS(call.ts_request)}
         </span>
         <span className="shrink-0" style={{ color: statusColor }}>
           {statusGlyph}
