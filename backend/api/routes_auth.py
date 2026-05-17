@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import structlog
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 
 from api.ws import get_session_token
 
@@ -42,4 +43,17 @@ async def get_ws_token(request: Request):
         token = get_session_token()
     except RuntimeError:
         raise HTTPException(status_code=503, detail="session not initialised")
-    return {"ok": True, "data": {"token": token}}
+    # Aggressive no-cache: after a backend restart the previous token is
+    # invalid, and we MUST not let the browser HTTP cache serve the
+    # pre-restart value (otherwise the WS reject + token-clear + refetch
+    # loop in frontend/src/net/ws.ts loops forever on a stale cached
+    # response). Combine the modern (Cache-Control) + legacy (Pragma,
+    # Expires) headers so old Chromium / WebView builds also respect it.
+    return JSONResponse(
+        {"ok": True, "data": {"token": token}},
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
