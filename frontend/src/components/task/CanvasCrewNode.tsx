@@ -294,10 +294,10 @@ function CanvasCrewNode({ data, selected }: NodeProps) {
 
   // Enable rules for the inline action row in expanded mode. Mirror
   // TaskNode's local logic verbatim so behaviour stays consistent
-  // between collapsed and expanded views.
-  const isFailureState = ["failed", "validation_failed", "aborted"].includes(task.status);
+  // between collapsed and expanded views (incl. stalled→retry, 2026-05-19).
+  const isFailureState = ["failed", "validation_failed", "aborted", "stalled"].includes(task.status);
   const canRetry = isFailureState || (task.status === "done" && !projectRunning);
-  const canChat = ["failed", "validation_failed", "blocked"].includes(task.status);
+  const canChat = ["failed", "validation_failed", "blocked", "stalled"].includes(task.status);
 
   return (
     <div className={"relative " + haloClass}>

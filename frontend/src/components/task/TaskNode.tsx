@@ -68,7 +68,10 @@ function TaskNode({
   // case, but this UI guard is the belt-and-braces fix that also lets
   // users unstuck existing stuck projects (created before the backend
   // patch) without a pause-resume dance.
-  const isFailureState = ["failed", "validation_failed", "aborted"].includes(task.status);
+  // `stalled` is treated as a failure state for retry purposes (2026-05-19):
+  // watchdog-stalled tasks are precisely the case where the user needs to
+  // unblock via retry; refusing it sent users into a pause→resume dance.
+  const isFailureState = ["failed", "validation_failed", "aborted", "stalled"].includes(task.status);
   const canRetry = isFailureState || (task.status === "done" && !projectRunning);
   const canChat = ["failed", "validation_failed", "blocked"].includes(task.status);
 
