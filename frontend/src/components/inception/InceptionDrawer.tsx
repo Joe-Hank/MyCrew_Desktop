@@ -425,21 +425,39 @@ function InceptionDrawer() {
     setDraftBlueprint,
   ]);
 
-  // First-launch fallback: pick the first available provider/model.
+  // 2026-05-18: PM 用 deepseek-v4-flash 固定下来（容量测试 N=80 96.7%
+  // 稳定 + 不是 reasoning 模型不会卡死推理链）。auto-pick 这个组合，无 UI 选择。
+  // 如果找不到（用户没配 deepseek 或 flash 被删了），回退到第一个 provider
+  // 的第一个 model — 保留之前的兜底行为。
+  // **每次 providers 列表变化都重新强制选**，即使 prefs store 里有 localStorage
+  // 残留的 claude/gpt — 避免历史选择泄露过来。
   useEffect(() => {
-    if (selectedLlm || !providers) return;
+    if (!providers) return;
     const list = (providers as unknown as Array<{
       id: string;
       name: string;
       models?: Array<{ model_name: string }>;
     }>) ?? [];
     if (list.length === 0) return;
-    const first = list[0];
-    if (!first) return;
-    setSelectedLlm(first.id);
-    const firstModel = first.models?.[0]?.model_name;
-    if (firstModel) setSelectedModel(firstModel);
-  }, [providers, selectedLlm, setSelectedLlm, setSelectedModel]);
+    // Prefer deepseek + flash
+    let pickedProvider = list.find((p) =>
+      p.models?.some((m) => /deepseek.*flash/i.test(m.model_name)),
+    );
+    let pickedModel = pickedProvider?.models?.find((m) =>
+      /deepseek.*flash/i.test(m.model_name),
+    )?.model_name;
+    // Fallback: first provider + its first model
+    if (!pickedProvider) {
+      pickedProvider = list[0];
+      pickedModel = pickedProvider?.models?.[0]?.model_name;
+    }
+    if (pickedProvider && pickedProvider.id !== selectedLlm) {
+      setSelectedLlm(pickedProvider.id);
+    }
+    if (pickedModel && pickedModel !== selectedModel) {
+      setSelectedModel(pickedModel);
+    }
+  }, [providers, selectedLlm, selectedModel, setSelectedLlm, setSelectedModel]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -453,10 +471,6 @@ function InceptionDrawer() {
   //      keep accumulating in the right hooks while the drawer is hidden
   //   3. Reopening the drawer instantly shows current state instead of
   //      re-fetching everything from scratch
-
-  const providerList = (providers as unknown as Array<{ id: string; name: string; models?: Array<{ model_name: string }> }>) ?? [];
-  const currentProvider = providerList.find((p) => p.id === selectedLlm);
-  const modelOptions = currentProvider?.models ?? [];
 
   function handleSend() {
     const content = input.trim();
@@ -675,41 +689,19 @@ function InceptionDrawer() {
               : "none",
           }}
         >
-        {/* Top toolbar */}
+        {/* Top toolbar — PM 模型固定为 deepseek-v4-flash (auto-picked above),
+            no user-facing selector. Status display only. */}
         <div
           className="flex items-center gap-1.5 px-3 py-2"
           style={{ borderBottom: "1px solid var(--color-border-soft)", backgroundColor: "var(--color-card)" }}
         >
-          <select
-            value={selectedLlm}
-            onChange={(e) => {
-              setSelectedLlm(e.target.value);
-              setSelectedModel("");
-            }}
-            disabled={!!activeSessionId}
-            className="min-w-0 max-w-[110px] rounded bg-white px-1.5 py-1 text-xs outline-none disabled:opacity-60"
-            style={{ border: "1px solid var(--color-border-soft)" }}
-            title="LLM"
+          <span
+            className="text-xs"
+            style={{ color: "var(--color-ink-faint)" }}
+            title="PM (Plan Maker) 固定使用此 LLM；如需调整请到设置页"
           >
-            <option value="">— LLM —</option>
-            {providerList.map((p) => (
-              <option key={p.id} value={p.id}>{p.name}</option>
-            ))}
-          </select>
-
-          <select
-            value={selectedModel}
-            onChange={(e) => setSelectedModel(e.target.value)}
-            disabled={!selectedLlm || !!activeSessionId}
-            className="min-w-0 max-w-[120px] rounded bg-white px-1.5 py-1 text-xs outline-none disabled:opacity-60"
-            style={{ border: "1px solid var(--color-border-soft)" }}
-            title="模型"
-          >
-            <option value="">— 模型 —</option>
-            {modelOptions.map((m) => (
-              <option key={m.model_name} value={m.model_name}>{m.model_name}</option>
-            ))}
-          </select>
+            PM · {selectedModel || "deepseek-v4-flash"}
+          </span>
 
           <div className="ml-auto flex items-center gap-1">
             <div className="relative">
