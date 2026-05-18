@@ -739,18 +739,39 @@ class WorkflowService:
     ) -> None:
         """Remove a task's previous outputs so the next run starts clean.
 
-        Wipes the per-task output dir's ``sub/`` directory plus the
-        top-level ``out.json`` / ``out.md`` ; leaves ``in.md`` / ``in.json``
-        intact because those describe the *task itself* (PM contract +
-        upstream context), not the previous run's outputs. The task row's
-        ``io_out_ref`` column is cleared in the same pass so the IO viewer
-        doesn't display a path that no longer exists.
+        Two passes:
+          1. **MyCrew side** (``<OUTPUT_DIR>/<pid>/<tid>``): wipe the
+             ``sub/`` directory and the ``out.json`` / ``out.md`` pair;
+             leave ``in.md`` / ``in.json`` intact (they describe the
+             task itself, not its previous output).
+          2. **Project side** (``<project_root>/...``): delete every
+             real artifact file the previous run produced at the
+             paths listed in ``task.output_paths``, plus the Unity
+             ``.meta`` sibling of each. Without this, a retry can hit
+             the stale-state trap: the new run sees the *previous*
+             ``.cs`` / ``.png`` / ``.wav`` already on disk, satisfies
+             the path-existence + size-magic-header sanity checks, and
+             reports success without actually regenerating anything.
+             (See incident analysis 2026-05-19.)
+
+        Guards:
+          - Resolved paths must stay under ``project_root`` (path
+            escape protection).
+          - Paths shared with another task in the same project are
+            skipped — the other task still owns them.
+          - ``in.md`` / ``in.json`` (task input cache) are never touched
+            since they're regenerated each run.
+
+        The task row's ``io_out_ref`` column is cleared in the same pass
+        so the IO viewer doesn't display a path that no longer exists.
         """
         import shutil
         from bootstrap.paths import OUTPUT_DIR
 
         task_dir = OUTPUT_DIR / project_id / task_id
         removed: list[str] = []
+
+        # ── 1. MyCrew-side: sub/ + out.json/md ────────────────────
         sub_dir = task_dir / "sub"
         if sub_dir.exists():
             try:
@@ -769,6 +790,11 @@ class WorkflowService:
                     log.warning("retry.cleanup_file_failed",
                                 task_id=task_id, file=name, error=str(exc))
 
+        # ── 2. Project-side: task.output_paths under project_root ─
+        await self._cleanup_task_output_paths(
+            project_id, task_id, removed,
+        )
+
         # Clear the DB pointer so the IO viewer doesn't tease a stale file.
         try:
             await crud.update_by_id("tasks", task_id, {"io_out_ref": None})
@@ -778,6 +804,97 @@ class WorkflowService:
 
         log.info("retry.artifacts_cleaned",
                  task_id=task_id, removed=removed or ["(nothing)"])
+
+    async def _cleanup_task_output_paths(
+        self, project_id: str, task_id: str, removed_acc: list[str],
+    ) -> None:
+        """Delete the real artifact files this task wrote on the previous
+        run (under <project_root>), plus their .meta siblings.
+
+        Mutates ``removed_acc`` so the caller can log a unified list.
+        Never raises — every failure is logged and skipped.
+        """
+        from pathlib import Path
+
+        project = await crud.get_by_id("projects", project_id) or {}
+        project_root_str = project.get("root_path") or ""
+        if not project_root_str:
+            return  # No root bound yet → no project-side files exist.
+        try:
+            project_root = Path(project_root_str).resolve()
+        except (OSError, ValueError):
+            return
+        if not project_root.exists():
+            return
+
+        task = await crud.get_by_id("tasks", task_id) or {}
+        raw = task.get("output_paths") or "[]"
+        try:
+            paths_list = (
+                json.loads(raw) if isinstance(raw, str) else raw
+            )
+        except (json.JSONDecodeError, TypeError):
+            paths_list = []
+        if not isinstance(paths_list, list) or not paths_list:
+            return
+
+        # Find paths shared with OTHER tasks in this project — skip them
+        # (they belong to other tasks, deleting them would corrupt those).
+        # PM v5's _validate_path_specs already forbids cross-task path
+        # collisions at planning time, so the shared set is normally
+        # empty; this is belt-and-braces for legacy data.
+        shared: set[str] = set()
+        try:
+            other_tasks = await crud.get_all(
+                "tasks", "project_id = ? AND id != ?",
+                (project_id, task_id),
+            )
+            for ot in other_tasks or []:
+                other_raw = ot.get("output_paths") or "[]"
+                try:
+                    other_list = (
+                        json.loads(other_raw)
+                        if isinstance(other_raw, str) else other_raw
+                    )
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if isinstance(other_list, list):
+                    shared.update(str(p) for p in other_list)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("retry.cleanup_shared_lookup_failed",
+                        task_id=task_id, error=str(exc))
+
+        for rel_path in paths_list:
+            if not isinstance(rel_path, str) or not rel_path.strip():
+                continue
+            if rel_path in shared:
+                log.info("retry.cleanup_skipped_shared",
+                         task_id=task_id, path=rel_path)
+                continue
+            try:
+                candidate = (project_root / rel_path).resolve()
+                # Path escape guard: must stay under project_root.
+                candidate.relative_to(project_root)
+            except (ValueError, OSError) as exc:
+                log.warning("retry.cleanup_path_escape",
+                            task_id=task_id, path=rel_path,
+                            error=str(exc))
+                continue
+            for f in (
+                candidate,
+                candidate.with_suffix(candidate.suffix + ".meta"),
+            ):
+                if not f.is_file():
+                    continue
+                try:
+                    f.unlink()
+                    removed_acc.append(
+                        str(f.relative_to(project_root)).replace("\\", "/")
+                    )
+                except OSError as exc:
+                    log.warning("retry.cleanup_output_failed",
+                                task_id=task_id, file=str(f),
+                                error=str(exc))
 
     async def recover(self) -> list[str]:
         rows = await crud.get_all("projects", "state = ?", (ProjectState.RUNNING,))
