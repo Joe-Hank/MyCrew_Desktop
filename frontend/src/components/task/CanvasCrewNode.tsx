@@ -61,10 +61,15 @@ function CanvasCrewNode({ data, selected }: NodeProps) {
   // Live status per step, updated via the task.sub_step WS event below.
   const [subStepStatus, setSubStepStatus] = useState<Record<number, SubStepStatus>>({});
   const [subStepErrors, setSubStepErrors] = useState<Record<number, string>>({});
-  // Contract-check step (V5 Stage B) is a synthetic sub-step appended
-  // after QA. Its presence + errors come from the crew_progress endpoint
-  // (which reads <task_dir>/sub/<N>_contract_out.json). null = no
-  // contract bound for this task; never renders the contract card.
+  // Contract-check step (V5 Stage B). **Realised** state — populated
+  // either from the crew_progress endpoint (which reads
+  // <task_dir>/sub/<N>_contract_out.json) or from a live task.sub_step
+  // WS event with role="contract".
+  // **A null value here doesn't mean "no contract"** — see derived
+  // `displayContractStep` below which falls back to a pending placeholder
+  // whenever task.code_contract is non-null. Goal: every task that
+  // declares a code_contract shows the contract sub-card consistently —
+  // before / during / after run; not only after the regex pass finishes.
   const [contractStep, setContractStep] = useState<
     { stepIndex: number; status: SubStepStatus; errors: string[] } | null
   >(null);
@@ -357,42 +362,58 @@ function CanvasCrewNode({ data, selected }: NodeProps) {
         </div>
 
         {/* Sub-cards in a row. The contract check (V5 Stage B) is
-            rendered as a synthetic post-QA card when present — it isn't
-            an agent step, but visually slots into the same flow so the
-            user sees the "agent triplet → final gate" pipeline. */}
-        <div className="flex" style={{ gap: SUB_CARD_GAP }}>
-          {sequence.map((step, i) => (
-            <SubAgentCard
-              key={`${task.id}-step-${i}`}
-              task={task}
-              stepIndex={i}
-              stepRole={step.role}
-              agentId={step.agent_id}
-              totalSteps={sequence.length + (contractStep ? 1 : 0)}
-              status={subStepStatus[i] ?? (task.status === "done" ? "completed" : "pending")}
-              errorText={subStepErrors[i]}
-              progressTemplate={step.progress_template}
-              onAction={onSubStepAction}
-            />
-          ))}
-          {contractStep && (
-            <ContractCheckCard
-              key={`${task.id}-contract`}
-              task={task}
-              stepIndex={contractStep.stepIndex}
-              totalSteps={sequence.length + 1}
-              status={contractStep.status}
-              errors={contractStep.errors}
-              onViewDetail={() =>
-                onSubStepAction({
-                  kind: "sub_view_failure_reason",
-                  task,
-                  stepIndex: contractStep.stepIndex,
-                })
-              }
-            />
-          )}
-        </div>
+            rendered as a synthetic post-QA card for every task that
+            *declares* a code_contract — independent of whether the
+            verification has actually run. Before run: pending placeholder.
+            After run: status reflects the actual regex/AST pass result. */}
+        {(() => {
+          // Derive the contract card we should display:
+          //   - If we have a realised step (from disk or WS) → use it
+          //   - Else if task.code_contract is non-null → pending placeholder
+          //   - Else → no contract card
+          const hasContract = !!task.code_contract;
+          const displayContract = contractStep ?? (
+            hasContract
+              ? { stepIndex: sequence.length, status: "pending" as SubStepStatus, errors: [] }
+              : null
+          );
+          const totalSteps = sequence.length + (displayContract ? 1 : 0);
+          return (
+            <div className="flex" style={{ gap: SUB_CARD_GAP }}>
+              {sequence.map((step, i) => (
+                <SubAgentCard
+                  key={`${task.id}-step-${i}`}
+                  task={task}
+                  stepIndex={i}
+                  stepRole={step.role}
+                  agentId={step.agent_id}
+                  totalSteps={totalSteps}
+                  status={subStepStatus[i] ?? (task.status === "done" ? "completed" : "pending")}
+                  errorText={subStepErrors[i]}
+                  progressTemplate={step.progress_template}
+                  onAction={onSubStepAction}
+                />
+              ))}
+              {displayContract && (
+                <ContractCheckCard
+                  key={`${task.id}-contract`}
+                  task={task}
+                  stepIndex={displayContract.stepIndex}
+                  totalSteps={totalSteps}
+                  status={displayContract.status}
+                  errors={displayContract.errors}
+                  onViewDetail={() =>
+                    onSubStepAction({
+                      kind: "sub_view_failure_reason",
+                      task,
+                      stepIndex: displayContract.stepIndex,
+                    })
+                  }
+                />
+              )}
+            </div>
+          );
+        })()}
       </div>
       <Handle
         type="source"
