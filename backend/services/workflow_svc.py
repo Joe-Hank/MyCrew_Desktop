@@ -1689,7 +1689,16 @@ class WorkflowService:
             if not project_root.exists():
                 return []
 
-            from domain.qa.contract_validator import verify_contract
+            # 2026-05-18 P5 upgrade: switched to AST-based validator
+            # (tree-sitter-c-sharp). The legacy regex/substring path
+            # had a false-negative on properties whose body style
+            # differed from contract literal (`{ get; set; }` vs
+            # `{ get => _x; set { ... } }`) — same surface API, code
+            # rejected. AST path compares semantic shape (kind + name
+            # + type + params + accessors) and is body-style-agnostic.
+            # contract_validator.py kept for now as fallback / legacy
+            # consumer support but is no longer the hot path here.
+            from domain.qa.contract_ast_validator import verify_contract
             return verify_contract(contract, project_root)
         except Exception as exc:  # noqa: BLE001
             log.error("contract_verify.unhandled",

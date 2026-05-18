@@ -20,6 +20,9 @@ dependencies = [
     "httpx>=0.28.0",
     "jsonschema>=4.23.0",
     "tenacity>=9.0.0",
+    # code_contract AST validator (replaces regex substring match)
+    "tree-sitter>=0.23,<0.24",
+    "tree-sitter-c-sharp>=0.23,<0.24",
 ]
 
 [project.optional-dependencies]
