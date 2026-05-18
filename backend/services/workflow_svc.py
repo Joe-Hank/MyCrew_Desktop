@@ -241,6 +241,43 @@ def _classify_task_error(err: str) -> str:
     return "unknown"
 
 
+# Stage D (2026-05-19): split a contract-validator error list into
+# "Debugger-patchable" vs "needs full retry". Patchable = missing
+# signature inside an already-existing .cs file (a surgical add).
+# NOT patchable = file doesn't exist (need full Executor re-run) or
+# parse failed (the .cs has syntax errors a full retry is more likely
+# to fix than a targeted patch).
+_CONTRACT_PATCHABLE_PATTERNS = (
+    "缺少契约签名",  # the AST validator's canonical missing-sig prefix
+)
+_CONTRACT_UNPATCHABLE_PATTERNS = (
+    "文件不存在",      # Crew Executor never wrote the file → full re-run
+    "解析失败",        # syntax error → full re-run more likely to help
+    "读取失败",        # IO error → not a content issue
+    "无法解析",        # contract sig itself unparseable — PM bug
+)
+
+
+def _contract_errors_patchable_by_debugger(errors: list[str]) -> list[str]:
+    """Filter contract_validator errors to the subset where a single
+    Debugger patch round is likely to succeed.
+
+    Returns the patchable subset. Caller decides whether to attempt
+    repair only if EVERY error is patchable (i.e. the returned list
+    has the same length as `errors`) — partial-patch is a slippery
+    slope (the unpatchable issues will still fail validation later)."""
+    if not errors:
+        return []
+    out: list[str] = []
+    for e in errors:
+        s = str(e or "")
+        if any(p in s for p in _CONTRACT_UNPATCHABLE_PATTERNS):
+            continue
+        if any(p in s for p in _CONTRACT_PATCHABLE_PATTERNS):
+            out.append(s)
+    return out
+
+
 class WorkflowService:
     def __init__(self) -> None:
         self._active: dict[str, HarnessStateMachine] = {}
@@ -256,6 +293,15 @@ class WorkflowService:
         # Audit (2026-05-16 architecture-audit.md, Top 5 #3) called out
         # the TOCTOU race here as P1; this is the fix.
         self._project_locks: dict[str, asyncio.Lock] = {}
+        # Stage D (2026-05-19): track which tasks already got an in-band
+        # Debugger contract-patch attempt within the current process.
+        # Bounded to one shot per task per process — a user-initiated
+        # retry (which clears artifacts) resets this implicitly: the
+        # task_id stays in the set, but the cleanup deletes the .cs
+        # files so the next Crew run rebuilds from scratch + may patch
+        # again only after another fresh failure (not double-firing on
+        # the same Crew output).
+        self._contract_debugger_attempts: set[str] = set()
 
     def _get_project_lock(self, project_id: str) -> asyncio.Lock:
         lock = self._project_locks.get(project_id)
@@ -1028,15 +1074,49 @@ class WorkflowService:
                 errors = []
 
             # V5 Stage B (2026-05-17): if the PM wrote a code_contract
-            # for this task, regex-verify that every .cs file produced
-            # actually contains every contracted public symbol. Missing
-            # signatures get reported as validation errors so the task
-            # moves to validation_failed with concrete "缺少签名 X"
-            # messages instead of silently shipping half-implemented
-            # code. Non-code tasks have NULL contract → no-op.
+            # for this task, AST-verify (since 2026-05-18) that every
+            # .cs file produced actually contains every contracted
+            # public symbol. Missing signatures get reported as
+            # validation errors so the task moves to validation_failed
+            # with concrete "缺少签名 X" messages instead of silently
+            # shipping half-implemented code. Non-code tasks have NULL
+            # contract → no-op.
             contract_errors = await self._verify_code_contract(
                 project_id, task_id,
             )
+            # Stage D (2026-05-19): one-shot Debugger patch when EVERY
+            # remaining error is a "missing signature" type. Unpatchable
+            # errors (file not found, parse failed) skip this path and
+            # fall through to validation_failed → user retry. The
+            # patch runs once per task per process — repeat triggers
+            # need a fresh Crew run (via user retry, which clears the
+            # .cs files + drops the attempt flag implicitly).
+            if contract_errors and task_id not in self._contract_debugger_attempts:
+                patchable = _contract_errors_patchable_by_debugger(
+                    contract_errors,
+                )
+                all_patchable = (
+                    patchable
+                    and len(patchable) == len(contract_errors)
+                )
+                if all_patchable:
+                    self._contract_debugger_attempts.add(task_id)
+                    log.info("contract.debugger_patch_initiated",
+                             project_id=project_id, task_id=task_id,
+                             n_errors=len(patchable))
+                    repair_ran = await self._run_contract_debugger_patch(
+                        project_id, task_id, patchable,
+                    )
+                    if repair_ran:
+                        # Re-verify post-patch. If clean → task can
+                        # proceed to done; if some errors remain →
+                        # normal validation_failed path.
+                        contract_errors = await self._verify_code_contract(
+                            project_id, task_id,
+                        )
+                        log.info("contract.debugger_patch_completed",
+                                 project_id=project_id, task_id=task_id,
+                                 remaining_errors=len(contract_errors))
             if contract_errors:
                 errors = list(errors or []) + contract_errors
             # 2026-05-17: render the contract verdict as a synthetic
@@ -1769,6 +1849,123 @@ class WorkflowService:
                                         harness: HarnessStateMachine) -> None:
         for task in harness.get_all_tasks():
             await self._persist_task_state(project_id, task["id"], harness)
+
+    async def _run_contract_debugger_patch(
+        self, project_id: str, task_id: str, patchable_errors: list[str],
+    ) -> bool:
+        """Stage D (2026-05-19): one-shot Debugger pass to fix a small
+        set of contract errors (typically: a handful of missing
+        signatures in already-written .cs files).
+
+        Strategy: spin the existing seeded Debugger agent with a
+        narrowly-scoped step_instructions block that names the missing
+        signatures and tells it to add them with script_apply_edits.
+        Reuses crewai_runner.run_crew_step_with_crewai (same path the
+        normal Crew steps take, just out-of-band step_index so it
+        doesn't collide with the parent Crew's step namespace).
+
+        Returns True if the Debugger ran end-to-end and captured an
+        emit_output payload — caller should re-run _verify_code_contract
+        to see whether the patch actually fixed things. Returns False
+        on any setup failure (Debugger not seeded, no project root,
+        runtime exception) — caller falls through to validation_failed
+        as if the patch attempt had never happened. Never raises.
+        """
+        try:
+            debugger_rows = await crud.get_all(
+                "agents", "role = ? AND is_auto_generated = 0",
+                ("Debugger",),
+            )
+            if not debugger_rows:
+                log.warning("contract.debugger_not_seeded", task_id=task_id)
+                return False
+            debugger_row = debugger_rows[0]
+
+            project = await crud.get_by_id("projects", project_id) or {}
+            project_root = project.get("root_path") or None
+            if not project_root:
+                log.info("contract.debugger_skipped_no_root", task_id=task_id)
+                return False
+
+            task_row = await crud.get_by_id("tasks", task_id) or {}
+            title = task_row.get("title") or ""
+            detail = task_row.get("detail") or ""
+
+            def _parse_json(raw: Any, default: Any) -> Any:
+                if raw is None:
+                    return default
+                if isinstance(raw, (dict, list)):
+                    return raw
+                try:
+                    return json.loads(raw)
+                except (json.JSONDecodeError, TypeError):
+                    return default
+
+            output_schema = _parse_json(task_row.get("output_schema"), {})
+            output_paths = _parse_json(task_row.get("output_paths"), [])
+            code_contract = _parse_json(task_row.get("code_contract"), None)
+
+            provider_id, model_name = await self._resolve_agent_llm(debugger_row)
+
+            step_instructions = (
+                "## 受限契约补丁模式 (Stage D)\n"
+                "上游 Crew 已经写出了 .cs 文件，但 PM 代码契约 AST 校验"
+                "**仍有缺失签名**。你的任务**精确**且**有界**——"
+                "**绝不要重写整个文件**，只补缺少的那几个签名。\n\n"
+                "### 你必须做\n"
+                "1. 用 read_file_local 读「## 🔴 代码契约」块里**每个** .cs 文件\n"
+                "2. 对照下面的错误列表，把**每一个**缺失签名用 "
+                "script_apply_edits / apply_text_edits 添加进去：\n"
+                "   - 字面照抄契约里的 signature 形态\n"
+                "   - 方法体可极简（return 默认值 / // stub 一行注释皆可）\n"
+                "   - **不删任何已有代码**、**不改其他签名**、**不重构**\n"
+                "3. 全部补完用 find_in_file 自验每条签名都在文件里\n"
+                "4. 调 emit_output(payload={'patched_files': [...], "
+                "'added_symbols': [...]}) 报告\n\n"
+                "### 严禁\n"
+                "- 创建新文件\n"
+                "- 改其他已存在的方法体\n"
+                "- 改业务逻辑\n"
+                "- 调 create_script 重写整个 .cs（用 script_apply_edits / "
+                "apply_text_edits **增量**修改）\n\n"
+                "### 校验器报告的缺失\n"
+                + "\n".join(f"- {e}" for e in patchable_errors)
+            )
+
+            from services import crewai_runner as _runner
+            _text, captured = await _runner.run_crew_step_with_crewai(
+                agent_row=debugger_row,
+                step_role="executor",
+                # Out-of-band step_index so this patch doesn't write
+                # into the parent Crew's step slots. Renders as a 99th
+                # sub-step JSON file under sub/ — harmless, the canvas
+                # ignores sub_step indices beyond the agent_sequence
+                # length unless it's the contract sentinel.
+                step_index=99,
+                step_instructions=step_instructions,
+                project_id=project_id,
+                project_root=project_root,
+                parent_task_id=task_id,
+                parent_task_title=title,
+                parent_task_detail=detail,
+                parent_output_schema=output_schema,
+                parent_output_paths=output_paths,
+                parent_code_contract=code_contract,
+                upstream_outputs={},
+                prev_step_payload=None,
+                provider_id=provider_id,
+                model_name=model_name,
+            )
+            ran_ok = captured is not None
+            log.info("contract.debugger_patch_done",
+                     project_id=project_id, task_id=task_id,
+                     captured=bool(captured))
+            return ran_ok
+        except Exception as exc:  # noqa: BLE001
+            log.warning("contract.debugger_patch_failed",
+                        project_id=project_id, task_id=task_id,
+                        error=str(exc))
+            return False
 
     async def _verify_code_contract(
         self, project_id: str, task_id: str,
