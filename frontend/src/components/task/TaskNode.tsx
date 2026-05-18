@@ -267,7 +267,7 @@ function TaskNode({
   );
 }
 
-function IconBtn({
+export function IconBtn({
   title,
   disabled,
   onClick,

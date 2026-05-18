@@ -4,7 +4,7 @@ import type { Task } from "../../queries/useProjectQuery";
 import { useCrews, type CrewSequenceStep } from "../../queries/useTeamQuery";
 import { useEvent } from "../../hooks/useEvent";
 import { apiFetch } from "../../net/api";
-import TaskNode, { STATUS_DOT, type TaskAction } from "./TaskNode";
+import TaskNode, { STATUS_DOT, IconBtn, type TaskAction } from "./TaskNode";
 import SubAgentCard, { type SubStepStatus, type SubStepAction } from "./SubAgentCard";
 import ContractCheckCard from "./ContractCheckCard";
 
@@ -292,6 +292,13 @@ function CanvasCrewNode({ data, selected }: NodeProps) {
   // because this ternary only covered the five "happy path" states).
   const dotColor = STATUS_DOT[task.status] ?? STATUS_DOT.pending;
 
+  // Enable rules for the inline action row in expanded mode. Mirror
+  // TaskNode's local logic verbatim so behaviour stays consistent
+  // between collapsed and expanded views.
+  const isFailureState = ["failed", "validation_failed", "aborted"].includes(task.status);
+  const canRetry = isFailureState || (task.status === "done" && !projectRunning);
+  const canChat = ["failed", "validation_failed", "blocked"].includes(task.status);
+
   return (
     <div className={"relative " + haloClass}>
       <Handle
@@ -353,19 +360,76 @@ function CanvasCrewNode({ data, selected }: NodeProps) {
               Crew
             </span>
           </div>
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              handleToggle();
-            }}
-            title="收起 Crew"
-            className="canvas-crew-toggle flex h-4 w-4 shrink-0 items-center justify-center rounded transition-colors"
-            style={{ color: "var(--color-ink-faint)" }}
+          {/* Action buttons — mirror TaskNode's retry/IO/edit/view-
+              failure trio so the user doesn't lose access to "retry
+              outer task" when the Crew is expanded. The collapse
+              triangle is the rightmost item in this row. canRetry /
+              canChat conditions match TaskNode (failure states + done-
+              while-paused). 2026-05-19 fix per user report: "Crew
+              卡片出问题时，外层卡片也应可以重试". */}
+          <div
+            className="flex shrink-0 items-center gap-0.5"
+            onClick={(e) => e.stopPropagation()}
+            role="presentation"
           >
-            <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
-              <polygon points="8,1 1,5 8,9" />
-            </svg>
-          </button>
+            <IconBtn
+              title="编辑"
+              onClick={() => onAction({ kind: "edit", task })}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+              </svg>
+            </IconBtn>
+            <IconBtn
+              title="重试"
+              disabled={!canRetry}
+              onClick={() => onAction({ kind: "retry", task })}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="23 4 23 10 17 10" />
+                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+              </svg>
+            </IconBtn>
+            <IconBtn
+              title="查看失败原因"
+              disabled={!canChat}
+              onClick={() => onAction({ kind: "view_failure_reason", task })}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M9 2h6a1 1 0 0 1 1 1v2H8V3a1 1 0 0 1 1-1z" />
+                <rect x="5" y="4" width="14" height="18" rx="2" />
+                <line x1="9" y1="11" x2="15" y2="11" />
+                <line x1="9" y1="15" x2="15" y2="15" />
+              </svg>
+            </IconBtn>
+            <IconBtn
+              title="查看输出"
+              onClick={() => onAction({ kind: "view_io", task, direction: "out" })}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <polyline points="14 2 14 8 20 8" />
+              </svg>
+            </IconBtn>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                handleToggle();
+              }}
+              title="收起 Crew"
+              className="canvas-crew-toggle ml-1 flex h-4 w-4 shrink-0 items-center justify-center rounded transition-colors"
+              style={{ color: "var(--color-ink-faint)" }}
+            >
+              <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
+                <polygon points="8,1 1,5 8,9" />
+              </svg>
+            </button>
+          </div>
         </div>
 
         {/* Sub-cards in a row. The contract check (V5 Stage B) is
