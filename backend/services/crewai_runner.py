@@ -143,6 +143,17 @@ def _build_crewai_llm(
     kwargs: dict[str, Any] = {
         "model": model_string,
         "api_key": provider.get("api_key_ref") or None,
+        # 2026-05-19 incident: CrewAI 1.14 puts "deepseek" / "ollama" /
+        # "hosted_vllm" / "dashscope" / "openrouter" in its
+        # SUPPORTED_NATIVE_PROVIDERS list — when matched, it uses a
+        # native adapter that fails to round-trip OpenAI-style tool
+        # calling for some of those providers (deepseek confirmed: tool
+        # calls leak as DSML markup in message.content, captured=null).
+        # LiteLLM handles all of them correctly. Forcing is_litellm=True
+        # routes through the LiteLLM fallback path regardless of
+        # provider — at the cost of a possibly slightly slower init,
+        # which is irrelevant for an LLM call that takes seconds.
+        "is_litellm": True,
     }
     base_url = provider.get("base_url")
     if base_url:
