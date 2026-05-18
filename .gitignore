@@ -68,3 +68,8 @@ backend/mycrew.db-shm
 # 测试产物
 /tests/playwright-report/
 /tests/test-results/
+
+# Stress-test script run outputs (regenerated each run)
+backend/scripts/stress_test_*_report.json
+backend/scripts/_forensic_*.py
+backend/scripts/_forensic_*.txt
