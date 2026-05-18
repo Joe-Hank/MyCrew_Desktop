@@ -23,6 +23,14 @@ dependencies = [
     # code_contract AST validator (replaces regex substring match)
     "tree-sitter>=0.23,<0.24",
     "tree-sitter-c-sharp>=0.23,<0.24",
+    # CrewAI 1.14.4 falls back to its native LLM path without litellm,
+    # which doesn't correctly handle deepseek (and several other
+    # non-OpenAI providers) tool calling protocol — tools leak as
+    # DSML-format text in content instead of structured tool_calls.
+    # See 2026-05-19 incident analysis: project_633b6172d873 stalled
+    # because every Crew step's tool calls returned as raw DSML
+    # markup and emit_output never fired.
+    "litellm>=1.85.0",
 ]
 
 [project.optional-dependencies]
