@@ -1,5 +1,25 @@
-"""Simple sequential driver for the capacity test — bypasses amain's
-asyncio.Semaphore/gather (which was hanging) and just loops trials."""
+"""Sequential driver for the contract capacity stress test.
+
+Reuses `_run_trial` / `_format_table` from stress_test_contract_capacity
+but drives trials with a plain `for` loop instead of that script's
+amain (which uses asyncio.Semaphore + asyncio.gather and was observed
+to wedge entirely when a single LLM call hung — e.g. on a reasoning
+model that fell into a long chain-of-thought past the gateway's
+90s timeout). The plain loop is robust: one stuck trial blocks just
+that trial; the script never enters an undebuggable global-deadlock.
+
+Side benefit: partial JSON save after each trial, so a crash mid-run
+doesn't lose data.
+
+Use this in preference to running stress_test_contract_capacity directly
+when --concurrency would otherwise be 1 anyway.
+
+Usage (from backend/ with venv active):
+
+    python -m scripts.stress_test_contract_capacity_driver \\
+        --llm-id prov_ee599ffe39ac:deepseek-v4-flash \\
+        --grid 5,10,20,30,50,80 --trials 5
+"""
 from __future__ import annotations
 
 import argparse
