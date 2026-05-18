@@ -373,7 +373,7 @@ def _print_summary(results: list[dict]) -> None:
 
 
 async def amain(args: argparse.Namespace) -> None:
-    llm_id = await _resolve_llm_id()
+    llm_id = args.llm_id or await _resolve_llm_id()
     print(f"Using LLM: {llm_id}")
     print(f"Running {args.runs} PM flows with concurrency={args.concurrency}…")
     print()
@@ -442,6 +442,11 @@ def main() -> None:
     parser.add_argument(
         "--keep-sessions", action="store_true",
         help="Don't delete the stress-test inception_session rows.",
+    )
+    parser.add_argument(
+        "--llm-id", type=str, default=None,
+        help="Override the LLM (format 'provider_id:model_name'). "
+             "Defaults to first priced model in DB.",
     )
     args = parser.parse_args()
     asyncio.run(amain(args))
