@@ -340,7 +340,8 @@ SEED_CREWS: list[dict] = [
                 "3) 同名 .meta 文件已生成；"
                 "4) **对每个图像文件调 verify_image_dimensions(file_path=<路径>, expected_width=task.output_schema.width, expected_height=task.output_schema.height)，返回 ok=false 直接 verdict=fail，issues 必须带实际 actual_width × actual_height 与契约尺寸的对比**。"
                 "**不参考 Head spec 作为补充验收**——尺寸 source of truth 是 task.output_schema。"
-                "调 emit_output(payload={'verdict': 'pass'|'fail', 'file_paths': [...], 'issues': [...], 'summary': '...'})。",
+                "**emit_output 的 payload 必须含 task.output_schema 里 required 列的全部字段**——本任务为 file_paths / width / height，缺一个 schema 校验就 fail。"
+                "调 emit_output(payload={'verdict': 'pass'|'fail', 'file_paths': [...], 'width': <契约值>, 'height': <契约值>, 'issues': [...], 'summary': '...'})。",
                 step_role="qa",
                 progress_template="验收 {n} 个 PNG",
             ),
@@ -474,15 +475,21 @@ SEED_CREWS: list[dict] = [
             ),
             _seq_step(
                 "Unity Developer",
-                "按 spec 用 Unity MCP（create_script / script_apply_edits / apply_text_edits）创建 .cs 文件到 task.output_paths。"
-                "代码要：(1) 含 spec 列的方法和签名 (2) 通过 validate_script 校验 (3) 在 Unity refresh 后无编译错误。"
-                "调 emit_output(payload={'file_paths': [...]}) 报告。",
+                "按 PM **code_contract**（runtime 注入在「## 🔴 代码契约」块）+ Head spec 用 Unity MCP（create_script / script_apply_edits / apply_text_edits）创建 .cs 文件到 task.output_paths。"
+                "**实现循环**（强制）："
+                "(1) 先 create_script 把每个 .cs 文件骨架建好；"
+                "(2) 用 script_apply_edits / apply_text_edits 把契约里的每个 signature 都实现进去，禁止 `// TODO` 占位、禁止 method body 留空、禁止漏写 event/property/method 任一种；"
+                "(3) **逐条 find_in_file 自审**：对契约里列的每个 signature，调 find_in_file(path, signature) 验证字面存在；缺哪个回 (2) 补哪个；"
+                "(4) 全部覆盖 + validate_script 通过 + Unity refresh 无编译错误，再 emit_output(payload={'file_paths': [...], 'coverage': {'<path>': <count>, ...}}) 报告。"
+                "**如果你因 max_iter 提前停手 → 当前未覆盖的签名留给 QA 报 fail，整个 task 失败、下游阻塞**。",
                 step_role="executor",
                 progress_template="写脚本 ({count}/{total})",
             ),
             _seq_step(
                 "QA Engineer",
-                "对照 PM 契约：1) 每个 .cs 文件存在且包含 spec 要求的方法签名（find_in_file 或 read_file_local）；2) validate_script 通过；3) .meta 已生成。"
+                "对照 PM **code_contract**（runtime 注入）+ 文件存在性 双重验收："
+                "1) 每个 .cs 文件存在 + .meta 齐全 + validate_script 通过；"
+                "2) **对契约里列的每个 signature 调 find_in_file(path, signature)**，缺一个即 verdict='fail'，issues 必须列具体缺失符号（让 Debugger 能定位）。"
                 "调 emit_output(payload={'verdict': ..., 'file_paths': [...], 'issues': [...]})。",
                 step_role="qa",
                 progress_template="验收 {n} 个 .cs",
@@ -527,7 +534,8 @@ SEED_CREWS: list[dict] = [
                 "2) 图片 reference 解析 OK；"
                 "3) .meta 齐全；"
                 "4) **每个 UI 图片调 verify_image_dimensions(file_path=..., expected_width=task.output_schema.width, expected_height=task.output_schema.height)，ok=false → verdict=fail，issues 带实际 actual_w × actual_h**。"
-                "调 emit_output(payload={'verdict': ..., 'file_paths': [...], 'issues': [...]})。",
+                "**emit_output 的 payload 必须含 task.output_schema.required 全部字段（任务含图像 → 必带 width/height）**。"
+                "调 emit_output(payload={'verdict': ..., 'file_paths': [...], 'width': <如有>, 'height': <如有>, 'issues': [...]})。",
                 step_role="qa",
                 progress_template="验收 UI prefab",
             ),

@@ -1128,6 +1128,22 @@ class WorkflowService:
         parent_output_schema = task_input.output_schema or {}
         parent_output_paths = _extract_output_paths(parent_output_schema, task_input.detail or "")
 
+        # 2026-05-18: load PM-level code_contract so Crew steps can see
+        # the exact public symbols they must implement. Without this the
+        # contract was invisible to the Executor agent and only enforced
+        # post-Crew by _verify_code_contract — agents routinely missed
+        # 3-5 signatures out of 12+ because they couldn't see the list.
+        task_row = await crud.get_by_id("tasks", task_id) or {}
+        parent_code_contract: dict | None = None
+        cc_raw = task_row.get("code_contract")
+        if cc_raw:
+            try:
+                parent_code_contract = (
+                    cc_raw if isinstance(cc_raw, dict) else json.loads(cc_raw)
+                )
+            except (json.JSONDecodeError, TypeError):
+                parent_code_contract = None
+
         sub_dir = OUTPUT_DIR / project_id / task_id / "sub"
         sub_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1171,6 +1187,7 @@ class WorkflowService:
                     parent_task_detail=task_input.detail or "",
                     parent_output_schema=parent_output_schema,
                     parent_output_paths=parent_output_paths,
+                    parent_code_contract=parent_code_contract,
                     upstream_outputs=task_input.upstream_outputs or {},
                     prev_step_payload=prev_payload,
                     provider_id=provider_id,

@@ -619,6 +619,7 @@ async def run_crew_step_with_crewai(
     parent_task_detail: str,
     parent_output_schema: dict,
     parent_output_paths: list[str],
+    parent_code_contract: dict | None,
     upstream_outputs: dict,
     prev_step_payload: dict | None,
     provider_id: str,
@@ -705,6 +706,72 @@ async def run_crew_step_with_crewai(
         f"- output_paths（必产）：{json.dumps(parent_output_paths or [], ensure_ascii=False)}",
         f"- output_schema：```json\n{json.dumps(parent_output_schema or {}, ensure_ascii=False, indent=2)}\n```",
     ]
+
+    # 2026-05-18: Inject the PM-level code_contract so Executors know the
+    # exact public symbols they must implement. Previously contract was
+    # only checked post-Crew in workflow_svc._verify_code_contract — the
+    # agent never saw it, so it implemented from Head spec alone and
+    # routinely missed 3-5 signatures out of 12+. With the contract in
+    # view, the agent has a precise checklist + can self-audit via
+    # find_in_file before emit_output.
+    if parent_code_contract:
+        files = parent_code_contract.get("files") or []
+        total_exports = sum(len(f.get("exports") or []) for f in files)
+        if total_exports > 0:
+            contract_lines: list[str] = [
+                "",
+                "## 🔴 代码契约（PM 已钉死，逐条实现 + 自审）",
+                (
+                    f"本 task 共有 **{total_exports} 个 public 符号必须出现在产出的 "
+                    f".cs 文件中**，缺一个 → task 整体 validation_failed → "
+                    "下游 task 阻塞。逐条核对，不要 // TODO 占位，不要"
+                    "因 max_iter / max_tokens 提前停。"
+                ),
+            ]
+            ns = parent_code_contract.get("namespace")
+            if ns:
+                contract_lines.append(f"- 推荐 namespace：`{ns}`（统一用这个）")
+            for f in files:
+                path = f.get("path") or "(unknown)"
+                exports = f.get("exports") or []
+                contract_lines.append(f"")
+                contract_lines.append(
+                    f"### `{path}` — {len(exports)} 个符号"
+                )
+                for e in exports:
+                    kind = e.get("kind") or "?"
+                    sig = e.get("signature") or ""
+                    contract_lines.append(f"  - `[{kind}]` {sig}")
+            imports = parent_code_contract.get("imports") or []
+            if imports:
+                contract_lines.append("")
+                contract_lines.append(
+                    "### 上游引用（你需要 using / using static 才能跨文件调用）"
+                )
+                for imp in imports:
+                    uses = imp.get("uses") or []
+                    contract_lines.append(
+                        f"  - 来自 task_index={imp.get('from_task_index')}：{', '.join(uses)}"
+                    )
+            if step_role == "executor":
+                contract_lines += [
+                    "",
+                    "### 执行步骤要求",
+                    "1. 用 create_script / script_apply_edits 落 .cs 文件",
+                    "2. **emit_output 之前**，对每个 .cs 文件用 find_in_file "
+                    "把上面列的每条 signature 字符串都 grep 一遍",
+                    "3. 任一 signature 缺失 → 用 script_apply_edits / "
+                    "apply_text_edits 补上，再回第 2 步",
+                    "4. 全部覆盖才 emit_output",
+                ]
+            elif step_role == "qa":
+                contract_lines += [
+                    "",
+                    "### QA 步骤要求",
+                    "对契约里每个 signature 调 find_in_file 验证。"
+                    "缺一即 verdict='fail'，issues 必须列出具体缺失的符号。",
+                ]
+            desc_parts += contract_lines
     # 2026-05-17 Plan D fallback: when PM Phase 4 lost the output_paths
     # (legacy data from before the project_svc INSERT fix, or a Phase 4
     # LLM that came up empty), the Executor will read "[]" and exit
