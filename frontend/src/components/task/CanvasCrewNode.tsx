@@ -183,13 +183,20 @@ function CanvasCrewNode({ data, selected }: NodeProps) {
 
   // Width broadcast — fire whenever expanded toggles. CanvasBlueprint
   // uses this to shift downstream nodes (Q-design "B 自动平移下游").
-  // The contract card counts as a regular-width sub-card when present.
+  // The contract card counts as a regular-width sub-card whenever it
+  // *renders* — and per the displayContract logic in the JSX below,
+  // it renders for ANY task whose code_contract is non-null (pending
+  // placeholder pre-run, real status post-run). Previously this
+  // counted only `contractStep` (the realised state) so a pending
+  // task's downstream nodes got shoved short by SUB_CARD_WIDTH +
+  // SUB_CARD_GAP px — visible misalignment.
+  const hasContractCard = !!(contractStep || task.code_contract);
   const handleToggle = useCallback(() => {
     const next = !expanded;
     setExpanded(next);
     if (d.onWidthChange) {
       if (next) {
-        const visibleCount = sequence.length + (contractStep ? 1 : 0);
+        const visibleCount = sequence.length + (hasContractCard ? 1 : 0);
         const expandedWidth =
           EXPANDED_PADDING_X * 2
           + visibleCount * SUB_CARD_WIDTH
@@ -199,7 +206,7 @@ function CanvasCrewNode({ data, selected }: NodeProps) {
         d.onWidthChange(task.id, 0);
       }
     }
-  }, [expanded, d, sequence.length, contractStep, task.id]);
+  }, [expanded, d, sequence.length, hasContractCard, task.id]);
 
   // Halo class derived from the parent task's status — promoted to the
   // outermost wrapper (rather than the inner TaskNode) so the box-shadow
