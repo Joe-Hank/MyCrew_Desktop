@@ -24,14 +24,20 @@ export function isScaffoldableTemplate(templateId: string | null | undefined): b
 /** Best-effort slug derivation from the project's display name.
  *  - ASCII-safe names (`PacMan`, `Goldminer_2`) → used as-is, trimmed
  *    to 64 chars.
- *  - Chinese / mixed names → empty string; the user is expected to
- *    type the English equivalent in the modal.
- *  - Names whose first char isn't alphanumeric (`_foo`, `-bar`) →
- *    empty, since the backend rejects those.
+ *  - Chinese / mixed names → fall back to `MyCrewProject_<6 hex>` derived
+ *    from the project id so the user can hit 「开始构建」 immediately.
+ *  - Names whose first char isn't alphanumeric (`_foo`, `-bar`) → same
+ *    fallback, since the backend rejects those.
  *
  *  Mirrors backend's _SAFE_NAME_RE in template_cloner_svc.py. */
-export function deriveSlugFromName(name: string): string {
+export function deriveSlugFromName(name: string, fallbackProjectId?: string): string {
   const cleaned = name.replace(/[^A-Za-z0-9_-]/g, "");
-  if (!cleaned) return "";
-  return /^[A-Za-z0-9]/.test(cleaned) ? cleaned.slice(0, 64) : "";
+  if (cleaned && /^[A-Za-z0-9]/.test(cleaned)) {
+    return cleaned.slice(0, 64);
+  }
+  if (fallbackProjectId) {
+    const hex = fallbackProjectId.replace(/[^A-Za-z0-9]/g, "");
+    return `MyCrewProject_${hex.slice(-6) || "new"}`;
+  }
+  return "";
 }

@@ -8,6 +8,7 @@ import {
   useRequiredMcps,
   useScaffoldAudit,
   useRepairScaffold,
+  useResetProject,
   type RequiredMcp,
 } from "../../queries/useWorkflowQuery";
 import {
@@ -46,6 +47,16 @@ interface Props {
   selectedTask: Task | null;
 }
 
+/** Whitelist of project ids on which the「初始化」button is rendered.
+ *  These are dedicated debug projects (created via
+ *  `backend/scripts/seed_comfyui_debug_project.py` etc.) where each
+ *  iteration of a Crew tweak needs a clean workspace. Production
+ *  projects intentionally don't get this button so a misclick can't
+ *  nuke user data. */
+const DEBUG_RESET_PROJECT_IDS: ReadonlySet<string> = new Set([
+  "proj_0ec49ea61363",  // ComfyUI 调试 · Butcher 三张图
+]);
+
 function PlayIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
@@ -67,8 +78,47 @@ function TaskHeader({ project, selectedTask }: Props) {
   const start = useStartProject();
   const pause = usePauseProject();
   const resume = useResumeProject();
+  const reset = useResetProject();
   const confirm = useDismissibleConfirm();
   const connectMcp = useConnectMcpServer();
+  const canDebugReset = DEBUG_RESET_PROJECT_IDS.has(project.id);
+
+  const handleReset = useCallback(async () => {
+    const result = await confirm({
+      dialogId: `debug_reset.${project.id}`,
+      title: `初始化「${project.name}」？`,
+      body: (
+        <>
+          <p>把项目回到初始状态，方便重跑 Crew 调试。会做：</p>
+          <ul className="mt-2 list-disc pl-5 text-xs"
+              style={{ color: "var(--color-ink-faint)" }}>
+            <li>所有任务 status → pending；清掉错误/时间戳/分析</li>
+            <li>MyCrew 输出目录（含每步 sub/ IO）整目录删除</li>
+            <li>任务声明过的产物文件（含 .meta）从 root_path 删除</li>
+            <li>后端内存里的 harness/runner/output cache 全部丢弃</li>
+          </ul>
+          <p className="mt-2 text-xs" style={{ color: "var(--color-warn-500, #b45309)" }}>
+            仅对该调试项目可见，操作不可撤销。
+          </p>
+        </>
+      ),
+      options: [
+        { value: "ok", label: "确认初始化", primary: true },
+        { value: "cancel", label: "取消", tone: "subtle" },
+      ],
+      allowDismiss: false,
+    });
+    if (!result.choice || result.choice === "cancel") return;
+    try {
+      await reset.mutateAsync({
+        projectId: project.id,
+        deleteOutputFiles: true,
+      });
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : String(err);
+      alert(`初始化失败：${msg}`);
+    }
+  }, [confirm, project.id, project.name, reset]);
 
   // ── V5+ scaffold UI state (2026-05-17 redesign) ────────────────
   // The "config" modal moved to ProjectCard. TaskHeader now only owns:
@@ -360,6 +410,31 @@ function TaskHeader({ project, selectedTask }: Props) {
     // No ml-auto / no flex-1 spacer — buttons stay tight against the
     // title block instead of getting pushed to the far right.
     <div className="flex items-center gap-3 px-5 pt-3 pb-2">
+      {/* Debug-only initialise button — sits at the very head of the
+          header cluster, before the task title. Hidden for every
+          project not in DEBUG_RESET_PROJECT_IDS. */}
+      {canDebugReset && (
+        <button
+          onClick={handleReset}
+          disabled={reset.isPending}
+          title="把这个调试项目回到初始状态（清 DB + sub/ + 产物文件）"
+          className="flex h-7 items-center gap-1 rounded-md border px-2 text-[11px] font-medium transition-colors disabled:opacity-50"
+          style={{
+            borderColor: "var(--color-border-soft)",
+            color: "var(--color-ink-muted)",
+            backgroundColor: "var(--color-surface-alt)",
+          }}
+        >
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" strokeWidth="2"
+            strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="23 4 23 10 17 10" />
+            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+          </svg>
+          {reset.isPending ? "初始化中…" : "初始化"}
+        </button>
+      )}
+
       {selectedTask ? (
         <h1
           className="truncate text-base font-semibold"

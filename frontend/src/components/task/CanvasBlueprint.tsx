@@ -20,6 +20,7 @@ import {
 } from "../../queries/useWorkflowQuery";
 import { useThemeStore } from "../../stores/useThemeStore";
 import { buildDepMap, wouldCreateCycle } from "../../lib/depCycle";
+import { topoOrder } from "../../lib/topoOrder";
 import CanvasTaskNode, { type CanvasTaskNodeData } from "./CanvasTaskNode";
 import CanvasCrewNode, { type CanvasCrewNodeData } from "./CanvasCrewNode";
 import type { TaskAction } from "./TaskNode";
@@ -129,14 +130,50 @@ function CanvasBlueprint({
   const deleteTask = useDeleteTask();
   const [menu, setMenu] = useState<Menu>(null);
 
+  // Crew v5: split tasks into top-level (rendered on the main canvas)
+  // and fan-out children (rendered *inside* their parent Crew node).
+  // Children carry parent_task_id pointing at the synthetic crew_group
+  // parent; they have no individual presence on the top-level grid.
+  // Keep them in a sibling lookup so CanvasCrewNode can pull its row
+  // without re-fetching.
+  const topLevelTasks = useMemo(
+    () => tasks.filter((t) => !t.parent_task_id),
+    [tasks],
+  );
+  const childrenByParent = useMemo(() => {
+    const map = new Map<string, Task[]>();
+    for (const t of tasks) {
+      if (!t.parent_task_id) continue;
+      const list = map.get(t.parent_task_id) ?? [];
+      list.push(t);
+      map.set(t.parent_task_id, list);
+    }
+    // Stable ordering by parent_step_index then id so the row doesn't
+    // shuffle on WS refresh.
+    for (const list of map.values()) {
+      list.sort((a, b) => {
+        const ai = a.parent_step_index ?? 0;
+        const bi = b.parent_step_index ?? 0;
+        if (ai !== bi) return ai - bi;
+        return a.id.localeCompare(b.id);
+      });
+    }
+    return map;
+  }, [tasks]);
+
   // Compute auto-layout once per task-list change; per-task persisted
-  // position overrides it when present.
-  const autoLayout = useMemo(() => computeAutoLayout(tasks), [tasks]);
+  // position overrides it when present. Children are excluded from the
+  // top-level layout — they live inside their parent's expanded shell.
+  const autoLayout = useMemo(() => computeAutoLayout(topLevelTasks), [topLevelTasks]);
+  // "Task N" label = topological wave position, NOT DB insertion order.
+  // The setup task always has deps=[] so it lands at wave-0 / Task1.
+  // Before this, the displayed index came from the API's DB row order —
+  // which on retried/rebuilt projects could put setup mid-list.
   const indexById = useMemo(() => {
     const m = new Map<string, number>();
-    tasks.forEach((t, i) => m.set(t.id, i));
+    topoOrder(topLevelTasks).forEach((t, i) => m.set(t.id, i));
     return m;
-  }, [tasks]);
+  }, [topLevelTasks]);
 
   // Per-task width delta from CanvasCrewNode expanding. Used to push
   // downstream nodes to the right so the expanded Crew doesn't collide
@@ -144,6 +181,19 @@ function CanvasBlueprint({
   const [expandedDeltas, setExpandedDeltas] = useState<Map<string, number>>(new Map());
   const handleCrewWidthChange = useCallback((taskId: string, delta: number) => {
     setExpandedDeltas((prev) => {
+      const next = new Map(prev);
+      if (delta <= 0) next.delete(taskId);
+      else next.set(taskId, delta);
+      return next;
+    });
+  }, []);
+  // Per-task height delta from a Crew's parallel-children row being
+  // expanded. Same shape as expandedDeltas but applied on the Y axis to
+  // cards BELOW the Crew on the same column. V5 spec 4: "展开并行卡片
+  // 时，由于多了一层卡片导致整体高度变化，因此下方的卡片需要移动".
+  const [expandedHeights, setExpandedHeights] = useState<Map<string, number>>(new Map());
+  const handleCrewHeightChange = useCallback((taskId: string, delta: number) => {
+    setExpandedHeights((prev) => {
       const next = new Map(prev);
       if (delta <= 0) next.delete(taskId);
       else next.set(taskId, delta);
@@ -161,6 +211,7 @@ function CanvasBlueprint({
   // *below* the expanded crew (same column, next row) just because it
   // happened to depend on something upstream of the crew. Confusing.
   const ROW_TOLERANCE = 100;  // half ROW_H (=290) — anything within is "same row"
+  const COL_TOLERANCE = 140;  // ~half COL_W (=380) — "same column" for height stacking
   const offsetFor = useCallback(
     (task: Task): number => {
       if (expandedDeltas.size === 0) return 0;
@@ -169,7 +220,7 @@ function CanvasBlueprint({
       const taskY = task.position_y ?? taskAuto.y;
       let total = 0;
       for (const [crewId, delta] of expandedDeltas) {
-        const crew = tasks.find((t) => t.id === crewId);
+        const crew = topLevelTasks.find((t) => t.id === crewId);
         if (!crew) continue;
         const crewAuto = autoLayout.get(crewId) ?? { x: 40, y: 40 };
         const crewX = crew.position_x ?? crewAuto.x;
@@ -180,18 +231,45 @@ function CanvasBlueprint({
       }
       return total;
     },
-    [tasks, expandedDeltas, autoLayout],
+    [topLevelTasks, expandedDeltas, autoLayout],
+  );
+  // Vertical equivalent of offsetFor — sum the heights of every Crew
+  // whose parallel-children row is currently expanded and which sits
+  // ABOVE this task on (roughly) the same column. Geometric and
+  // symmetrical with the horizontal offset.
+  const offsetYFor = useCallback(
+    (task: Task): number => {
+      if (expandedHeights.size === 0) return 0;
+      const taskAuto = autoLayout.get(task.id) ?? { x: 40, y: 40 };
+      const taskX = task.position_x ?? taskAuto.x;
+      const taskY = task.position_y ?? taskAuto.y;
+      let total = 0;
+      for (const [crewId, delta] of expandedHeights) {
+        const crew = topLevelTasks.find((t) => t.id === crewId);
+        if (!crew) continue;
+        if (crew.id === task.id) continue;  // self
+        const crewAuto = autoLayout.get(crewId) ?? { x: 40, y: 40 };
+        const crewX = crew.position_x ?? crewAuto.x;
+        const crewY = crew.position_y ?? crewAuto.y;
+        if (crewY >= taskY) continue;  // not above → unaffected
+        if (Math.abs(crewX - taskX) > COL_TOLERANCE) continue;  // different column
+        total += delta;
+      }
+      return total;
+    },
+    [topLevelTasks, expandedHeights, autoLayout],
   );
 
   // Build ReactFlow nodes from tasks. Memoised on tasks + the auxiliary
   // callbacks that the custom node needs.
   const initialNodes: Node[] = useMemo(
     () =>
-      tasks.map((t) => {
+      topLevelTasks.map((t) => {
         const auto = autoLayout.get(t.id) ?? { x: 40, y: 40 };
         const baseX = t.position_x ?? auto.x;
-        const y = t.position_y ?? auto.y;
+        const baseY = t.position_y ?? auto.y;
         const x = baseX + offsetFor(t);
+        const y = baseY + offsetYFor(t);
         const isCrew = t.performer_kind === "crew";
         if (isCrew) {
           return {
@@ -206,6 +284,9 @@ function CanvasBlueprint({
               onAction,
               onSubStepAction: onSubStepAction ?? (() => {}),
               onWidthChange: handleCrewWidthChange,
+              onHeightChange: handleCrewHeightChange,
+              children: childrenByParent.get(t.id) ?? [],
+              selectedTaskId,
             } satisfies CanvasCrewNodeData,
             selected: t.id === selectedTaskId,
           };
@@ -225,9 +306,9 @@ function CanvasBlueprint({
         };
       }),
     [
-      tasks, autoLayout, indexById, projectRunning,
+      topLevelTasks, childrenByParent, autoLayout, indexById, projectRunning,
       onSelect, onAction, onSubStepAction, selectedTaskId,
-      offsetFor, handleCrewWidthChange,
+      offsetFor, offsetYFor, handleCrewWidthChange, handleCrewHeightChange,
     ],
   );
 
@@ -235,23 +316,31 @@ function CanvasBlueprint({
   // task status changes (so `animated` on the inbound edge can flip). It
   // does NOT change when a card position is dragged → initialEdges stays
   // reference-stable across drags → React Flow doesn't re-mount paths.
-  const tasksRef = useRef(tasks);
-  tasksRef.current = tasks;
-  const depsKey = useMemo(() => computeDepsKey(tasks), [tasks]);
+  // Children's deps don't render as top-level edges (their only dep is
+  // their parent, which is already the visual hierarchy).
+  const tasksRef = useRef(topLevelTasks);
+  tasksRef.current = topLevelTasks;
+  const depsKey = useMemo(() => computeDepsKey(topLevelTasks), [topLevelTasks]);
   const initialEdges: Edge[] = useMemo(
     () => {
       const list = tasksRef.current;
+      // Only edges between top-level tasks (both source AND target must
+      // be top-level). Children's deps point at the parent — those live
+      // inside the parent's expanded shell, not on the main grid.
+      const topLevelIds = new Set(list.map((t) => t.id));
       return list.flatMap((t) =>
-        (t.deps ?? []).map<Edge>((depId) => ({
-          id: `e_${depId}_${t.id}`,
-          source: depId,
-          target: t.id,
-          // Bezier curve (default) is the closest visual match to the
-          // previous SVG layer's `C ... C ...` paths.
-          type: "default",
-          animated: t.status === "running",
-          style: t.status === "running" ? EDGE_STYLE_ANIMATED : EDGE_STYLE,
-        })),
+        (t.deps ?? [])
+          .filter((depId) => topLevelIds.has(depId))
+          .map<Edge>((depId) => ({
+            id: `e_${depId}_${t.id}`,
+            source: depId,
+            target: t.id,
+            // Bezier curve (default) is the closest visual match to the
+            // previous SVG layer's `C ... C ...` paths.
+            type: "default",
+            animated: t.status === "running",
+            style: t.status === "running" ? EDGE_STYLE_ANIMATED : EDGE_STYLE,
+          })),
       );
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -276,11 +365,13 @@ function CanvasBlueprint({
   // pick up `fresh.position` so downstream tasks reflow. Otherwise we
   // preserve existing `existing.position` (= the user's drag) so the
   // canvas doesn't snap cards back after each WS refresh.
-  const expandedKey = useMemo(
-    () => Array.from(expandedDeltas.entries())
-      .map(([k, v]) => `${k}:${v}`).sort().join(","),
-    [expandedDeltas],
-  );
+  const expandedKey = useMemo(() => {
+    const widthParts = Array.from(expandedDeltas.entries())
+      .map(([k, v]) => `w${k}:${v}`).sort();
+    const heightParts = Array.from(expandedHeights.entries())
+      .map(([k, v]) => `h${k}:${v}`).sort();
+    return [...widthParts, ...heightParts].join(",");
+  }, [expandedDeltas, expandedHeights]);
   useEffect(() => {
     setNodes((current) => {
       const currentById = new Map(current.map((n) => [n.id, n]));
@@ -323,18 +414,20 @@ function CanvasBlueprint({
           // Persist the canonical position (no Crew-expand offset).
           // When the Crew collapses later, the stored coordinate should
           // sit at its natural slot; the offset is purely a render-time
-          // transform.
-          const t = tasks.find((task) => task.id === c.id);
-          const off = t ? offsetFor(t) : 0;
+          // transform — applied on BOTH axes (width offset for the X
+          // shift, height offset for the parallel-children Y shift).
+          const t = topLevelTasks.find((task) => task.id === c.id);
+          const offX = t ? offsetFor(t) : 0;
+          const offY = t ? offsetYFor(t) : 0;
           updateTask.mutate({
             taskId: c.id,
-            position_x: c.position.x - off,
-            position_y: c.position.y,
+            position_x: c.position.x - offX,
+            position_y: c.position.y - offY,
           });
         }
       }
     },
-    [onNodesChangeBase, projectRunning, updateTask, tasks, offsetFor],
+    [onNodesChangeBase, projectRunning, updateTask, topLevelTasks, offsetFor, offsetYFor],
   );
 
   // Persist edge deletions (Del key on selected edge → onEdgesChange with
@@ -348,14 +441,14 @@ function CanvasBlueprint({
           // Look up the just-removed edge before state catches up.
           const removed = edges.find((e) => e.id === c.id);
           if (!removed) continue;
-          const target = tasks.find((t) => t.id === removed.target);
+          const target = topLevelTasks.find((t) => t.id === removed.target);
           if (!target) continue;
           const nextDeps = (target.deps ?? []).filter((d) => d !== removed.source);
           updateTask.mutate({ taskId: target.id, deps: nextDeps });
         }
       }
     },
-    [onEdgesChangeBase, projectRunning, edges, tasks, updateTask],
+    [onEdgesChangeBase, projectRunning, edges, topLevelTasks, updateTask],
   );
 
   // Manual connect (drag from source handle to target handle). Validates
@@ -365,29 +458,29 @@ function CanvasBlueprint({
     (conn: Connection) => {
       if (!conn.source || !conn.target) return;
       if (conn.source === conn.target) return;
-      const depMap = buildDepMap(tasks);
+      const depMap = buildDepMap(topLevelTasks);
       if (wouldCreateCycle(conn.source, conn.target, depMap)) {
         // eslint-disable-next-line no-console
         console.warn("canvas.connect_rejected_cycle", conn);
         return;
       }
-      const target = tasks.find((t) => t.id === conn.target);
+      const target = topLevelTasks.find((t) => t.id === conn.target);
       if (!target) return;
       if ((target.deps ?? []).includes(conn.source)) return; // already linked
       const nextDeps = [...(target.deps ?? []), conn.source];
       setEdges((eds) => addEdge({ ...conn, id: `e_${conn.source}_${conn.target}` }, eds));
       updateTask.mutate({ taskId: target.id, deps: nextDeps });
     },
-    [tasks, setEdges, updateTask],
+    [topLevelTasks, setEdges, updateTask],
   );
 
   const isValidConnection = useCallback(
     (conn: Connection | Edge) => {
       if (!conn.source || !conn.target) return false;
       if (conn.source === conn.target) return false;
-      return !wouldCreateCycle(conn.source, conn.target, buildDepMap(tasks));
+      return !wouldCreateCycle(conn.source, conn.target, buildDepMap(topLevelTasks));
     },
-    [tasks],
+    [topLevelTasks],
   );
 
   // Right-click on empty pane → "新建任务" menu. Right-click on a node →
@@ -414,11 +507,11 @@ function CanvasBlueprint({
     (event: React.MouseEvent, node: Node) => {
       event.preventDefault();
       if (projectRunning) return;
-      const task = tasks.find((t) => t.id === node.id);
+      const task = topLevelTasks.find((t) => t.id === node.id);
       if (!task) return;
       setMenu({ kind: "node", task, clientX: event.clientX, clientY: event.clientY });
     },
-    [projectRunning, tasks],
+    [projectRunning, topLevelTasks],
   );
 
   const closeMenu = () => setMenu(null);
@@ -445,7 +538,7 @@ function CanvasBlueprint({
 
   // Empty-state hint (the old <Blueprint/> showed "暂无任务" centered; with
   // the canvas, the user needs to know they can right-click to create one).
-  if (tasks.length === 0) {
+  if (topLevelTasks.length === 0) {
     return (
       <div
         className="flex h-full flex-col items-center justify-center gap-2 text-sm"

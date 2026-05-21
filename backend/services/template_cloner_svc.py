@@ -76,6 +76,30 @@ TEMPLATE_ID_TO_DIR = {
     "unity_mr_core": "MRCore",
 }
 
+# Per-template required-MCP whitelist (2026-05-19).
+#
+# Replaces the broken `workflow_svc.required_mcps` derivation which
+# walked agent.tool_ids → mcp_servers.discovered_tools by NAME, but
+# MyCrew local tool names use `comfy_` / `figma_` / `git_` prefixes
+# while the raw MCP servers expose unprefixed names — every server
+# except Blender came out as "not needed", and Blender came out
+# "needed" for 2D projects (Technical Artist binds the unprefixed
+# `import_generated_asset`). Both were noise.
+#
+# Template-driven hardcode is the right level of abstraction: scaffold
+# kind tells us exactly which MCPs the project will use. Add new
+# templates here; don't try to infer from tools.
+#
+# Keys must match TEMPLATE_ID_TO_DIR. Values are mcp_server.name as
+# stored in the `mcp_servers` table (seeded by seed_mcp_servers.py /
+# bootstrap).
+TEMPLATE_REQUIRED_MCPS: dict[str, set[str]] = {
+    "unity_universal_2d": {"unity", "comfyui"},
+    "unity_universal_3d": {"unity", "comfyui", "blender"},
+    "unity_ar_mobile":    {"unity", "comfyui", "blender"},
+    "unity_mr_core":      {"unity", "comfyui", "blender"},
+}
+
 # Allowed filesystem-friendly chars in the project's English name.
 # Hyphen / underscore OK; spaces and CJK rejected (Unity tolerates
 # spaces but git + many tools choke). User picks the english name in
@@ -462,6 +486,7 @@ def audit_against_skeleton(project_root: Path) -> list[str]:
 __all__ = [
     "TEMPLATE_REPO_URL",
     "TEMPLATE_ID_TO_DIR",
+    "TEMPLATE_REQUIRED_MCPS",
     "ScaffoldError",
     "clone_template",
     "mark_scaffold_status",

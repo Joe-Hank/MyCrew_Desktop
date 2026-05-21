@@ -140,9 +140,10 @@ def _build_crewai_llm(
 
     ptype = (provider.get("type") or "openai").lower()
     model_string = _build_litellm_model_string(ptype, model_name)
+    api_key = provider.get("api_key_ref") or None
     kwargs: dict[str, Any] = {
         "model": model_string,
-        "api_key": provider.get("api_key_ref") or None,
+        "api_key": api_key,
         # 2026-05-19 incident: CrewAI 1.14 puts "deepseek" / "ollama" /
         # "hosted_vllm" / "dashscope" / "openrouter" in its
         # SUPPORTED_NATIVE_PROVIDERS list — when matched, it uses a
@@ -158,6 +159,26 @@ def _build_crewai_llm(
     base_url = provider.get("base_url")
     if base_url:
         kwargs["base_url"] = base_url
+
+    # 2026-05-21 (Probe 1 finding): CrewAI 1.14's Converter / Instructor
+    # path calls LiteLLM through a code path that does NOT inherit the
+    # `api_key` kwarg from the `LLM(...)` instance — it relies on env
+    # vars. When Task(output_pydantic=Spec) triggers Converter, every
+    # internal LLM call fails with "Missing credentials" for dashscope /
+    # deepseek. Bridge api_key to the provider-specific env var that
+    # LiteLLM looks up. Safe: env is process-local; only set when api_key
+    # is non-empty; never clobbers an existing env value.
+    import os
+    if api_key:
+        env_keys = {
+            "qwen":      "DASHSCOPE_API_KEY",
+            "deepseek":  "DEEPSEEK_API_KEY",
+            "openai":    "OPENAI_API_KEY",
+            "anthropic": "ANTHROPIC_API_KEY",
+        }
+        ev = env_keys.get(ptype)
+        if ev and not os.environ.get(ev):
+            os.environ[ev] = api_key
     if temperature is not None:
         kwargs["temperature"] = float(temperature)
     if max_tokens is not None:
@@ -260,6 +281,9 @@ def _load_builtin_tools(tool_names: list[str], ctx: dict | None = None) -> list:
         from src.tools.builtin.local.verify_image_dimensions import (
             make_verify_image_dimensions_tool,
         )
+        from src.tools.builtin.local.verify_outputs import (
+            make_verify_outputs_tool,
+        )
         from src.tools.builtin.mcp_git.tools import make_git_tools
         # Unity MCP — pre-instantiated CrewStructuredTool instances
         from src.tools.builtin.unity import TOOL_MAP as UNITY_TOOL_MAP
@@ -324,18 +348,30 @@ def _load_builtin_tools(tool_names: list[str], ctx: dict | None = None) -> list:
         "mkdir": lambda: _get_workspace()["mkdir"],
         "read_file_local": lambda: _get_workspace()["read_file_local"],
         "list_directory_local": lambda: _get_workspace()["list_directory_local"],
-        # output capture
+        # output capture. `step_role` propagates so head steps (which
+        # only emit specs and don't have write tools) skip the on-disk
+        # path-existence check — see make_emit_output_tool docstring.
         "emit_output": lambda: make_emit_output_tool(
             ctx.get("task_id") or "",
             ctx.get("output_schema") or {},
             ctx.get("project_root"),
             ctx.get("output_paths") or None,
+            step_role=ctx.get("step_role"),
         ),
         # 8-bit audio synthesis (Audio Crew executor)
         "synth_8bit_sfx": lambda: make_synth_8bit_sfx_tool(ctx.get("project_root")),
         # Image dimension verification (Art / UI Crew QA + Generator)
         "verify_image_dimensions": lambda: make_verify_image_dimensions_tool(
             ctx.get("project_root"),
+        ),
+        # Layer 2 (2026-05-21): path-existence self-check for steps that
+        # use Task(output_pydantic=Spec). The agent calls this once near
+        # the end to confirm files declared in its Spec actually exist.
+        # Bound to project_root + PM-declared output_paths so it doubles
+        # as a contract cross-check.
+        "verify_outputs": lambda: make_verify_outputs_tool(
+            project_root=ctx.get("project_root") or "",
+            expected_paths=ctx.get("output_paths") or None,
         ),
         # git
         "git_status": lambda: _get_git()["git_status"],
@@ -635,6 +671,7 @@ async def run_crew_step_with_crewai(
     prev_step_payload: dict | None,
     provider_id: str,
     model_name: str,
+    crew_name: str = "",            # 2026-05-21: needed for spec_for() lookup
 ) -> tuple[str, dict | None]:
     """Run a single Crew step. Returns (raw_text, captured_emit_payload_or_None).
 
@@ -653,10 +690,30 @@ async def run_crew_step_with_crewai(
     thinking_mode, supports_thinking = await _resolve_thinking_for_call(
         agent_row, provider_id, model_name,
     )
+
+    # 2026-05-21: read max_tokens from llm_models row. Previously the
+    # runtime Crew path passed nothing → LiteLLM used provider default
+    # (~1500 tok for dashscope), which truncated System Designer's
+    # multi-file spec mid-string and starved rescue (raw_text was
+    # unbalanced JSON, _rescue_react_emit_output couldn't recover).
+    # If the column is NULL we still send nothing (preserves prior
+    # behaviour for providers where the default is fine).
+    runtime_max_tokens: int | None = None
+    rows = await crud.get_all(
+        "llm_models", "provider_id = ? AND model_name = ?",
+        (provider_id, model_name),
+    )
+    if rows and rows[0].get("max_tokens"):
+        try:
+            runtime_max_tokens = int(rows[0]["max_tokens"])
+        except (TypeError, ValueError):
+            runtime_max_tokens = None
+
     llm = _build_crewai_llm(
         provider, model_name,
         thinking_mode=thinking_mode,
         supports_thinking=supports_thinking,
+        max_tokens=runtime_max_tokens,
     )
 
     # The QA step (chain's tail) writes into the parent task_id slot —
@@ -686,8 +743,56 @@ async def run_crew_step_with_crewai(
         "task_id": step_task_key,
         "output_schema": bound_schema,
         "output_paths": bound_expected_paths,
+        # 2026-05-20: propagate step_role so emit_output factory can
+        # skip the on-disk path-existence check for Head steps (which
+        # only emit specs and don't have write tools).
+        "step_role": step_role,
     }
     tools = await _resolve_agent_tools(agent_row, tool_ctx)
+
+    # 2026-05-21 Layer 2: auto-inject verify_outputs into agent tool set
+    # for any executor/QA step in a registered Crew. Tool is bound to
+    # project_root + PM-declared output_paths so it doubles as a contract
+    # cross-check. Attached here (not in DB tool_ids) so the existing
+    # seed_crews bindings don't need a migration during gradual rollout.
+    # Skipped for Head steps (Head writes specs, not files).
+    #
+    # Originally gated on output_pydantic being wired, but Phase 4
+    # variant probe (2026-05-21) ruled out output_pydantic — the gate
+    # now matches the Layer 3 provider+spec routing instead: any non-
+    # DeepSeek step that has a spec registered gets verify_outputs.
+    _wants_verify = (
+        crew_name
+        and step_role != "head"
+        and (provider or {}).get("type", "").lower() != "deepseek"
+    )
+    try:
+        from domain.crew_specs import spec_for as _spec_lookup
+        _wants_verify = bool(
+            _wants_verify
+            and _spec_lookup(crew_name, step_role) is not None
+        )
+    except ImportError:
+        _wants_verify = False
+    if _wants_verify:
+        try:
+            from src.tools.builtin.local.verify_outputs import (
+                make_verify_outputs_tool,
+            )
+            existing_names = {
+                getattr(t, "name", "") for t in tools if t is not None
+            }
+            if "verify_outputs" not in existing_names:
+                vo = make_verify_outputs_tool(
+                    project_root=project_root or "",
+                    expected_paths=parent_output_paths or None,
+                )
+                tools.append(_adapt_to_base_tool(vo))
+                log.info("crew_step.verify_outputs_injected",
+                         parent_task=parent_task_id, step_index=step_index)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("crew_step.verify_outputs_inject_failed",
+                        parent_task=parent_task_id, error=str(exc))
 
     role = agent_row.get("role") or "Assistant"
     goal = agent_row.get("goal") or "完成分配的任务"
@@ -828,10 +933,55 @@ async def run_crew_step_with_crewai(
             "下游 step 必须在这一份基础上推进；不要重新评估或忽略它。",
         ]
 
+    # 2026-05-21 Layer 2 runtime injection: when verify_outputs was
+    # auto-attached to the agent's tools, the step_instructions in
+    # seed_crews don't mention it (those instructions are stable; we
+    # don't migrate every Crew at once). Add a short runtime clause so
+    # Qwen knows the tool is there and the expected protocol. Without
+    # this clause the agent sees verify_outputs in its tool list but no
+    # signal to invoke it — empirically the agent does call it once
+    # told to (Phase 4 no_pydantic: 5/5 trials called verify_outputs).
+    if _wants_verify:
+        desc_parts += [
+            "",
+            "## 🛡️ 落盘自检（强制）",
+            (
+                "在调用 emit_output **之前**，必须调一次 verify_outputs(file_paths=[...]) "
+                "把你声明的产物路径全部 verify。返回 OK 才能 emit_output；如果某文件还没写，"
+                "先用 create_script / write_file / Unity MCP 工具真补，再 verify。"
+                "**Server-side 还会再次校验磁盘真相**，编了不写 = task 失败。"
+            ),
+        ]
+
     description = "\n".join(desc_parts)
     expected_output = "请调用 emit_output 提交本步骤的结构化产物。"
 
-    task = Task(description=description, expected_output=expected_output, agent=agent)
+    # 2026-05-21 Phase 4 finding (REVERTED Layer 1's output_pydantic):
+    # We initially wired `Task(output_pydantic=Spec)` to let CrewAI's
+    # Converter own schema enforcement. Probe 1 showed Qwen produces
+    # the Spec correctly 10/10 in isolation, so this looked safe. The
+    # Phase 4 variant probe revealed the deeper failure mode:
+    # `output_pydantic` short-circuits Qwen's tool-use loop — the agent
+    # interprets "produce a Spec" as terminal and skips ALL tools 5/5
+    # trials. No prompt, max_iter, or tool-list variation can recover
+    # tool engagement once output_pydantic is set. Without files written,
+    # the Layer 2 disk truth check fails the task — net regression vs
+    # the pre-refactor architecture.
+    #
+    # Fix: drop output_pydantic from runtime Crew tasks. crew_specs.py
+    # is retained for (a) documentation of the per-step Pydantic
+    # contract, and (b) future server-side validation of the captured
+    # payload (orthogonal to how it's captured). The captured-payload
+    # path stays on the legacy emit_output flow PLUS the new
+    # verify_outputs tool (auto-injected above) PLUS the workflow_svc
+    # server-side disk truth check. Qwen routing (Layer 3) and the
+    # rescue layer (Layer 4) remain.
+    task_output_pydantic = None  # kept for the read-back branch below
+    task = Task(
+        description=description,
+        expected_output=expected_output,
+        agent=agent,
+    )
 
     main_loop = asyncio.get_running_loop()
 
@@ -899,23 +1049,46 @@ async def run_crew_step_with_crewai(
                     parent_task=parent_task_id, step=step_index,
                     error=str(exc))
 
-    # Pull whatever the step emitted via emit_output (may be None if the
-    # agent forgot to call it — orchestrator decides how to handle).
+    # 2026-05-21 Layer 1: when output_pydantic was wired, framework's
+    # Converter already coerced agent output into the Spec. Read it
+    # directly — bypasses the "agent forgot to call emit_output" 0/5
+    # problem we measured on every provider/path combination.
     #
-    # For QA the step_task_key collapses to parent_task_id (so workflow_svc's
-    # downstream pop_output(parent_task_id) finds the verdict). If we
-    # *popped* here, the second pop in workflow_svc would return None,
-    # the runner would fall through to JSON-text extraction, fail to
-    # parse the Chinese summary, and raise a misleading
-    # "'<schema field>' is a required property" error. Peek instead —
-    # workflow_svc owns the final removal.
-    from src.tools.builtin.local._output_capture import (
-        peek_output, pop_output,
-    )
-    if step_task_key == parent_task_id:
-        captured = peek_output(step_task_key)
-    else:
-        captured = pop_output(step_task_key)
+    # Three sources tried in order:
+    #   1. task.output.pydantic.model_dump() — Layer 1 path (preferred)
+    #   2. _output_capture pop/peek — legacy emit_output path
+    #   3. None — workflow_svc takes over with rescue / halt logic
+    captured: dict | None = None
+    if task_output_pydantic is not None:
+        try:
+            task_output = getattr(task, "output", None)
+            pyd = getattr(task_output, "pydantic", None) if task_output else None
+            if pyd is not None:
+                captured = pyd.model_dump()
+                log.info("crew_step.captured_via_pydantic",
+                         parent_task=parent_task_id, step_index=step_index,
+                         keys=list(captured.keys())[:8])
+        except Exception as exc:
+            log.warning("crew_step.pydantic_read_failed",
+                        parent_task=parent_task_id, step_index=step_index,
+                        error=str(exc)[:200])
+
+    if captured is None:
+        # Legacy emit_output path. For QA the step_task_key collapses
+        # to parent_task_id (so workflow_svc's downstream
+        # pop_output(parent_task_id) finds the verdict). If we *popped*
+        # here, the second pop in workflow_svc would return None, the
+        # runner would fall through to JSON-text extraction, fail to
+        # parse the Chinese summary, and raise a misleading
+        # "'<schema field>' is a required property" error. Peek
+        # instead — workflow_svc owns the final removal.
+        from src.tools.builtin.local._output_capture import (
+            peek_output, pop_output,
+        )
+        if step_task_key == parent_task_id:
+            captured = peek_output(step_task_key)
+        else:
+            captured = pop_output(step_task_key)
 
     log.info("crew_step.finished",
              parent_task=parent_task_id, step_index=step_index,

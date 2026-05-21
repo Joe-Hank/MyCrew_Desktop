@@ -102,3 +102,75 @@ def test_empty_contract_list_is_valid_no_files_expected(tmp_path):
     )
     out = tool._run({"summary": "design doc only"})
     assert out.startswith("OK")
+
+
+def test_head_role_bypasses_path_existence_check(tmp_path):
+    """Head steps emit SPECS only — files will be created by downstream
+    Executor. The on-disk existence check would deadlock because Head
+    has no write_file tool (seed_crews._HEAD_READONLY removed it
+    intentionally). Verify step_role='head' skips the check so Head
+    can declare future file_paths without first creating them.
+
+    Real-world repro: 2026-05-20 水果忍者 project — System Designer
+    (head of 系统实现组) emitted a perfectly valid C# spec, but the
+    validator rejected it with "files do not exist on disk", agent
+    gave up and wrote verdict='fail'.
+    """
+    tool = make_emit_output_tool(
+        task_id="t1",
+        output_schema={},
+        project_root=str(tmp_path),
+        expected_paths=["Assets/Scripts/FruitSpawner.cs"],
+        step_role="head",  # ← key
+    )
+    # File doesn't exist yet — this would fail without the bypass.
+    out = tool._run({
+        "file_paths": ["Assets/Scripts/FruitSpawner.cs"],
+        "summary": "spec body",
+    })
+    assert out.startswith("OK"), out
+
+
+def test_executor_role_keeps_path_existence_check(tmp_path):
+    """Executor IS supposed to have created files — bypass must not
+    leak from head to executor. Files-missing → still rejected."""
+    tool = make_emit_output_tool(
+        task_id="t1",
+        output_schema={},
+        project_root=str(tmp_path),
+        expected_paths=["Assets/Scripts/FruitSpawner.cs"],
+        step_role="executor",
+    )
+    out = tool._run({
+        "file_paths": ["Assets/Scripts/FruitSpawner.cs"],
+    })
+    assert out.startswith("[ValidationError]")
+    assert "FruitSpawner.cs" in out
+
+
+def test_qa_role_keeps_path_existence_check(tmp_path):
+    """QA verifies — same enforcement as Executor."""
+    tool = make_emit_output_tool(
+        task_id="t1",
+        output_schema={},
+        project_root=str(tmp_path),
+        expected_paths=["Assets/Scripts/FruitSpawner.cs"],
+        step_role="qa",
+    )
+    out = tool._run({"file_paths": ["Assets/Scripts/FruitSpawner.cs"]})
+    assert out.startswith("[ValidationError]")
+
+
+def test_step_role_none_defaults_to_enforce(tmp_path):
+    """Unspecified step_role (legacy callers / non-Crew flows) keeps
+    the historical enforce-on behaviour to avoid silently weakening
+    existing checks."""
+    tool = make_emit_output_tool(
+        task_id="t1",
+        output_schema={},
+        project_root=str(tmp_path),
+        expected_paths=["Assets/foo.png"],
+        # step_role omitted
+    )
+    out = tool._run({"file_paths": ["Assets/foo.png"]})
+    assert out.startswith("[ValidationError]")

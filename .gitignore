@@ -43,6 +43,10 @@ data/secrets/
 data/runtime/
 output/
 
+# 诊断脚本生成的实验结果（含 LLM raw response，不放公开仓）
+data/diag_*.json
+data/_diag_*.json
+
 # 不忽略 data 子目录的 README 与 .gitkeep
 !data/**/README.md
 !data/**/.gitkeep

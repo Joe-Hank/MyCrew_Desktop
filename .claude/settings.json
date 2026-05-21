@@ -114,7 +114,25 @@
       "PowerShell(try { $r = Invoke-WebRequest -Uri \"http://127.0.0.1:18321/api/v1/llm/providers\" -TimeoutSec 3 -UseBasicParsing; Write-Output \"STATUS $\\($r.StatusCode\\)\"; Write-Output $r.Content.Substring\\(0,[Math]::Min\\(500,$r.Content.Length\\)\\) } catch { Write-Output \"ERROR: $\\($_.Exception.Message\\)\" })",
       "PowerShell(Get-NetTCPConnection -State Listen | Where-Object { $_.LocalPort -ge 18321 -and $_.LocalPort -le 18400 -or $_.LocalPort -eq 1420 } | Select-Object LocalAddress, LocalPort, OwningProcess)",
       "Bash(npx tsc *)",
-      "Bash(backend/.venv/Scripts/python.exe -c \"import ast; ast.parse\\(open\\('backend/api/routes_workflow.py', encoding='utf-8'\\).read\\(\\)\\); ast.parse\\(open\\('backend/migrations/versions/0005_task_positions.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")"
+      "Bash(backend/.venv/Scripts/python.exe -c \"import ast; ast.parse\\(open\\('backend/api/routes_workflow.py', encoding='utf-8'\\).read\\(\\)\\); ast.parse\\(open\\('backend/migrations/versions/0005_task_positions.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(f:/ClaudeData/MyCrew_v3/backend/.venv/Scripts/python.exe -c ' *)",
+      "WebFetch(domain:docs.litellm.ai)",
+      "Bash(Get-ChildItem -Path \"f:\\\\ClaudeData\\\\MyCrew_v3\" -Recurse -Filter \"image_gen_script.py\")",
+      "Bash(Select-Object -First 5)",
+      "Bash(xargs grep -l \"ConceptDoc\\\\|Phase 1\\\\|phase_1\")",
+      "Bash(xargs grep -l \"output_directory\\\\|root_path\\\\|project_root\")",
+      "Bash(curl --noproxy '*' -s \"http://127.0.0.1:8000/object_info/LoraLoader\")",
+      "Bash(curl --noproxy '*' -s \"http://127.0.0.1:8000/object_info\")",
+      "Bash(curl --noproxy '*' -s \"http://127.0.0.1:8000/object_info/CheckpointLoaderSimple\")",
+      "Bash(python backend/scripts/diag_fruit_ninja.py)",
+      "Bash(Get-ChildItem -Path \"f:\\\\ClaudeData\\\\MyCrew_v3\\\\backend\\\\scripts\" -Filter \"*fruit*\" -ErrorAction SilentlyContinue)",
+      "Bash(sqlite3 \"f:\\\\ClaudeData\\\\MyCrew_v3\\\\backend\\\\data\\\\db\\\\mycrew.db\" \"SELECT id, payload FROM captured_outputs WHERE task_id IN \\(SELECT id FROM tasks WHERE project_id='proj_9280b9f71422' AND kind='system_impl' AND title LIKE '%风格%'\\)\")",
+      "Bash(sqlite3 \"file:backend/data/db/mycrew.db?mode=ro\" \".mode list\" \"SELECT id, title, status, kind, last_error_kind, substr\\(last_error, 1, 120\\) as err FROM tasks WHERE project_id='proj_9280b9f71422' LIMIT 20;\")",
+      "Bash(sqlite3 \"f:\\\\ClaudeData\\\\MyCrew_v3\\\\backend\\\\data\\\\db\\\\mycrew.db\" \".headers on\" \"SELECT title, status, last_error FROM tasks WHERE project_id='proj_9280b9f71422' AND \\(title LIKE '%风格%' OR title LIKE '%美%'\\)\")",
+      "Bash(ls -lh \"F:\\\\UnityProjects\\\\Fruit\\\\Assets\\\\Sprites\\\\watermelon.png\" 2>&1)",
+      "Read(//f/UnityProjects/Fruit/Assets/Sprites/**)",
+      "Bash(sqlite3 -readonly \"f:/ClaudeData/MyCrew_v3/backend/data/db/mycrew.db\" \"SELECT id, name, state FROM projects WHERE id='proj_9280b9f71422';\")",
+      "PowerShell($db='f:\\\\ClaudeData\\\\MyCrew_v3\\\\backend\\\\data\\\\db\\\\mycrew.db'; if \\(Test-Path $db\\) { Write-Output \"DB exists\"; \\(Get-Item $db\\).Length } else { Write-Output \"no db\" })"
     ]
   },
   "hooks": {

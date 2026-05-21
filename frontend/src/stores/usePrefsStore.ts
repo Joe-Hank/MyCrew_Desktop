@@ -46,6 +46,12 @@ interface PrefsState {
   // so the user's preferred reading width survives the session.
   ioViewerWidth: number;
 
+  // Last parent directory the user picked in ScaffoldConfigModal.
+  // Used to pre-fill the modal next time so they don't re-pick the
+  // same F:\UnityProjects (or wherever). Null = never set; the modal
+  // falls back to the OS desktop folder.
+  scaffoldParent: string | null;
+
   // Setters
   setInceptionLlm: (v: string | null) => void;
   setInceptionModel: (v: string | null) => void;
@@ -57,6 +63,7 @@ interface PrefsState {
   setSettingsActiveTab: (v: SettingsTab) => void;
   setLastProjectId: (v: string | null) => void;
   setIoViewerWidth: (v: number) => void;
+  setScaffoldParent: (v: string | null) => void;
 }
 
 export const usePrefsStore = create<PrefsState>()(
@@ -72,6 +79,7 @@ export const usePrefsStore = create<PrefsState>()(
       settingsActiveTab: "llm",
       lastProjectId: null,
       ioViewerWidth: 380,
+      scaffoldParent: null,
 
       setInceptionLlm: (v) => set({ inceptionLlm: v }),
       setInceptionModel: (v) => set({ inceptionModel: v }),
@@ -93,6 +101,7 @@ export const usePrefsStore = create<PrefsState>()(
       setIoViewerWidth: (v) => set({
         ioViewerWidth: Math.min(1200, Math.max(280, Math.round(v))),
       }),
+      setScaffoldParent: (v) => set({ scaffoldParent: v }),
     }),
     {
       name: "mycrew-prefs",

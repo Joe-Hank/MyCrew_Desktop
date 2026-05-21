@@ -95,6 +95,34 @@ export function useRetryTask() {
   });
 }
 
+/** Hard-reset a project to its initial state (all tasks → pending,
+ *  artifacts + optionally produced files wiped). Used by the debug
+ *  initialise button — surfaced selectively on debug projects so
+ *  contributors can iterate on a Crew without manually clearing DB
+ *  rows + on-disk PNGs between runs. */
+export function useResetProject() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      projectId,
+      deleteOutputFiles = false,
+    }: {
+      projectId: string;
+      /** When true, also unlinks every file the tasks claimed in
+       *  output_paths (+ companion .meta) under root_path. */
+      deleteOutputFiles?: boolean;
+    }) =>
+      apiFetch(
+        `/workflow/projects/${projectId}/reset?delete_output_files=${deleteOutputFiles}`,
+        { method: "POST" },
+      ),
+    onSuccess: (_d, { projectId }) => {
+      qc.invalidateQueries({ queryKey: ["project", projectId] });
+      qc.invalidateQueries({ queryKey: ["projects"] });
+    },
+  });
+}
+
 export interface TaskPatch {
   title?: string;
   detail?: string;

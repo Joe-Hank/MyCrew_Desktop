@@ -18,7 +18,9 @@ import type { SubStepStatus } from "./SubAgentCard";
 export interface ContractCheckCardProps {
   task: Task;
   stepIndex: number;
-  totalSteps: number;
+  /** Kept for backward-compat with callers; V5 strips the n/m badge so
+   *  the value is no longer rendered. */
+  totalSteps?: number;
   status: SubStepStatus;
   errors?: string[];
   onViewDetail: () => void;
@@ -46,8 +48,7 @@ function statusLine(status: SubStepStatus, errors: string[]): string {
 
 export default function ContractCheckCard({
   task: _task,
-  stepIndex,
-  totalSteps,
+  stepIndex: _stepIndex,
   status,
   errors = [],
   onViewDetail,
@@ -71,31 +72,25 @@ export default function ContractCheckCard({
       title={errors[0] || ""}
     >
       {/* Header — role pill mirrors SubAgentCard layout but reads "契约"
-          and uses a teal palette to telegraph "this isn't an agent". */}
-      <div className="mb-2 flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <span
-            className="flex h-5 items-center justify-center rounded-full px-1.5 text-[10px] font-semibold"
-            style={{
-              backgroundColor: "rgba(20, 184, 166, 0.16)",
-              color: "#0d9488",
-            }}
-          >
-            契约
-          </span>
-          <span
-            className="text-sm font-medium truncate"
-            style={{ color: "var(--color-ink-soft)" }}
-            title="V5 代码契约校验：正则扫描已生成的 .cs 文件"
-          >
-            代码契约
-          </span>
-        </div>
+          and uses a teal palette to telegraph "this isn't an agent".
+          V5 (2026-05-20) dropped the n/m badge to match the rest of the
+          sub-card row. */}
+      <div className="mb-2 flex items-center gap-2">
         <span
-          className="shrink-0 text-[10px]"
-          style={{ color: "var(--color-ink-faint)" }}
+          className="flex h-5 shrink-0 items-center justify-center rounded-full px-1.5 text-[10px] font-semibold"
+          style={{
+            backgroundColor: "rgba(20, 184, 166, 0.16)",
+            color: "#0d9488",
+          }}
         >
-          {stepIndex + 1}/{totalSteps}
+          契约
+        </span>
+        <span
+          className="min-w-0 flex-1 truncate text-sm font-medium"
+          style={{ color: "var(--color-ink-soft)" }}
+          title="V5 代码契约校验：扫描已生成的 .cs 文件"
+        >
+          代码契约
         </span>
       </div>
 

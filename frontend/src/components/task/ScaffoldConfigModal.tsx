@@ -52,6 +52,25 @@ function ScaffoldConfigModal({
     return () => document.removeEventListener("keydown", onKey);
   }, [onCancel]);
 
+  // No caller-supplied default and no previously-saved scaffold parent
+  // — fall back to the OS desktop dir so the user isn't staring at an
+  // empty field. Tauri's path API resolves it on Windows / macOS / Linux.
+  useEffect(() => {
+    if (parent) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { desktopDir } = await import("@tauri-apps/api/path");
+        const d = await desktopDir();
+        if (!cancelled && d) setParent(d);
+      } catch {
+        // Non-Tauri / API missing — leave blank, user can type or browse.
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   async function pickFolder() {
     const hasTauri =
       typeof window !== "undefined" &&

@@ -228,6 +228,8 @@ def make_emit_output_tool(
     output_schema: dict | None,
     project_root: str | None = None,
     expected_paths: list[str] | None = None,
+    *,
+    step_role: str | None = None,
 ) -> EmitOutput:
     """Factory: bind a task_id + output_schema (+ project root + PM's
     must-produce file list) to a fresh tool subclass.
@@ -239,10 +241,27 @@ def make_emit_output_tool(
     must-produce list (task.output_paths). When provided, every entry
     is verified to exist on disk before emit_output succeeds — the
     payload field-name whitelist is no longer the sole defence.
+
+    ``step_role`` (2026-05-20): Crew step role gate. For Head steps
+    (role="head") the agent only emits a SPECIFICATION — files will be
+    written by downstream Executor / Unity Developer. Forcing
+    path-existence on Head produces a deadlock: Head doesn't have
+    write_file tools (intentionally — see seed_crews._HEAD_READONLY),
+    so it can never satisfy the validator, and the LLM ends up
+    emitting `verdict='fail'` instead of the real spec it computed.
+    Skip the on-disk path check when step_role=="head". Executor and QA
+    roles still enforce existence (they ARE supposed to have produced
+    the files).
     """
     schema = output_schema or {}
-    root = project_root or ""
-    expected = tuple(expected_paths or ())
+    # Head steps don't write files — bypass the on-disk check by
+    # clearing the bound root. This preserves schema + payload
+    # validation while letting Head emit `file_paths: [...]` as
+    # forward-looking declarations (executor will produce them).
+    role = (step_role or "").strip().lower()
+    skip_path_check = role == "head"
+    root = "" if skip_path_check else (project_root or "")
+    expected = () if skip_path_check else tuple(expected_paths or ())
 
     class _Bound(EmitOutput):
         _bound_task_id: ClassVar[str] = task_id

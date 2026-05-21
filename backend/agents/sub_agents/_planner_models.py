@@ -321,6 +321,98 @@ class SubmitCodeContractsArgs(BaseModel):
     contracts: list[TaskCodeContract] = Field(..., min_length=1)
 
 
+# ── PM v6 (2026-05-19) per-task fan-out args schemas ────────────────
+# Each one's parent multi-task args (above) requires a list; these
+# single-task versions are dispatched once per task via
+# `_run_phase_per_task` so each LLM call has a flat, narrow schema
+# DeepSeek-flash + forced tool_choice can reliably emit.
+
+
+class SubmitReviewedTaskSingleArgs(BaseModel):
+    """One reviewed task — used by Phase 3 fan-out."""
+    task: ReviewedTask = Field(
+        ...,
+        description="本次只为一个 task 补完 acceptance_notes / "
+                    "input_sources / output_schema。完整 ReviewedTask 结构。",
+    )
+
+
+class SubmitPathSpecSingleArgs(BaseModel):
+    """One path_spec — used by Phase 4 fan-out."""
+    path_spec: PathSpec = Field(
+        ...,
+        description="本 task 的 output_paths 列表（一条 PathSpec）。",
+    )
+
+
+class SubmitCodeContractSingleArgs(BaseModel):
+    """One TaskCodeContract — used by Phase 5 fan-out.
+    `code_contract` may be None for non-code tasks (PNG / wav / prefab)."""
+    record: TaskCodeContract = Field(
+        ...,
+        description="本 task 的 code_contract 决策（含 task_index 和 "
+                    "code_contract dict 或 null）。",
+    )
+
+
+# ── Phase 7: 美术风格架构（StyleArchitect, 2026-05-20）─────────────
+#
+# 项目级一次性决策：在 PM Phase 1-6 之后追加，给定用户原始 prompt +
+# Phase 1 ConceptDoc，输出全项目共享的「风格+模型+背景」三件套。
+# 落盘到 `.mycrew_pending/art_style.json`，Crew 启动 art task 时由
+# workflow_svc 读盘注入到第一个 fanout step 的 head_spec。
+#
+# 仅当项目含 .png/.jpg/.jpeg/.tga task 才触发（纯代码项目跳过）。
+
+
+class ArtStyleSpec(BaseModel):
+    """项目级美术风格规格——StyleArchitect 的唯一交付物。"""
+    style_prompt: str = Field(
+        ...,
+        description="项目通用风格提示词字符串（中英混排可），含画风/笔触/"
+                    "光照/调性关键词。会被拼到每张图最终 positive 的开头。"
+                    "示例：'pixel art, 16-bit JRPG style, soft lighting, "
+                    "warm palette, hand-drawn outline'",
+    )
+    fallback_style_prompt: str = Field(
+        "pixel art, simple shapes, flat colors, 16-bit retro game asset",
+        description="信息源不足时的兜底风格。**永远是像素风**——既保证"
+                    "可玩可用，又跟手绘/写实不冲突。Crew 端如果 style_prompt "
+                    "意外为空就用这个。",
+    )
+    checkpoint: str = Field(
+        ...,
+        description="推荐 ComfyUI checkpoint 文件名（含 .safetensors 后缀）。"
+                    "应跟 style_prompt 匹配——比如 pixel 风用 sd 1.5 base，"
+                    "写实用 majicmix，赛博朋克用 cyberpunk。若不确定填 "
+                    "'cyberpunk.safetensors'（中性 fallback）",
+    )
+    background_mode: Literal["pixel_pil", "ai_node"] = Field(
+        ...,
+        description="透明背景策略。pixel_pil：脚本端 PIL 后处理（适合像素图/"
+                    "纯色背景）。ai_node：ComfyUI 内置 RemoveBackground 节点"
+                    "（适合写实/复杂背景）。**默认选 pixel_pil**——大多数"
+                    "游戏素材是平面/像素，效果稳定且无 ML 黑盒边缘瑕疵。",
+    )
+    model_params: dict = Field(
+        default_factory=lambda: {
+            "steps": 20, "cfg": 6.5, "sampler": "euler", "scheduler": "normal",
+        },
+        description="ComfyUI KSampler 参数。Lightning 类 checkpoint 必须"
+                    "把 steps 调到 4-8 + cfg 1.5-2.5。",
+    )
+    rationale: str = Field(
+        ...,
+        description="一段话解释为什么选这风格/模型/背景模式。用户阅读用。"
+                    "10-50 字即可。",
+    )
+
+
+class SubmitArtStyleSpecArgs(BaseModel):
+    """Phase 7 工具参数——提交项目级 ArtStyleSpec。"""
+    spec: ArtStyleSpec = Field(..., description="完整 ArtStyleSpec 数据")
+
+
 __all__ = [
     "CompletenessLabel",
     "ConceptDoc",
@@ -336,10 +428,15 @@ __all__ = [
     "CodeContractImport",
     "CodeContract",
     "TaskCodeContract",
+    "ArtStyleSpec",
     "SubmitConceptArgs",
     "SubmitAtomicTasksArgs",
     "SubmitReviewedTasksArgs",
     "SubmitPathedTasksArgs",
     "SubmitAssignmentsArgs",
     "SubmitCodeContractsArgs",
+    "SubmitReviewedTaskSingleArgs",
+    "SubmitPathSpecSingleArgs",
+    "SubmitCodeContractSingleArgs",
+    "SubmitArtStyleSpecArgs",
 ]

@@ -55,6 +55,172 @@ _ERROR_KIND_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
 ]
 
 
+# Canonical keys that signal "this JSON is the intended emit_output
+# payload" rather than incidental data (e.g. a write_file arg JSON).
+# Used by `_rescue_react_emit_output` to guard the "final answer JSON"
+# heuristic against false positives.
+_EMIT_OUTPUT_SHAPE_KEYS = frozenset({
+    "payload",      # explicit emit_output wrapper
+    "file_paths",   # almost every Crew schema's required field
+    "verdict",      # QA / fail-fast checks
+    "issues",       # paired with verdict
+    "summary",      # QA's narrative field
+    "prompts",      # Art Director's per-path map
+    "width", "height",  # image-spec heads
+    "imported",     # Technical Artist's import report
+    "patched_files",  # contract Debugger
+    "added_symbols",
+})
+
+
+def _balanced_brace_extract(text: str, start_after: int = 0) -> list[tuple[int, str]]:
+    """Return every balanced `{...}` JSON object substring in `text`
+    starting at or after position `start_after`. Tuples are
+    (start_index, raw_substring). Used by the rescue heuristics to walk
+    candidates without committing to any single one upfront."""
+    out: list[tuple[int, str]] = []
+    i = start_after
+    while i < len(text):
+        if text[i] != "{":
+            i += 1
+            continue
+        depth, in_str, esc = 0, False, False
+        for j in range(i, len(text)):
+            c = text[j]
+            if esc:
+                esc = False
+                continue
+            if c == "\\":
+                esc = True
+                continue
+            if c == '"':
+                in_str = not in_str
+                continue
+            if in_str:
+                continue
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    out.append((i, text[i:j + 1]))
+                    i = j + 1
+                    break
+        else:
+            # Unbalanced — bail.
+            return out
+    return out
+
+
+def _looks_like_emit_payload(d: dict) -> bool:
+    """True iff a parsed dict has at least one key from the canonical
+    emit_output shape — heuristic guard so we don't promote a random
+    write_file argument or LLM scratchpad into a captured payload."""
+    return any(k in d for k in _EMIT_OUTPUT_SHAPE_KEYS)
+
+
+def _unwrap_payload(d: dict) -> dict:
+    """emit_output's tool wraps the user-facing dict under "payload".
+    Real tool calls write the unwrapped form to set_output; rescue
+    needs to match that.
+
+    Two wrapper shapes are handled:
+      1. `{"payload": {...}}` — emit_output's own arg signature, sometimes
+         echoed back by the agent verbatim.
+      2. `{"name": "emit_output", "arguments": {"payload": {...}}}` —
+         the OpenAI tool_calls wire format. Qwen / GPT-4 occasionally
+         dump this as Final Answer text when they meant to invoke the
+         tool natively but CrewAI's ReAct loop captured `content`
+         instead. Strip both layers.
+    """
+    # OpenAI tool-call wire shape — only honour it when name says
+    # emit_output, so we don't accidentally unwrap an unrelated tool.
+    if d.get("name") == "emit_output":
+        args = d.get("arguments")
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except (json.JSONDecodeError, TypeError):
+                args = None
+        if isinstance(args, dict):
+            d = args  # fall through to payload unwrap
+    inner = d.get("payload")
+    if isinstance(inner, dict):
+        return inner
+    return d
+
+
+def _rescue_react_emit_output(text: str) -> dict | None:
+    """Rescue path for Head/Executor steps when the LLM produced its
+    emit_output payload as text instead of invoking the tool. CrewAI
+    1.14's ReAct parser misses two common patterns we see in
+    production (DeepSeek-v4-flash, GPT-4 etc.):
+
+      1. **Action / Action Input** — `Action: emit_output\\nAction Input:
+         {...}`. The agent followed ReAct syntax but the LLM emitted
+         the Action block in `content` instead of `tool_calls`.
+
+      2. **Final-answer JSON** — the agent ended its loop with a
+         markdown-fenced JSON block (often preceded by "I now know the
+         final answer" or wrapped in ```json ... ```). CrewAI's
+         terminal-answer detector sees the "final answer" signal and
+         returns the raw text, never invoking emit_output even though
+         the JSON is exactly what should have been passed to it. This
+         is the 2026-05-20 TA case from the Butcher debug project —
+         the Technical Artist emitted a perfectly valid {file_paths,
+         issues} dict but as ```json fenced text.
+
+    Stricter than `_rescue_qa_json` in one way: the extracted JSON
+    must look like an emit_output payload (i.e. carry at least one
+    canonical schema key). Without this guard we'd happily promote a
+    `{"path": "x", "content": ""}` write_file argument into a
+    captured payload, papering over a wrong-tool mistake.
+
+    Returns the parsed payload dict (unwrapped from any "payload" key)
+    or None if no candidate matches.
+    """
+    if not text:
+        return None
+    import re as _re
+
+    # Strategy 1: explicit ReAct Action / Action Input for emit_output.
+    if "emit_output" in text:
+        m = _re.search(
+            r"Action\s*:\s*emit_output\s*\n+\s*Action\s+Input\s*:\s*",
+            text, _re.IGNORECASE,
+        )
+        if m:
+            for _start, candidate in _balanced_brace_extract(text, m.end()):
+                try:
+                    parsed = json.loads(candidate)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if isinstance(parsed, dict):
+                    # For an explicit Action:emit_output match we trust
+                    # the agent's intent even if the payload is sparse
+                    # (e.g. a tiny {"verdict": "fail"} stub).
+                    return _unwrap_payload(parsed)
+                break  # first balanced object wasn't a dict; stop.
+
+    # Strategy 2: final-answer / fenced JSON block. Pick the LAST
+    # balanced JSON object whose keys match the emit_output shape — if
+    # the agent dumped scratchpad JSONs earlier and a real payload at
+    # the end, the last one wins.
+    candidates = _balanced_brace_extract(text)
+    best: dict | None = None
+    for _start, candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        unwrapped = _unwrap_payload(parsed)
+        if _looks_like_emit_payload(unwrapped):
+            best = unwrapped  # keep walking; last shaped match wins
+    return best
+
+
 def _rescue_qa_json(text: str) -> dict | None:
     """Salvage a QA step's intended structured payload when the agent
     forgot to call emit_output and instead dumped the JSON as its
@@ -134,6 +300,248 @@ def _rescue_qa_json(text: str) -> dict | None:
 # must respect. Anything outside this success set (case-insensitive) is
 # treated as a failure regardless of structural schema validation.
 _VERDICT_PASS = {"pass", "passed", "success", "succeeded", "ok"}
+
+
+def _rescue_by_file_existence(
+    output_paths: list[str] | None,
+    project_root: str | None,
+) -> dict | None:
+    """Synthesize an emit_output-shaped payload from disk state when the
+    LLM did the work via tool calls but never reached emit_output.
+
+    Real production case (2026-05-20, system implementation crew):
+    Unity Developer agent called `create_script` (writes the .cs via
+    Unity MCP) successfully on an earlier ReAct turn, then called
+    `find_in_file` to self-verify signatures, then hit max_iter without
+    ever invoking `emit_output`. CrewAI returns only the last turn's
+    raw_text, captured stays None — but the files are sitting on disk
+    just fine.
+
+    Without this rescue, those tasks land as `failed` with a `no_output`
+    error even though the next step (script QA) would have happily
+    verified the same files. Cascades to "all 3 children failed" on
+    the v5 fan-out badge while reality is "all 3 succeeded silently".
+
+    Return shape mirrors a passing emit_output: `{file_paths, summary}`.
+    Caller treats this as captured. Returns None when:
+      - output_paths is empty (nothing to verify)
+      - project_root is missing (no place to look)
+      - ANY declared file is missing or empty on disk
+    """
+    if not output_paths or not project_root:
+        return None
+    try:
+        from pathlib import Path
+        root = Path(project_root).resolve()
+    except Exception:  # noqa: BLE001
+        return None
+    confirmed: list[str] = []
+    for rel in output_paths:
+        if not isinstance(rel, str):
+            return None
+        try:
+            abs_p = (root / rel).resolve()
+            abs_p.relative_to(root)  # path-escape guard
+        except (ValueError, OSError):
+            return None
+        if not abs_p.exists() or not abs_p.is_file():
+            return None
+        try:
+            if abs_p.stat().st_size == 0:
+                return None
+        except OSError:
+            return None
+        confirmed.append(rel)
+    return {
+        "file_paths": confirmed,
+        "summary": (
+            f"自动救起：{len(confirmed)} 个产物文件已在磁盘上存在且非空，"
+            "尽管 agent 未显式调用 emit_output（典型场景：max_iter 用完前"
+            "先调了 create_script 写文件，没轮到调 emit）。"
+        ),
+        "_rescued_by": "file_existence",
+    }
+
+
+def _check_claimed_paths_on_disk(
+    claimed: list[str] | None,
+    project_root: str | None,
+) -> tuple[list[str], list[str]]:
+    """Server-side disk truth check for executor steps (2026-05-21
+    Layer 2 enforcement).
+
+    Given the agent's declared `file_paths` and the project root, return
+    `(missing, zero_byte)` — files that don't exist and files that exist
+    but have zero bytes. Both are failure conditions: an executor that
+    claims a file but produces nothing OR an empty file has not done
+    its job.
+
+    Returns `([], [])` when:
+      - claimed is empty/None (nothing to check)
+      - project_root is missing (no anchor; can't enforce)
+      - all files exist and are non-empty
+
+    Integration test diag_layer1_layer2 (2026-05-21) found Qwen with
+    Task(output_pydantic=Spec) emits valid ExecutorOutput schema but
+    skips all tool calls in 5/5 trials — files don't get written. This
+    function plugs that gap. Called from `_run_crew` right after captured
+    is finalized; failure raises so the parent task fails with a precise
+    error chain.
+    """
+    if not claimed or not project_root:
+        return [], []
+    from pathlib import Path as _Path
+    root_p = _Path(project_root)
+    missing: list[str] = []
+    zero_byte: list[str] = []
+    for rel in claimed:
+        if not isinstance(rel, str) or not rel.strip():
+            continue
+        s = rel.strip()
+        # Disallow path-escape (../../etc/passwd style). Anchor to root.
+        candidate = _Path(s) if _Path(s).is_absolute() else (root_p / s)
+        try:
+            resolved = candidate.resolve()
+            root_resolved = root_p.resolve()
+            if not str(resolved).startswith(str(root_resolved)):
+                # Escaping the project root is treated as missing — we
+                # only accept files under the contract's project.
+                missing.append(rel)
+                continue
+            if not candidate.exists():
+                missing.append(rel)
+                continue
+            if candidate.is_file() and candidate.stat().st_size == 0:
+                zero_byte.append(rel)
+        except (OSError, PermissionError):
+            missing.append(rel)
+    return missing, zero_byte
+
+
+def _dedup_errors(errs: list[str]) -> list[str]:
+    """Compress a task's error list down to its unique signals.
+
+    The list comes from up to four sources that each say "the same root
+    cause" in a different sentence shape:
+
+      - schema validator   ("Assets/X.cs: 文件不存在")
+      - QA verdict issues  ("实际 Executor results 为空")
+      - contract AST       ("契约要求文件 Assets/X.cs 不存在")
+      - debugger patch attempt summary
+
+    Plus a verdict-class header line ("agent self-reported verdict=
+    'fail'...") that adds zero information once any concrete issue is
+    present. Without compression the canvas tooltip and the failure
+    analyser see 4-7 lines that all encode 1-2 facts; users (rightly)
+    perceive it as duplicate noise.
+
+    Three-layer reduction, order-preserving:
+
+    1. Drop the bare "agent self-reported verdict=…" header line when
+       any other entry exists (it's a class marker, not information).
+    2. Substring dedup on the punctuation-stripped, lowercased text —
+       short lines that are subsequences of longer ones disappear; the
+       longer wrapper survives (replaces the shorter when seen later).
+    3. Signature dedup — extract the (path|token) bag from each line
+       and the FIRST semantic action keyword present
+       (不存在 / 缺失 / missing / not_found / 为空 / empty / 尺寸不匹配
+       / mismatch / actual_…). Two lines with identical signature
+       collapse to the longer of the two. This is what catches the
+       file-missing cluster across paraphrases.
+    """
+    if not errs:
+        return []
+    import re
+
+    _PUNCT = re.compile(r"[\s：:；;。，,.()（）'\"`]+")
+    _PATH_RE = re.compile(r"[A-Za-z][\w./\\-]*\.[a-zA-Z]{2,4}")
+    _ACTION_KEYS: tuple[tuple[str, str], ...] = (
+        ("不存在", "missing"),
+        ("缺失", "missing"),
+        ("missing", "missing"),
+        ("not found", "missing"),
+        ("not_found", "missing"),
+        ("为空", "empty"),
+        ("empty", "empty"),
+        ("尺寸不匹配", "size_mismatch"),
+        ("size mismatch", "size_mismatch"),
+        ("dimension mismatch", "size_mismatch"),
+        ("kind 不符", "kind_mismatch"),
+        ("kind mismatch", "kind_mismatch"),
+        ("verdict='fail'", "verdict_fail"),
+        ("verdict=\"fail\"", "verdict_fail"),
+    )
+    _VERDICT_HEADER_RE = re.compile(
+        r"agent self.?reported verdict.*treated as failure", re.IGNORECASE,
+    )
+
+    def norm(s: str) -> str:
+        return _PUNCT.sub("", s.lower())
+
+    def signature(s: str) -> str | None:
+        lower = s.lower()
+        action: str | None = None
+        for needle, key in _ACTION_KEYS:
+            if needle.lower() in lower:
+                action = key
+                break
+        if not action:
+            return None
+        paths = sorted({m.lower() for m in _PATH_RE.findall(s)})
+        return f"{action}|{'|'.join(paths)}"
+
+    # Step 1: filter input.
+    cleaned: list[str] = []
+    has_concrete = any(
+        isinstance(e, str) and e.strip() and not _VERDICT_HEADER_RE.search(e)
+        for e in errs
+    )
+    for raw in errs:
+        if not isinstance(raw, str):
+            continue
+        s = raw.strip()
+        if not s:
+            continue
+        if has_concrete and _VERDICT_HEADER_RE.search(s):
+            continue  # drop the class-marker header
+        cleaned.append(s)
+
+    # Step 2 + 3: substring + signature dedup combined.
+    out: list[str] = []
+    out_norm: list[str] = []
+    out_sig: list[str | None] = []
+    for s in cleaned:
+        n = norm(s)
+        if not n:
+            continue
+        sig = signature(s)
+        dropped = False
+        for i, kept_n in enumerate(out_norm):
+            kept_sig = out_sig[i]
+            # Substring collapse.
+            if n == kept_n or n in kept_n:
+                dropped = True
+                break
+            if kept_n in n:
+                out[i] = s
+                out_norm[i] = n
+                out_sig[i] = sig
+                dropped = True
+                break
+            # Signature collapse — same root fact, different wording.
+            if sig and kept_sig and sig == kept_sig:
+                # Keep the longer entry (usually carries more detail).
+                if len(s) > len(out[i]):
+                    out[i] = s
+                    out_norm[i] = n
+                    out_sig[i] = sig
+                dropped = True
+                break
+        if not dropped:
+            out.append(s)
+            out_norm.append(n)
+            out_sig.append(sig)
+    return out
 
 
 def _collect_verdict_errors(extracted: dict) -> list[str]:
@@ -256,6 +664,16 @@ _CONTRACT_UNPATCHABLE_PATTERNS = (
     "读取失败",        # IO error → not a content issue
     "无法解析",        # contract sig itself unparseable — PM bug
 )
+
+
+def _schema_requires_file_paths(schema: Any) -> bool:
+    """True iff the JSON Schema declares `file_paths` in its required
+    list. Used by the deterministic emit_output synth to confirm the
+    synth actually answers the field the workflow is about to demand."""
+    if not isinstance(schema, dict):
+        return False
+    req = schema.get("required") or []
+    return isinstance(req, list) and "file_paths" in req
 
 
 def _contract_errors_patchable_by_debugger(errors: list[str]) -> list[str]:
@@ -680,6 +1098,145 @@ class WorkflowService:
                  project_id=project_id, tasks_aborted=len(non_terminal),
                  reason=reason)
 
+    async def reset_project(
+        self,
+        project_id: str,
+        *,
+        delete_output_files: bool = False,
+    ) -> dict:
+        """Hard-reset a project to its initial state.
+
+        - All tasks → status='pending', error fields / timestamps / IO
+          refs / failure_analysis / fan-out parent_step_index cleared.
+        - Project → state='ready', is_running=0, progress_pct=0.
+        - MyCrew artifacts at OUTPUT_DIR/<pid>/ wiped entirely.
+        - The in-memory `_active` entry dropped so the next start
+          rebuilds the harness from DB.
+        - When `delete_output_files=True`, also walks every task's
+          `output_paths` and unlinks the file under `root_path/...`.
+          Use this for debug-only projects where each test starts from
+          an empty workspace.
+
+        Returns a summary dict for the API response. Raises KeyError if
+        the project doesn't exist.
+        """
+        from bootstrap.paths import OUTPUT_DIR
+        import shutil
+
+        project = await crud.get_by_id("projects", project_id)
+        if not project:
+            raise KeyError(f"Project {project_id} not found")
+
+        tasks = await crud.get_all(
+            "tasks", "project_id = ?", (project_id,),
+        )
+
+        # Phase 1: DB reset — tasks first, then project.
+        reset_fields = {
+            "status": "pending",
+            "io_in_ref": None,
+            "io_out_ref": None,
+            "last_error": None,
+            "last_error_kind": None,
+            "validation_errors": None,
+            "failure_analysis": None,
+            "failure_analysis_at": None,
+            "started_at": None,
+            "finished_at": None,
+            "last_activity_at": None,
+            "last_run_started_at": None,
+            "qa_score": None,
+            "parent_step_index": None,
+        }
+        for t in tasks:
+            await crud.update_by_id("tasks", t["id"], reset_fields)
+
+        await crud.update_by_id("projects", project_id, {
+            "state": "ready",
+            "is_running": 0,
+            "progress_pct": 0,
+            "runtime_started_at": None,
+        })
+
+        # Phase 2: filesystem cleanup.
+        proj_output = OUTPUT_DIR / project_id
+        artifacts_removed = False
+        if proj_output.exists():
+            try:
+                shutil.rmtree(proj_output)
+                artifacts_removed = True
+            except OSError as exc:
+                log.warning(
+                    "workflow.reset_artifacts_failed",
+                    project_id=project_id, error=str(exc),
+                )
+
+        produced_files_removed: list[str] = []
+        if delete_output_files and project.get("root_path"):
+            from pathlib import Path
+            root = Path(project["root_path"]).resolve()
+            for t in tasks:
+                paths_raw = t.get("output_paths")
+                if not paths_raw:
+                    continue
+                try:
+                    paths = (
+                        paths_raw if isinstance(paths_raw, list)
+                        else json.loads(paths_raw)
+                    )
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if not isinstance(paths, list):
+                    continue
+                for rel in paths:
+                    if not isinstance(rel, str):
+                        continue
+                    try:
+                        abs_p = (root / rel).resolve()
+                        abs_p.relative_to(root)  # path-escape guard
+                    except (ValueError, OSError):
+                        continue
+                    if abs_p.exists() and abs_p.is_file():
+                        try:
+                            abs_p.unlink()
+                            # Companion .meta files (Unity) get the same
+                            # treatment so retry doesn't see stale GUID
+                            # links.
+                            meta = abs_p.with_suffix(abs_p.suffix + ".meta")
+                            if meta.exists():
+                                meta.unlink()
+                            produced_files_removed.append(rel)
+                        except OSError as exc:
+                            log.warning(
+                                "workflow.reset_unlink_failed",
+                                project_id=project_id, path=str(abs_p),
+                                error=str(exc),
+                            )
+
+        # Phase 3: drop the in-memory harness + runner so the next
+        # start rebuilds them from the now-clean DB.
+        self._active.pop(project_id, None)
+        self._runners.pop(project_id, None)
+        self._outputs.pop(project_id, None)
+        self._contract_debugger_attempts = {
+            tid for tid in self._contract_debugger_attempts
+            if not any(t["id"] == tid for t in tasks)
+        }
+
+        log.info(
+            "workflow.project_reset",
+            project_id=project_id,
+            tasks_reset=len(tasks),
+            artifacts_removed=artifacts_removed,
+            files_removed=len(produced_files_removed),
+        )
+        return {
+            "project_id": project_id,
+            "tasks_reset": len(tasks),
+            "artifacts_removed": artifacts_removed,
+            "produced_files_removed": produced_files_removed,
+        }
+
     async def retry_task(
         self,
         project_id: str,
@@ -1028,7 +1585,25 @@ class WorkflowService:
             # blank because io_in_ref was never written).
             await self._save_task_input(project_id, task_id, task_input)
 
-            raw_text = await self._run_agent(project_id, task_id, task_input)
+            # Setup task short-circuit (2026-05-19): "create project
+            # dirs" is 100% deterministic — output_paths lists every dir,
+            # mkdir is idempotent, there is literally nothing for the
+            # LLM to reason about. Letting the initializer agent run was
+            # producing inconsistent results (proj_39643747047a built
+            # 3 of 6 dirs before ReAct max_iter cut it off → validation_
+            # failed → user retried 3 times). We just mkdir in Python.
+            # Existing emit_output synth below sees kind=='setup' +
+            # all paths exist + schema requires file_paths → captures
+            # {file_paths: output_paths} → validation passes.
+            if (
+                task_input.kind == "setup"
+                and task_input.output_paths
+            ):
+                raw_text = await self._fast_path_setup_task(
+                    project_id, task_id, task_input,
+                )
+            else:
+                raw_text = await self._run_agent(project_id, task_id, task_input)
 
             # Prefer emit_output's captured payload if the agent called it.
             # When present, it has already been validated against the
@@ -1036,6 +1611,68 @@ class WorkflowService:
             # text-extraction fallback entirely.
             from src.tools.builtin.local._output_capture import pop_output
             captured = pop_output(task_id)
+
+            # Deterministic emit_output synth (2026-05-19): when a
+            # single-agent task has PM-decreed output_paths and the
+            # agent actually produced every one of them on disk but
+            # forgot the closing `emit_output(...)` call, the workflow
+            # used to flip to validation_failed("'file_paths' is a
+            # required property") even though the real artifacts were
+            # already there. file_paths for these tasks is by
+            # construction identical to PM's output_paths — synthesise
+            # the payload from disk instead of asking the LLM to
+            # restate it.
+            #
+            # Guards (all must hold; otherwise fall through to the
+            # normal salvage / validation_failed path):
+            #   - captured is None (agent didn't emit)
+            #   - performer_kind != "crew" — Crew tasks' captured comes
+            #     from the QA step; an empty captured there means QA
+            #     itself didn't produce a verdict, which is information
+            #     we MUST NOT fabricate. Crew finalize is a separate
+            #     work item (#2).
+            #   - schema declares file_paths required (so the synth
+            #     actually answers the missing field)
+            #   - output_paths non-empty
+            #   - every listed path exists on disk — this is the
+            #     "副作用校验"; without it a half-finished task would
+            #     silently flip to done.
+            synth_task_row = await crud.get_by_id("tasks", task_id) or {}
+            if (
+                captured is None
+                and synth_task_row.get("performer_kind") != "crew"
+                and task_input.output_paths
+                and _schema_requires_file_paths(task_input.output_schema)
+            ):
+                project_row = await crud.get_by_id("projects", project_id) or {}
+                project_root_str = project_row.get("root_path") or ""
+                if project_root_str:
+                    from pathlib import Path
+                    root = Path(project_root_str)
+                    missing = [
+                        p for p in task_input.output_paths
+                        if not (root / p).exists()
+                    ]
+                    if not missing:
+                        summary = (
+                            f"已建 {len(task_input.output_paths)} 个目录"
+                            if task_input.kind == "setup"
+                            else f"已产出 {len(task_input.output_paths)} 个文件"
+                        )
+                        captured = {
+                            "file_paths": list(task_input.output_paths),
+                            "summary": summary,
+                        }
+                        log.info("workflow.emit_output_synth",
+                                 project_id=project_id, task_id=task_id,
+                                 kind=task_input.kind,
+                                 n_paths=len(task_input.output_paths))
+                    else:
+                        log.info("workflow.emit_output_synth_skipped",
+                                 project_id=project_id, task_id=task_id,
+                                 missing_count=len(missing),
+                                 missing_sample=missing[:3])
+
             if captured is not None:
                 extracted = captured if isinstance(captured, dict) else {"value": captured}
                 errors = []
@@ -1162,7 +1799,18 @@ class WorkflowService:
                 # Persist the error list so the UI / retry path / QA agent
                 # can show *why* the task failed validation — previously
                 # this info evaporated with the WS event.
-                err_list = output.validation_errors or []
+                #
+                # Dedup pass (2026-05-20): errors are appended from up to
+                # four sources (schema validator / QA verdict / contract
+                # AST verifier / debugger patch attempt) and they often
+                # paraphrase the same root cause ("文件不存在" / "Crew
+                # Executor 没产出 .cs" / "契约要求 X 不存在" / "缺失符号
+                # ..."). Without dedup the canvas tooltip + failure
+                # analyser see 4 lines that are really 1. We keep order
+                # (first occurrence wins) and collapse exact dupes +
+                # near-dupes (one is a substring of another, ignoring
+                # punctuation/whitespace).
+                err_list = _dedup_errors(output.validation_errors or [])
                 await crud.update_by_id("tasks", task_id, {
                     "validation_errors": json.dumps(err_list, ensure_ascii=False),
                     "last_error": "; ".join(err_list)[:500] if err_list else None,
@@ -1231,6 +1879,53 @@ class WorkflowService:
                 }
             break
         return None
+
+    async def _fast_path_setup_task(
+        self,
+        project_id: str,
+        task_id: str,
+        task_input: Any,
+    ) -> str:
+        """Skip the LLM entirely for kind='setup' tasks. Just mkdir all
+        listed paths in Python — they are by definition known up front.
+
+        Returns a synthetic raw_text summary so the rest of _execute_task
+        (input persistence, output synth, schema validation) flows
+        unchanged. The emit_output_synth block downstream picks up
+        `kind=='setup'` + paths-exist-on-disk and captures
+        {file_paths: output_paths} → schema validation passes.
+        """
+        from pathlib import Path
+        project = await crud.get_by_id("projects", project_id) or {}
+        root_str = project.get("root_path") or ""
+        if not root_str:
+            # No project root → fall back to LLM path (extremely rare;
+            # would only hit on a misconfigured project where scaffold
+            # somehow finished without setting root_path).
+            log.warning("workflow.setup_fast_path_no_root",
+                        project_id=project_id, task_id=task_id)
+            return await self._run_agent(project_id, task_id, task_input)
+
+        root = Path(root_str)
+        created: list[str] = []
+        failures: list[tuple[str, str]] = []
+        for rel in task_input.output_paths or []:
+            try:
+                (root / rel).mkdir(parents=True, exist_ok=True)
+                created.append(rel)
+            except OSError as exc:
+                failures.append((rel, str(exc)))
+
+        log.info("workflow.setup_fast_path",
+                 project_id=project_id, task_id=task_id,
+                 created=len(created), failed=len(failures))
+        if failures:
+            # If mkdir itself failed (permission / locked / disk full),
+            # surface the issue. Downstream existence-check in the synth
+            # block will refuse to fake-pass since not all paths exist.
+            head = "; ".join(f"{p}: {e}" for p, e in failures[:3])
+            return f"mkdir 失败：{head}（已建 {len(created)}/{len(created) + len(failures)}）"
+        return f"已建 {len(created)} 个目录（确定性短路，无 LLM）：{', '.join(created[:5])}{'…' if len(created) > 5 else ''}"
 
     async def _run_agent(self, project_id: str, task_id: str,
                           task_input: Any) -> str:
@@ -1307,6 +2002,10 @@ class WorkflowService:
         crew = await crud.get_by_id("crews", crew_id)
         if not crew:
             raise ValueError(f"Crew {crew_id} not found")
+        # 2026-05-21 Layer 1: crew_name keys into domain.crew_specs.SPEC_REGISTRY
+        # so crewai_runner can wire Task(output_pydantic=Spec) for that
+        # (crew_name, step_role) when the provider supports Converter mode.
+        crew_name = crew.get("name") or ""
         sequence_raw = crew.get("agent_sequence") or "[]"
         try:
             sequence = json.loads(sequence_raw) if isinstance(sequence_raw, str) else sequence_raw
@@ -1344,7 +2043,17 @@ class WorkflowService:
         sub_dir = OUTPUT_DIR / project_id / task_id / "sub"
         sub_dir.mkdir(parents=True, exist_ok=True)
 
-        prev_payload: dict | None = None
+        # 2026-05-20 image flow v2: PM Phase 7 persists project-level
+        # art_style_spec to `.mycrew_pending/art_style.json`. Load it
+        # here so the FIRST step of an art Crew (PromptSmith) sees it
+        # as part of prev_payload — that step composes per-image
+        # subject prompts on top of the project style.
+        # `_load_art_style_spec` returns None for code-only projects /
+        # legacy projects without Phase 7 output.
+        art_style_spec = await self._load_art_style_spec(project_id)
+        prev_payload: dict | None = (
+            {"art_style_spec": art_style_spec} if art_style_spec else None
+        )
         step_summaries: list[str] = []
 
         for i, step in enumerate(sequence):
@@ -1357,19 +2066,234 @@ class WorkflowService:
                 break
 
             step_role = step.get("role") or "executor"
+            step_kind = step.get("kind")  # "script_qa" → deterministic Python QA
             agent_id = step.get("agent_id")
             step_instructions = step.get("step_instructions") or ""
+            # Script-QA steps still keep an `agent_id` for UI continuity
+            # (the QA Engineer card stays in the team page), but the
+            # agent record isn't dispatched — the script runs instead.
+            # Missing agent is therefore only fatal for non-script steps.
             agent_row = await crud.get_by_id("agents", agent_id) if agent_id else None
-            if not agent_row:
+            if not agent_row and step_kind != "script_qa":
                 raise ValueError(
                     f"Crew {crew_id} step {i} references missing agent_id {agent_id}"
                 )
-            provider_id, model_name = await self._resolve_agent_llm(agent_row)
+            agent_label = (agent_row or {}).get("role", "脚本验收")
+            provider_id, model_name = (
+                await self._resolve_agent_llm(agent_row) if agent_row else (None, None)
+            )
 
             await self._broadcast_sub_step(
                 project_id, task_id, i, step_role,
-                agent_id, agent_row.get("role", ""), "started",
+                agent_id, agent_label, "started",
             )
+
+            # ── Script-based QA branch (Stage 2, 2026-05-20) ──────────
+            #
+            # Replaces LLM QA with deterministic Python checks
+            # (`services.qa_script.verify_task_qa`). Same captured shape
+            # as an emit_output: {verdict, file_paths, issues, summary}
+            # — so the post-Crew pipeline (`pop_output(task_id)` →
+            # `_collect_verdict_errors` → schema validation →
+            # `_verify_code_contract`) doesn't need to know the QA was
+            # scripted vs LLM-driven.
+            # ── Script-based Unity asset import branch (Stage 4) ─────
+            #
+            # Replaces the LLM Technical Artist with deterministic Python
+            # rules (file suffix + task.detail keywords → Unity importer
+            # settings) calling `manage_asset` via the Unity MCP. Same
+            # captured shape as an emit_output — downstream sees a
+            # uniform contract. Skips cleanly when project root isn't a
+            # Unity project (debug projects, etc.).
+            if step_kind == "script_unity_import":
+                from services.asset_import_script import import_assets_for_task
+                from src.tools.builtin.local._output_capture import set_output
+
+                captured = await import_assets_for_task(
+                    task_id=task_id,
+                    prev_payload=prev_payload,
+                    project_root=project_root or "",
+                )
+                set_output(task_id, captured)
+
+                synthetic_instructions = (
+                    step_instructions
+                    or "脚本执行 Unity 资产导入设置（asset_import_script），"
+                       "按 suffix 规则映射 importer 字段后调 manage_asset modify。"
+                )
+                ws_failed = (
+                    str(captured.get("verdict", "")).lower() not in _VERDICT_PASS
+                )
+                await self._save_sub_step_io(
+                    project_id, task_id, i, step_role,
+                    synthetic_instructions, prev_payload,
+                    captured.get("summary") or "TA 脚本完成",
+                    captured,
+                )
+                err_text = None
+                if ws_failed and captured.get("issues"):
+                    err_text = "; ".join(captured["issues"])[:200]
+                await self._broadcast_sub_step(
+                    project_id, task_id, i, step_role,
+                    agent_id, agent_label,
+                    "failed" if ws_failed else "completed",
+                    error=err_text,
+                )
+
+                prev_payload = captured
+                step_summaries.append(
+                    f"✓ Step {i + 1}/{len(sequence)} [{step_role} script_unity_import] "
+                    f"verdict={captured.get('verdict')} "
+                    f"imported={len(captured.get('imported') or [])}"
+                )
+                continue
+
+            if step_kind == "script_qa":
+                from services.qa_script import verify_task_qa
+                from src.tools.builtin.local._output_capture import set_output
+
+                # Flatten prev_payload into the list the script expects:
+                # fan-out QA receives {results: [...]}, sequential QA
+                # receives a single captured dict.
+                upstream_results: list[dict] = []
+                if isinstance(prev_payload, dict):
+                    rs = prev_payload.get("results")
+                    if isinstance(rs, list):
+                        upstream_results = [r for r in rs if isinstance(r, dict)]
+                    else:
+                        upstream_results = [prev_payload]
+
+                captured = await verify_task_qa(
+                    task_id, captured_results=upstream_results,
+                )
+                # Bind to the parent task_id key — workflow_svc reads
+                # pop_output(task_id) right after _run_crew returns.
+                set_output(task_id, captured)
+
+                # Persist sub-step IO so the IO viewer can show what
+                # was checked + what failed. Synthesise an
+                # "instructions" string explaining the script semantics
+                # (better than the empty step_instructions a
+                # script-only step might carry).
+                synthetic_instructions = (
+                    step_instructions
+                    or "脚本验收（services.qa_script.verify_task_qa）。"
+                       "确定性检查文件存在/尺寸/魔数/契约签名，不调用 LLM。"
+                )
+                ws_failed = (
+                    str(captured.get("verdict", "")).lower() not in _VERDICT_PASS
+                )
+                summary_line = captured.get("summary") or (
+                    "脚本验收完成"
+                )
+                # Re-use the standard IO writer so the canvas viewer
+                # gets identical-shape JSON regardless of LLM vs script
+                # provenance.
+                await self._save_sub_step_io(
+                    project_id, task_id, i, step_role,
+                    synthetic_instructions, prev_payload,
+                    summary_line, captured,
+                )
+
+                err_text = None
+                if ws_failed and captured.get("issues"):
+                    err_text = "; ".join(captured["issues"])[:200]
+                await self._broadcast_sub_step(
+                    project_id, task_id, i, step_role,
+                    agent_id, agent_label,
+                    "failed" if ws_failed else "completed",
+                    error=err_text,
+                )
+
+                prev_payload = captured
+                step_summaries.append(
+                    f"✓ Step {i + 1}/{len(sequence)} [{step_role} script] "
+                    f"verdict={captured.get('verdict')} "
+                    f"issues={len(captured.get('issues') or [])}"
+                )
+                continue
+
+            # Crew v5 fan-out branch: this step has `fanout` config →
+            # dispatch all children of parent_task_id concurrently using
+            # the same step.agent + step.instructions, each child bound
+            # to its own task_id for emit_output / IO. Returns aggregated
+            # {"results": [...]} so the next step (typically QA) sees
+            # per-child verdicts.
+            #
+            # Children-gate (2026-05-20): a Crew sequence may declare
+            # `fanout` unconditionally (e.g. 系统实现组 executor), but
+            # PM only merges some tasks into a v5 group — leaf tasks
+            # using the same crew have zero children. Falling through
+            # to _fanout_step in that case returns count=0 and silently
+            # skips the step, which lets QA fail "file not produced"
+            # for tasks the Executor was supposed to run normally.
+            # Pre-check children count and ignore fanout when empty so
+            # leaf tasks run the step inline like any non-fanout crew.
+            fanout_cfg = step.get("fanout")
+            if fanout_cfg:
+                _children = await crud.get_all(
+                    "tasks", "parent_task_id = ?", (task_id,),
+                )
+                if not _children:
+                    log.info("crew.fanout_skipped_no_children",
+                             task_id=task_id, step_index=i,
+                             reason="leaf task with fanout config — running step inline")
+                    fanout_cfg = None
+            if fanout_cfg:
+                # 2026-05-20 image flow v2: art_style_spec must reach
+                # the Generator (fanout-script) step even though the
+                # intermediate Head step (PromptSmith) overwrites
+                # prev_payload with its own emit_output. Merge the
+                # project-level spec into head_spec at dispatch time
+                # so per-child callers (image_gen_script) can read it
+                # alongside PromptSmith's per-path prompts.
+                fanout_head_spec: dict | None
+                if isinstance(prev_payload, dict):
+                    fanout_head_spec = dict(prev_payload)
+                else:
+                    fanout_head_spec = None
+                if (
+                    art_style_spec
+                    and (fanout_head_spec is None
+                         or "art_style_spec" not in fanout_head_spec)
+                ):
+                    if fanout_head_spec is None:
+                        fanout_head_spec = {}
+                    fanout_head_spec["art_style_spec"] = art_style_spec
+                try:
+                    captured = await self._fanout_step(
+                        project_id=project_id,
+                        parent_task_id=task_id,
+                        project_root=project_root,
+                        step=step, step_index=i, step_role=step_role,
+                        agent_row=agent_row,
+                        provider_id=provider_id, model_name=model_name,
+                        head_spec=fanout_head_spec,
+                        concurrency=int(fanout_cfg.get("concurrency_cap") or 1),
+                        crew_name=crew_name,
+                    )
+                except Exception as exc:
+                    err = str(exc)
+                    log.error("crew.fanout_failed",
+                              task_id=task_id, step_index=i, error=err)
+                    await self._broadcast_sub_step(
+                        project_id, task_id, i, step_role,
+                        agent_id, agent_row.get("role", ""), "failed",
+                        error=err[:200],
+                    )
+                    raise
+                prev_payload = captured
+                step_summaries.append(
+                    f"✓ Step {i + 1}/{len(sequence)} [{step_role} fan-out] "
+                    f"{agent_row.get('role', '')} — "
+                    f"{captured.get('completed', 0)}/{captured.get('count', 0)} ok, "
+                    f"{captured.get('failed', 0)} fail"
+                )
+                await self._broadcast_sub_step(
+                    project_id, task_id, i, step_role,
+                    agent_id, agent_row.get("role", ""), "completed",
+                )
+                continue
 
             try:
                 text, captured = await _crewai_runner.run_crew_step_with_crewai(
@@ -1389,6 +2313,7 @@ class WorkflowService:
                     prev_step_payload=prev_payload,
                     provider_id=provider_id,
                     model_name=model_name,
+                    crew_name=crew_name,
                 )
             except Exception as exc:
                 err = str(exc)
@@ -1427,12 +2352,217 @@ class WorkflowService:
                              task_id=task_id, step_index=i,
                              keys=list(rescued.keys())[:8])
 
+            # 2026-05-20 chain-of-tools rescue + halt for Head/Executor.
+            #
+            # Empirically (DeepSeek-v4-flash via CrewAI 1.14), agents
+            # occasionally output their `Action: emit_output\nAction
+            # Input: {...}` as plain text instead of invoking the tool.
+            # CrewAI's ReAct parser sometimes misses the format, leaving
+            # captured=None. If we don't rescue + halt here, the next
+            # step (Generator) sees prev_payload=None, then runs in
+            # empty/loop mode, then TA does the same, then QA finally
+            # catches "no file produced" — wasting 3 LLM calls + minutes
+            # of wall-clock + token budget.
+            #
+            # Two-stage handler: (1) try to extract the intended emit_output
+            # payload from raw text via _rescue_react_emit_output;
+            # (2) if STILL no captured, raise so the Crew halts NOW and
+            # the parent task moves to failed with a precise root cause.
+            if step_role in ("head", "executor") and captured is None and text:
+                rescued = _rescue_react_emit_output(text)
+                if rescued is not None:
+                    captured = rescued
+                    if step_role == "qa":  # belt-and-suspenders, never true here
+                        from src.tools.builtin.local._output_capture import set_output
+                        set_output(task_id, rescued)
+                    log.info("crew.react_emit_rescued",
+                             task_id=task_id, step_index=i,
+                             role=step_role,
+                             keys=list(rescued.keys())[:8])
+
             # Persist sub-step IO
             await self._save_sub_step_io(
                 project_id, task_id, i, step_role,
                 step_instructions, prev_payload,
                 text, captured,
             )
+
+            # Halt-on-empty (2026-05-20): emit_output was never invoked
+            # AND rescue couldn't recover a payload. Downstream cannot
+            # function without the spec — stop here with a precise
+            # error chain. This closes the Butcher debug case where
+            # Head wrote "Action: write_file" instead of emit_output and
+            # the whole Crew ran to completion empty-handed.
+            #
+            # File-existence rescue (2026-05-20 second pass): for
+            # Executor steps (not Head — Head's payload is the spec,
+            # disk state can't recover that), check if the contract's
+            # output_paths are actually on disk + non-empty. The
+            # Unity Developer case: agent calls create_script then
+            # find_in_file then hits max_iter without ever emit'ing;
+            # files exist, only the bookkeeping missed. Treat that as
+            # success so the chain doesn't false-fail a completed task.
+            if step_role in ("head", "executor") and captured is None:
+                if step_role == "executor":
+                    # Prefer the task row's output_paths column (the
+                    # PM contract authoritative source) over the schema
+                    # _extract_output_paths heuristic — they should
+                    # agree, but the column is the source of truth.
+                    rescue_paths = parent_output_paths
+                    if not rescue_paths:
+                        try:
+                            row = await crud.get_by_id("tasks", task_id) or {}
+                            paths_raw = row.get("output_paths")
+                            if isinstance(paths_raw, str) and paths_raw:
+                                parsed = json.loads(paths_raw)
+                                if isinstance(parsed, list):
+                                    rescue_paths = [
+                                        p for p in parsed if isinstance(p, str)
+                                    ]
+                            elif isinstance(paths_raw, list):
+                                rescue_paths = [
+                                    p for p in paths_raw if isinstance(p, str)
+                                ]
+                        except (json.JSONDecodeError, TypeError, OSError):
+                            pass
+                    rescued = _rescue_by_file_existence(
+                        rescue_paths, project_root,
+                    )
+                    if rescued is not None:
+                        captured = rescued
+                        from src.tools.builtin.local._output_capture import set_output
+                        set_output(task_id, rescued)
+                        log.info(
+                            "crew.executor_rescued_by_disk",
+                            task_id=task_id, step_index=i,
+                            file_count=len(rescued.get("file_paths") or []),
+                        )
+
+            if step_role in ("head", "executor") and captured is None:
+                # 2026-05-21: classify failure mode + include real LLM
+                # output in the error so users don't have to dig into
+                # sub/N_*_out.json. Three modes:
+                #   A. agent never produced text         (text empty)
+                #   B. agent produced unbalanced JSON    (truncated by
+                #      max_tokens — LLM cut off mid-string; balanced-
+                #      brace rescue can't recover)
+                #   C. agent produced something but neither emit_output
+                #      tool fired nor a parseable JSON payload appears
+                t = text or ""
+                if not t.strip():
+                    diagnosis = "（agent 没产出任何文本——可能 LLM 调用失败或被框架短路）"
+                else:
+                    open_braces = t.count("{") - t.count("}")
+                    # Truncation tell-tales: ends mid-string (odd number
+                    # of unescaped quotes from the last open brace),
+                    # ends mid-identifier (no closing delimiter), or
+                    # unbalanced braces.
+                    likely_truncated = (
+                        open_braces > 0
+                        or (t.rstrip()[-1:] not in {"}", "]", '"', ".", "。", "”", "*"})
+                    )
+                    if likely_truncated:
+                        diagnosis = (
+                            "（agent 产出未闭合的 JSON / 半截文本——很可能"
+                            " LLM 触顶 max_tokens 被截断，rescue 无法解析）"
+                        )
+                    elif "emit_output" in t:
+                        diagnosis = (
+                            "（raw text 提及 'emit_output' 但格式不被 CrewAI 解析）"
+                        )
+                    else:
+                        diagnosis = "（agent 完全没尝试调用 emit_output）"
+
+                # Include up to 400 chars of head + tail so users see
+                # WHAT the agent did. Front matters most (where it
+                # started); tail second (where it cut off).
+                excerpt_parts: list[str] = []
+                if t:
+                    excerpt_parts.append(f"head: {t[:300]!r}")
+                    if len(t) > 600:
+                        excerpt_parts.append(f"tail: {t[-200:]!r}")
+                excerpt = " | ".join(excerpt_parts) if excerpt_parts else "(empty)"
+
+                err_msg = (
+                    f"Crew {step_role} step {i + 1} 没有调用 emit_output 工具{diagnosis}。"
+                    f"下游步骤无法获得 prev_step_payload，终止 Crew。"
+                    f"\n实际 LLM 输出 ({len(t)} chars): {excerpt}"
+                )
+                await self._broadcast_sub_step(
+                    project_id, task_id, i, step_role,
+                    agent_id, agent_row.get("role", ""), "failed",
+                    error=err_msg[:400],
+                )
+                log.warning(
+                    "crew.empty_captured_halt",
+                    task_id=task_id, step_index=i, role=step_role,
+                    raw_len=len(t),
+                    raw_excerpt_head=(t or "")[:200],
+                    raw_excerpt_tail=(t or "")[-200:],
+                    likely_truncated=("max_tokens 被截断" in diagnosis),
+                )
+                raise RuntimeError(err_msg)
+
+            # 2026-05-21 Layer 2 server-side disk truth check.
+            #
+            # When an executor step ships a captured payload with
+            # `file_paths`, agent self-report alone is not enough — Probe
+            # integration test (diag_layer1_layer2) showed Qwen returns a
+            # schema-valid ExecutorOutput WITHOUT actually calling
+            # write_file (0/5 trials produced any files). emit_output had
+            # this check baked in (emit_output.py:144-185); the Layer 1
+            # output_pydantic path bypasses emit_output, so we have to
+            # enforce here at the workflow level.
+            #
+            # Belt-and-suspenders: this also catches the case where
+            # legacy emit_output failed to fire (Layer 4b territory) AND
+            # the existing rescue layer reconstructed a payload from
+            # text — we still verify the files are real.
+            #
+            # Scope: executor only. Head emits specs (no files). QA
+            # verifies disk truth itself + has its own verdict gate, so
+            # this check would duplicate.
+            if (
+                step_role == "executor"
+                and isinstance(captured, dict)
+                and project_root
+            ):
+                claimed = captured.get("file_paths") or []
+                if isinstance(claimed, list) and claimed:
+                    missing_on_disk, zero_byte = _check_claimed_paths_on_disk(
+                        claimed, project_root,
+                    )
+                    if missing_on_disk or zero_byte:
+                        parts: list[str] = []
+                        if missing_on_disk:
+                            parts.append(
+                                f"claimed file_paths not on disk: "
+                                f"{missing_on_disk[:6]}"
+                                + (f" (+{len(missing_on_disk) - 6})"
+                                   if len(missing_on_disk) > 6 else "")
+                            )
+                        if zero_byte:
+                            parts.append(
+                                f"empty files (failed writes): "
+                                f"{zero_byte[:6]}"
+                                + (f" (+{len(zero_byte) - 6})"
+                                   if len(zero_byte) > 6 else "")
+                            )
+                        msg = "; ".join(parts)
+                        await self._broadcast_sub_step(
+                            project_id, task_id, i, step_role,
+                            agent_id, agent_row.get("role", ""), "failed",
+                            error=msg[:200],
+                        )
+                        log.warning(
+                            "crew.executor_disk_truth_fail",
+                            task_id=task_id, step_index=i,
+                            missing=missing_on_disk, zero_byte=zero_byte,
+                        )
+                        raise RuntimeError(
+                            f"Crew executor step {i + 1} reported files "
+                            f"that don't exist on disk: {msg}"
+                        )
 
             # 2026-05-17 P0 Crew halt: an executor step that emit_output'd
             # verdict='fail' / 'partial_fail' / 'error' means downstream
@@ -1460,10 +2590,12 @@ class WorkflowService:
                     )
                     # Raise so _execute_task's outer except branch flips
                     # the parent task to failed with this error chain.
+                    # Dedup the verdict-collected issues so the message
+                    # doesn't carry 3 paraphrases of the same fact.
                     raise RuntimeError(
                         f"Crew {step_role} step {i + 1} reported "
                         f"verdict='{captured.get('verdict')}': "
-                        + "; ".join(exec_errors)[:400]
+                        + "; ".join(_dedup_errors(exec_errors))[:400]
                     )
 
             prev_payload = captured  # may be None — next step sees null
@@ -1481,6 +2613,50 @@ class WorkflowService:
         # caller's `pop_output(task_id)` finds it. We return a markdown
         # log of the Crew run for the agent_output / debug viewers.
         return "\n".join(step_summaries) or "(empty Crew run)"
+
+    async def _load_art_style_spec(self, project_id: str) -> dict | None:
+        """Read the project-level art style spec written by PM Phase 7.
+
+        Lives at `<OUTPUT_DIR>/<project_id>/.mycrew_pending/art_style.json`.
+        Returns None when:
+          - the file doesn't exist (code-only project / pre-Phase-7
+            legacy project / Phase 7 LLM failed)
+          - the file is malformed JSON
+          - the project_id is empty
+
+        Errors are logged + swallowed — the Crew should still be able
+        to run on a default style if Phase 7 didn't write anything.
+        """
+        if not project_id:
+            return None
+        try:
+            from bootstrap.paths import OUTPUT_DIR
+            spec_path = (
+                OUTPUT_DIR / project_id / ".mycrew_pending" / "art_style.json"
+            )
+            if not spec_path.exists():
+                return None
+            raw = spec_path.read_text(encoding="utf-8")
+            spec = json.loads(raw)
+            if not isinstance(spec, dict):
+                log.warning(
+                    "workflow.art_style_spec_not_dict",
+                    project_id=project_id,
+                )
+                return None
+            return spec
+        except json.JSONDecodeError as exc:
+            log.warning(
+                "workflow.art_style_spec_malformed",
+                project_id=project_id, error=str(exc),
+            )
+            return None
+        except OSError as exc:
+            log.warning(
+                "workflow.art_style_spec_read_failed",
+                project_id=project_id, error=str(exc),
+            )
+            return None
 
     async def _save_sub_step_io(self, project_id: str, task_id: str,
                                  step_index: int, step_role: str,
@@ -1538,6 +2714,346 @@ class WorkflowService:
             f"{json.dumps(captured, ensure_ascii=False, indent=2) if captured else '(none)'}\n```",
             encoding="utf-8",
         )
+
+    @staticmethod
+    def _get_child_code_contract(task_row: dict) -> dict | None:
+        """Decode child task's code_contract column (stored as JSON string
+        in the DB). Returns the dict or None for non-code tasks."""
+        cc_raw = task_row.get("code_contract")
+        if isinstance(cc_raw, str) and cc_raw:
+            try:
+                parsed = json.loads(cc_raw)
+                return parsed if isinstance(parsed, dict) else None
+            except (json.JSONDecodeError, TypeError):
+                return None
+        return cc_raw if isinstance(cc_raw, dict) else None
+
+    def _task_input_from_row(self, task_row: dict) -> Any:
+        """Build a TaskInput from a raw `tasks` row — used by fan-out
+        children which aren't dispatched via TaskRunner.prepare_input."""
+        from domain.harness.task_runner import TaskInput
+        schema_raw = task_row.get("output_schema")
+        if isinstance(schema_raw, str) and schema_raw:
+            try:
+                schema = json.loads(schema_raw)
+            except (json.JSONDecodeError, TypeError):
+                schema = {}
+        elif isinstance(schema_raw, dict):
+            schema = schema_raw
+        else:
+            schema = {}
+        paths_raw = task_row.get("output_paths")
+        paths: list[str] | None = None
+        if isinstance(paths_raw, str) and paths_raw:
+            try:
+                parsed = json.loads(paths_raw)
+                if isinstance(parsed, list):
+                    paths = [p for p in parsed if isinstance(p, str)]
+            except (json.JSONDecodeError, TypeError):
+                paths = None
+        elif isinstance(paths_raw, list):
+            paths = [p for p in paths_raw if isinstance(p, str)]
+        return TaskInput(
+            task_id=task_row["id"],
+            title=task_row.get("title", ""),
+            detail=task_row.get("detail", "") or "",
+            agent_id=task_row.get("agent_id") or "",
+            output_schema=schema,
+            upstream_outputs={},  # fan-out children inherit parent's spec via head_spec
+            kind=task_row.get("kind", "regular"),
+            output_paths=paths,
+        )
+
+    async def _broadcast_parallel_progress(
+        self, *, project_id: str, parent_task_id: str,
+        step_index: int, concurrency_cap: int,
+        total: int, completed: int, failed: int,
+    ) -> None:
+        """Fire task.parallel_progress so frontend's ParallelSubCard can
+        show x/y progress + running count in real time (UI work in next
+        phase). Total / completed / failed are cumulative; running is
+        derived = total - completed - failed."""
+        try:
+            from datetime import datetime, timezone
+            from api.ws import manager
+            running = max(0, total - completed - failed)
+            await manager.broadcast("task.parallel_progress", {
+                "parent_task_id": parent_task_id,
+                "project_id": project_id,
+                "step_index": step_index,
+                "concurrency_cap": concurrency_cap,
+                "total": total,
+                "completed": completed,
+                "failed": failed,
+                "running": running,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception as exc:  # noqa: BLE001
+            log.warning("workflow.parallel_progress_broadcast_failed",
+                        parent_task_id=parent_task_id, error=str(exc))
+
+    async def _fanout_step(
+        self,
+        *,
+        project_id: str,
+        parent_task_id: str,
+        project_root: str | None,
+        step: dict,
+        step_index: int,
+        step_role: str,
+        agent_row: dict,
+        provider_id: str,
+        model_name: str,
+        head_spec: Any,
+        concurrency: int,
+        crew_name: str = "",
+    ) -> dict:
+        """Fan-out the current Crew step over all children of parent.
+
+        Each child is a `tasks` row with `parent_task_id == parent`. Each
+        runs the same step (same agent + step_instructions) but bound to
+        the child's own task_id so emit_output / IO land on the child.
+        `head_spec` (= prev_payload, the Head step's emit_output) is
+        passed to every child as `prev_step_payload` so the Executor
+        sees the shared upstream spec.
+
+        Returns aggregated dict {"results": [...], "count", "completed",
+        "failed"} so the next step (typically QA) can verdict per-child.
+        Per-child IO goes through the standard `_save_task_input/output`
+        path — NOT `output/<pid>/<parent>/sub/<i>_*` (those are reserved
+        for sequential sub-steps).
+        """
+        from datetime import datetime, timezone
+        from src.tools.builtin.local._output_capture import set_output
+        from domain.harness.task_runner import TaskOutput
+        from services import crewai_runner as _crewai_runner
+
+        rows = await crud.get_all(
+            "tasks", "parent_task_id = ?", (parent_task_id,),
+        )
+        if not rows:
+            log.warning("crew.fanout_no_children",
+                        parent_task_id=parent_task_id, step_index=step_index)
+            return {"results": [], "count": 0, "completed": 0, "failed": 0}
+
+        # Stamp parent_step_index on every child so the canvas knows
+        # which step in the parent's sequence dispatched them.
+        for r in rows:
+            if r.get("parent_step_index") != step_index:
+                await crud.update_by_id("tasks", r["id"], {
+                    "parent_step_index": step_index,
+                })
+
+        sem = asyncio.Semaphore(max(1, concurrency))
+        completed_count = 0
+        failed_count = 0
+        total = len(rows)
+
+        await self._broadcast_parallel_progress(
+            project_id=project_id, parent_task_id=parent_task_id,
+            step_index=step_index, concurrency_cap=concurrency,
+            total=total, completed=0, failed=0,
+        )
+
+        async def _run_child(child: dict) -> dict:
+            nonlocal completed_count, failed_count
+            child_id = child["id"]
+            child_input = self._task_input_from_row(child)
+            await self._save_task_input(project_id, child_id, child_input)
+            await crud.update_by_id("tasks", child_id, {
+                "status": "running",
+                "started_at": datetime.now(timezone.utc).isoformat(),
+            })
+            try:
+                async with sem:
+                    if step.get("kind") == "script_comfy_generate":
+                        # Stage 3: deterministic ComfyUI HTTP call. Skips
+                        # CrewAI / LLM entirely — Head's emit_output
+                        # already pinned prompts + dims, the rest is
+                        # mechanical (build workflow → POST → poll →
+                        # download → resize → save).
+                        from services.image_gen_script import (
+                            generate_image_for_child,
+                        )
+                        captured = await generate_image_for_child(
+                            child_task_row=child,
+                            head_spec=head_spec if isinstance(head_spec, dict) else None,
+                            project_root=project_root or "",
+                        )
+                        text = (
+                            f"[script_comfy_generate] {captured.get('summary') or ''}"
+                        )
+                    else:
+                        text, captured = await _crewai_runner.run_crew_step_with_crewai(
+                            agent_row=agent_row,
+                            step_role=step_role,
+                            step_index=step_index,
+                            crew_name=crew_name,
+                            step_instructions=step.get("step_instructions") or "",
+                            project_id=project_id,
+                            project_root=project_root,
+                            parent_task_id=child_id,  # emit_output binds to CHILD
+                            parent_task_title=child_input.title,
+                            parent_task_detail=child_input.detail or "",
+                            parent_output_schema=child_input.output_schema or {},
+                            parent_output_paths=child_input.output_paths or [],
+                            parent_code_contract=self._get_child_code_contract(child),
+                            upstream_outputs={},
+                            prev_step_payload=head_spec,
+                            provider_id=provider_id,
+                            model_name=model_name,
+                        )
+            except Exception as exc:  # noqa: BLE001
+                failed_count += 1
+                err = str(exc)[:500]
+                await crud.update_by_id("tasks", child_id, {
+                    "status": "failed",
+                    "last_error": err,
+                    "last_error_kind": "fanout",
+                    "finished_at": datetime.now(timezone.utc).isoformat(),
+                })
+                await self._broadcast_parallel_progress(
+                    project_id=project_id, parent_task_id=parent_task_id,
+                    step_index=step_index, concurrency_cap=concurrency,
+                    total=total, completed=completed_count, failed=failed_count,
+                )
+                log.error("crew.fanout_child_failed",
+                          child_task_id=child_id, error=err)
+                return {
+                    "child_task_id": child_id,
+                    "title": child.get("title"),
+                    "verdict": "fail",
+                    "error": err[:200],
+                }
+
+            # Try the ReAct rescue at the child level too — same logic
+            # as the sequential head/executor path: agents that dumped
+            # `Action: emit_output\nAction Input: {...}` as text get
+            # their intended payload recovered before we evaluate.
+            structured = captured if isinstance(captured, dict) else None
+            if structured is None and text and "emit_output" in text:
+                rescued = _rescue_react_emit_output(text)
+                if rescued is not None:
+                    structured = rescued
+                    log.info("crew.fanout_react_emit_rescued",
+                             child_task_id=child_id, step_index=step_index,
+                             keys=list(rescued.keys())[:8])
+
+            # File-existence rescue for fan-out children (2026-05-20):
+            # Unity Developer pattern — create_script wrote the .cs at an
+            # earlier ReAct turn, then max_iter cut off before emit_output.
+            # Files are on disk + non-empty → treat as success.
+            if structured is None:
+                child_paths = child_input.output_paths or []
+                rescued = _rescue_by_file_existence(child_paths, project_root)
+                if rescued is not None:
+                    structured = rescued
+                    log.info("crew.fanout_child_rescued_by_disk",
+                             child_task_id=child_id,
+                             file_count=len(rescued.get("file_paths") or []))
+
+            # Persist child output through the standard path. Doing this
+            # before the status decision so the IO viewer has the
+            # artifacts even on a failed child.
+            await self._save_task_output(
+                project_id, child_id,
+                TaskOutput(task_id=child_id, raw_text=text or "",
+                           structured=structured),
+            )
+            if structured is not None:
+                set_output(child_id, structured)
+
+            # Status decision (2026-05-20 fix):
+            # A child is failed when EITHER:
+            #   (a) emit_output was never invoked + rescue couldn't
+            #       recover a payload  → child contributed nothing
+            #       usable to the QA aggregate
+            #   (b) the agent explicitly self-reported verdict=fail /
+            #       partial_fail / error
+            #
+            # Previously every child was unconditionally marked done,
+            # which produced the symptom: 3 children green on the
+            # canvas while the parent QA reports "files don't exist".
+            # The mis-classification also fooled the canvas fan-out
+            # badge (3/3 ok) when reality was 0/3.
+            child_verdict_raw = (structured or {}).get("verdict") if structured else None
+            child_verdict_norm = (
+                str(child_verdict_raw).strip().lower()
+                if child_verdict_raw is not None else None
+            )
+            child_is_pass = (
+                structured is not None
+                and (
+                    child_verdict_norm is None  # no verdict claim = legacy / silent ok
+                    or child_verdict_norm in _VERDICT_PASS
+                )
+            )
+
+            now_iso = datetime.now(timezone.utc).isoformat()
+            if child_is_pass:
+                await crud.update_by_id("tasks", child_id, {
+                    "status": "done",
+                    "finished_at": now_iso,
+                })
+                completed_count += 1
+                outcome_verdict = child_verdict_norm or "pass"
+                outcome_error: str | None = None
+            else:
+                # Build a precise error string so the canvas tooltip +
+                # failure_analyzer have something useful to show.
+                if structured is None:
+                    outcome_error = (
+                        "child emit_output 未被调用（agent 未真实调用工具，"
+                        "raw text 也无可恢复的 emit_output 块）"
+                    )
+                    last_error_kind = "no_output"
+                else:
+                    issues = structured.get("issues") or []
+                    issue_excerpt = "; ".join(
+                        str(x) for x in issues[:3] if x
+                    )
+                    outcome_error = (
+                        f"verdict={child_verdict_raw!r}"
+                        + (f"; {issue_excerpt}" if issue_excerpt else "")
+                    )
+                    last_error_kind = "verdict_fail"
+                await crud.update_by_id("tasks", child_id, {
+                    "status": "failed",
+                    "last_error": outcome_error[:500],
+                    "last_error_kind": last_error_kind,
+                    "finished_at": now_iso,
+                })
+                failed_count += 1
+                outcome_verdict = "fail"
+                log.warning(
+                    "crew.fanout_child_marked_failed",
+                    child_task_id=child_id, reason=last_error_kind,
+                    error=outcome_error[:200],
+                )
+
+            await self._broadcast_parallel_progress(
+                project_id=project_id, parent_task_id=parent_task_id,
+                step_index=step_index, concurrency_cap=concurrency,
+                total=total, completed=completed_count, failed=failed_count,
+            )
+            return {
+                "child_task_id": child_id,
+                "title": child.get("title"),
+                "verdict": outcome_verdict,
+                "captured": structured,
+                "error": outcome_error,
+            }
+
+        results = await asyncio.gather(
+            *[_run_child(c) for c in rows],
+            return_exceptions=False,
+        )
+        return {
+            "results": results,
+            "count": total,
+            "completed": completed_count,
+            "failed": failed_count,
+        }
 
     async def _broadcast_sub_step(
         self, project_id: str, task_id: str,
@@ -2173,77 +3689,37 @@ class WorkflowService:
     # ── Project requirement queries ───────────────────────
 
     async def required_mcps(self, project_id: str) -> list[dict]:
-        """Compute the MCP servers a project actually needs to run.
+        """List MCP servers this project needs to run.
 
-        Walks: project tasks → bound performer (agent or crew) →
-        agent(s) → tool_ids → tool names → MCP servers whose
-        discovered_tools cover those names.
+        2026-05-19 rewrite: was an agent.tool_ids → mcp.discovered_tools
+        derivation. That comparison joins on tool NAME, but MyCrew local
+        tool names use prefixes (`comfy_*`, `figma_*`, `git_*`) while
+        raw MCP `discovered_tools` are unprefixed — so the intersection
+        missed every prefixed tool. ComfyUI never showed as required
+        (false negative), and Blender showed as required for 2D
+        projects (false positive, because Technical Artist happened to
+        bind the unprefixed `import_generated_asset`).
+        See TEMPLATE_REQUIRED_MCPS docstring in template_cloner_svc.py.
+
+        New rule: look up `project.template_id`, read the hard-coded
+        required-MCP whitelist, return the matching mcp_servers rows.
+        Legacy projects with no template_id get a derivation fallback
+        (returns all enabled MCPs — never block start in that case).
 
         Returned shape per server:
-          { server_id, name, status, tools_used: [...], missing_tools: [...] }
-        `tools_used` are the tool names from this project that map to this
-        MCP. `missing_tools` are tool names the project needs but the
-        server can't currently provide (server disconnected, or the tool
-        isn't in the server's discovered set — usually means it dropped
-        between discovery and now).
-
-        TaskHeader renders this list as a "required MCP" status row +
-        uses it as a pre-flight gate on Start (blocks start if anything
-        in the list is not connected).
+          { server_id, name, status, tools_used: [], missing_tools: [] }
+        `tools_used` / `missing_tools` kept for API compatibility but
+        no longer populated (template-driven mode doesn't track per-
+        server tool intersection).
         """
-        tasks = await self._load_tasks(project_id)
-        if not tasks:
-            return []
+        from services.template_cloner_svc import TEMPLATE_REQUIRED_MCPS
 
-        # Collect every agent_id this project touches (Crew members
-        # included). Setup tasks bind agent_id directly; Crew tasks
-        # bind via crews.agent_sequence[*].agent_id.
-        agent_ids: set[str] = set()
-        crew_ids: set[str] = set()
-        for t in tasks:
-            kind = t.get("performer_kind")
-            pid = t.get("performer_id") or t.get("agent_id")
-            if not pid:
-                continue
-            if kind == "crew":
-                crew_ids.add(pid)
-            else:
-                agent_ids.add(pid)
-        for crew_id in crew_ids:
-            crew = await crud.get_by_id("crews", crew_id)
-            if not crew:
-                continue
-            try:
-                seq = json.loads(crew.get("agent_sequence") or "[]")
-            except (json.JSONDecodeError, TypeError):
-                continue
-            for step in seq:
-                aid = step.get("agent_id") if isinstance(step, dict) else None
-                if aid:
-                    agent_ids.add(aid)
+        project = await crud.get_by_id("projects", project_id)
+        if not project:
+            raise KeyError(project_id)
+        template_id = project.get("template_id")
+        required_names = TEMPLATE_REQUIRED_MCPS.get(template_id)
 
-        # Gather all tool_ids those agents reference.
-        tool_ids: set[str] = set()
-        for aid in agent_ids:
-            agent = await crud.get_by_id("agents", aid)
-            if not agent:
-                continue
-            try:
-                ids = json.loads(agent.get("tool_ids") or "[]")
-            except (json.JSONDecodeError, TypeError):
-                continue
-            tool_ids.update(t for t in ids if isinstance(t, str))
-
-        # Resolve tool ids → tool names.
-        tool_names: set[str] = set()
-        for tid in tool_ids:
-            row = await crud.get_by_id("tools", tid)
-            if row and row.get("name"):
-                tool_names.add(row["name"])
-
-        # Walk MCP servers; a server is "required" if any of its
-        # discovered_tools' names intersect our set. Pool status comes
-        # from the live MCP pool (in-memory) — what we ACTUALLY have.
         from infra.mcp.pool import mcp_pool
         live_status: dict[str, str] = {
             s["server_id"]: s["status"]
@@ -2251,27 +3727,37 @@ class WorkflowService:
         }
 
         servers = await crud.get_all("mcp_servers")
+        # Legacy / unknown template → don't block, return empty (UI shows
+        # "no required" rather than "everything required").
+        if required_names is None:
+            log.info("workflow.required_mcps.no_template_whitelist",
+                     project_id=project_id, template_id=template_id)
+            return []
+
         required: list[dict] = []
         for s in servers:
             if not s.get("enabled"):
                 continue
-            try:
-                discovered = json.loads(s.get("discovered_tools") or "[]")
-            except (json.JSONDecodeError, TypeError):
-                discovered = []
-            offered = {
-                d.get("name") for d in discovered
-                if isinstance(d, dict) and d.get("name")
-            }
-            used = sorted(tool_names & offered)
-            if not used:
-                continue  # this server isn't relevant to the project
+            if s["name"] not in required_names:
+                continue
             required.append({
                 "server_id": s["id"],
                 "name": s["name"],
                 "status": live_status.get(s["id"], "disconnected"),
-                "tools_used": used,
-                "missing_tools": [],  # reserved for future drift detection
+                "tools_used": [],
+                "missing_tools": [],
+            })
+        # Surface any whitelisted MCPs that don't exist as rows at all
+        # (user hasn't added them). Disabled-but-present rows are user
+        # intent — don't override that, just let them not appear.
+        present_names = {s["name"] for s in servers}
+        for missing_name in sorted(required_names - present_names):
+            required.append({
+                "server_id": "",
+                "name": missing_name,
+                "status": "not_configured",
+                "tools_used": [],
+                "missing_tools": [],
             })
         return required
 

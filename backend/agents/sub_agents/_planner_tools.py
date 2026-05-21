@@ -25,12 +25,16 @@ from src.tools.builtin._base import GuardedLocalTool
 from src.tools.builtin.local._output_capture import set_planner_output
 
 from agents.sub_agents._planner_models import (
+    SubmitArtStyleSpecArgs,
     SubmitAssignmentsArgs,
     SubmitAtomicTasksArgs,
     SubmitCodeContractsArgs,
+    SubmitCodeContractSingleArgs,
     SubmitConceptArgs,
     SubmitPathedTasksArgs,
+    SubmitPathSpecSingleArgs,
     SubmitReviewedTasksArgs,
+    SubmitReviewedTaskSingleArgs,
 )
 
 log = structlog.get_logger()
@@ -215,6 +219,102 @@ def make_submit_code_contracts_tool(session_id: str) -> SubmitCodeContracts:
     return _Bound()
 
 
+# ── PM v6 (2026-05-19) per-task fan-out submit tools ───────────────
+#
+# Each one carries a `_phase` value that maps to the same logical phase
+# as its multi-task sibling — but per-task fan-out in
+# `_run_phase_per_task` doesn't actually use `set_planner_output` (it
+# returns the validated dict in-memory from `_force_tool_call_once`).
+# The `_capture` `set_planner_output` write is therefore dead code in
+# the fan-out path. We keep these tools subclass `_PlannerSubmitTool`
+# anyway so the existing `make_*_tool` shape (factory binding session_id)
+# is uniform across single + list variants.
+
+
+class SubmitReviewedTaskSingle(_PlannerSubmitTool):
+    name: str = "submit_reviewed_task_single"
+    description: str = (
+        "提交单个 task 的 ReviewedTask 数据。"
+        "包含 acceptance_notes / input_sources / output_schema 三个补充字段。"
+        "本次只处理 1 个 task（fan-out 模式），不要塞整张列表。"
+    )
+    args_schema: type[BaseModel] = SubmitReviewedTaskSingleArgs
+    _phase: ClassVar[str] = "review"
+
+    def _run(self, task: dict) -> str:
+        return self._capture({"task": task})
+
+
+def make_submit_reviewed_task_single_tool(session_id: str) -> SubmitReviewedTaskSingle:
+    class _Bound(SubmitReviewedTaskSingle):
+        _bound_session_id: ClassVar[str] = session_id
+    return _Bound()
+
+
+class SubmitPathSpecSingle(_PlannerSubmitTool):
+    name: str = "submit_path_spec_single"
+    description: str = (
+        "提交单个 task 的 PathSpec（task_index + output_paths）。"
+        "本次只处理 1 个 task（fan-out 模式）。"
+        "output_paths 必须使用模板允许的目录前缀。"
+    )
+    args_schema: type[BaseModel] = SubmitPathSpecSingleArgs
+    _phase: ClassVar[str] = "project_mgmt"
+
+    def _run(self, path_spec: dict) -> str:
+        return self._capture({"path_spec": path_spec})
+
+
+def make_submit_path_spec_single_tool(session_id: str) -> SubmitPathSpecSingle:
+    class _Bound(SubmitPathSpecSingle):
+        _bound_session_id: ClassVar[str] = session_id
+    return _Bound()
+
+
+class SubmitCodeContractSingle(_PlannerSubmitTool):
+    name: str = "submit_code_contract_single"
+    description: str = (
+        "提交单个 task 的 code_contract 决策（含 task_index + code_contract"
+        " 或 null）。本次只处理 1 个 task（fan-out 模式）。"
+        "output_paths 含 .cs → 写完整 contract；否则 code_contract 填 null。"
+    )
+    args_schema: type[BaseModel] = SubmitCodeContractSingleArgs
+    _phase: ClassVar[str] = "code_contract"
+
+    def _run(self, record: dict) -> str:
+        return self._capture({"record": record})
+
+
+def make_submit_code_contract_single_tool(session_id: str) -> SubmitCodeContractSingle:
+    class _Bound(SubmitCodeContractSingle):
+        _bound_session_id: ClassVar[str] = session_id
+    return _Bound()
+
+
+# ── Phase 7: StyleArchitect (2026-05-20) ───────────────────────────
+
+
+class SubmitArtStyleSpec(_PlannerSubmitTool):
+    name: str = "submit_art_style_spec"
+    description: str = (
+        "提交项目级美术风格规格。**项目一次性**——所有 art Crew 会共享这份"
+        "决策。包含 style_prompt / fallback_style_prompt / checkpoint / "
+        "background_mode (pixel_pil 或 ai_node) / model_params / rationale "
+        "六字段。整套规格落盘到 .mycrew_pending/art_style.json。"
+    )
+    args_schema: type[BaseModel] = SubmitArtStyleSpecArgs
+    _phase: ClassVar[str] = "art_style"
+
+    def _run(self, spec: dict) -> str:
+        return self._capture({"spec": spec})
+
+
+def make_submit_art_style_spec_tool(session_id: str) -> SubmitArtStyleSpec:
+    class _Bound(SubmitArtStyleSpec):
+        _bound_session_id: ClassVar[str] = session_id
+    return _Bound()
+
+
 __all__ = [
     "make_submit_concept_tool",
     "make_submit_atomic_tasks_tool",
@@ -222,4 +322,8 @@ __all__ = [
     "make_submit_pathed_tasks_tool",
     "make_submit_assignments_tool",
     "make_submit_code_contracts_tool",
+    "make_submit_reviewed_task_single_tool",
+    "make_submit_path_spec_single_tool",
+    "make_submit_code_contract_single_tool",
+    "make_submit_art_style_spec_tool",
 ]

@@ -195,6 +195,35 @@ async def abort_project(project_id: str, reason: str = ""):
         raise HTTPException(404, detail="project not active")
 
 
+@router.post("/projects/{project_id}/reset")
+async def reset_project(
+    project_id: str,
+    delete_output_files: bool = Query(
+        False,
+        description=(
+            "When true, also delete files at the project's root_path "
+            "that any task declared in its output_paths. Use for "
+            "debug-only projects where each fresh run must start with "
+            "an empty workspace. Default false to protect user data."
+        ),
+    ),
+):
+    """Reset a project to its initial state — all tasks back to pending,
+    project back to ready, MyCrew output artifacts wiped. Optionally
+    also wipes the produced files at `root_path` (for debug projects).
+
+    Drops the project from `_active` so the next start rebuilds the
+    harness fresh.
+    """
+    try:
+        result = await workflow_svc.reset_project(
+            project_id, delete_output_files=delete_output_files,
+        )
+        return {"ok": True, "data": result}
+    except KeyError:
+        raise HTTPException(404, detail="project not found")
+
+
 @router.post("/projects/{project_id}/tasks/{task_id}/retry")
 async def retry_task(
     project_id: str,
@@ -216,6 +245,19 @@ async def retry_task(
         return {"ok": True, "data": {"task_id": task_id, "state": "running"}}
     except KeyError:
         raise HTTPException(404, detail="project or task not found")
+    except Exception as exc:
+        # Surface state-machine / domain exceptions as 400 with a
+        # human-readable error envelope so the frontend can show a
+        # specific message rather than uvicorn's bare "Internal Server
+        # Error" plain-text body (which apiFetch classifies as a
+        # network failure → confusing "后端不可达" toast).
+        from domain.harness.state_machine import InvalidTransition
+        if isinstance(exc, InvalidTransition):
+            return {
+                "ok": False,
+                "error": {"code": "invalid_state", "message": str(exc)},
+            }
+        raise
 
 
 @router.get("/active")

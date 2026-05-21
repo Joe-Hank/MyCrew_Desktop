@@ -28,4 +28,14 @@ RELOAD=""
 if [ "${MYCREW_DEV_RELOAD:-0}" = "1" ]; then
   RELOAD="--reload"
 fi
-exec uvicorn bootstrap.app:create_app --factory --host 127.0.0.1 --port "$PORT" $RELOAD
+
+# Pin to backend/.venv/Scripts/uvicorn.exe — see restart.ps1 for the
+# 2026-05-19 incident analysis.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV_UVICORN="$SCRIPT_DIR/.venv/Scripts/uvicorn.exe"
+if [ ! -x "$VENV_UVICORN" ]; then
+  echo "[restart] FATAL: $VENV_UVICORN not found." >&2
+  exit 1
+fi
+echo "[restart] using $VENV_UVICORN"
+exec "$VENV_UVICORN" bootstrap.app:create_app --factory --host 127.0.0.1 --port "$PORT" $RELOAD

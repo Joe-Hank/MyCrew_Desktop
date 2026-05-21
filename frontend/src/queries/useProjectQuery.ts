@@ -79,6 +79,20 @@ export interface Task {
    *  IO viewer parses on demand for the 代码契约 tab. Null/undefined =
    *  non-code task (Art / Audio / pure prefab). */
   code_contract?: string | null;
+  /** Crew v5 fan-out: child tasks point at their parent (the synthetic
+   *  crew_group task) via this id. Non-null means this row is dispatched
+   *  by the parent's Crew runner during a parallel step — NOT by the
+   *  top-level scheduler — so the canvas hides it from the main pane
+   *  and renders it under the parent's expanded ParallelSubCard row. */
+  parent_task_id?: string | null;
+  /** Which step in the parent's agent_sequence dispatched this child.
+   *  Stamped by `_fanout_step` on first dispatch. Used to group children
+   *  under the correct parallel sub-card when a Crew has multiple
+   *  fan-out steps. */
+  parent_step_index?: number | null;
+  /** Crew v5 file-list contract — JSON string in DB. Frontend reads it
+   *  on the IO viewer's 「输出路径」 tab. */
+  output_paths?: string | null;
 }
 
 /** PM v5: shape of the parsed code_contract column. The DB stores the

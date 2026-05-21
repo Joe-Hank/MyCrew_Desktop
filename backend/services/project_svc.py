@@ -147,9 +147,10 @@ class ProjectService:
                 }, id_prefix="task_")
                 index_to_id[i] = row["id"]
 
-            # Pass 2: translate dep references and patch each task that
-            # actually has upstream dependencies. Mixed int/str arrays are
-            # tolerated so callers that supply real task ids still work.
+            # Pass 2: translate dep references AND parent_task_id (both
+            # are int indices in the blueprint, resolved to real task ids
+            # here). Mixed int/str dep arrays are tolerated so callers
+            # that supply real task ids still work.
             for i, t in enumerate(tasks):
                 raw_deps = t.get("deps") or []
                 translated: list[str] = []
@@ -160,10 +161,23 @@ class ProjectService:
                             translated.append(mapped)
                     elif isinstance(d, str) and d:
                         translated.append(d)
+
+                update_fields: dict = {}
                 if translated:
-                    await crud.update_by_id("tasks", index_to_id[i], {
-                        "deps": json.dumps(translated),
-                    })
+                    update_fields["deps"] = json.dumps(translated)
+                # Crew v5: parent_task_id may be present as an int index
+                # (set by orchestrator._merge_into_crew_groups). Resolve
+                # to real task id, mirroring the deps translation.
+                parent_ref = t.get("parent_task_id")
+                if isinstance(parent_ref, int):
+                    parent_id = index_to_id.get(parent_ref)
+                    if parent_id:
+                        update_fields["parent_task_id"] = parent_id
+                elif isinstance(parent_ref, str) and parent_ref:
+                    update_fields["parent_task_id"] = parent_ref
+                if update_fields:
+                    await crud.update_by_id("tasks", index_to_id[i],
+                                            update_fields)
         except Exception as exc:
             # Compensate: drop the half-created project + every task we
             # managed to insert. delete_project iterates tasks by

@@ -49,4 +49,16 @@ Write-Host "[restart] launching fresh uvicorn on :$Port..." -ForegroundColor Cya
 # before running this if you genuinely want hot reload (PM crashes
 # accepted).
 $reloadFlag = if ($env:MYCREW_DEV_RELOAD -eq "1") { "--reload" } else { "" }
-uvicorn bootstrap.app:create_app --factory --host 127.0.0.1 --port $Port $reloadFlag
+
+# CRITICAL: pin to backend/.venv/Scripts/uvicorn.exe, not whatever `uvicorn`
+# is first on PATH. 2026-05-19 incident — bare `uvicorn` resolved to
+# system Python 3.13's uvicorn, where litellm wasn't installed; CrewAI
+# fell into LITELLM_AVAILABLE=False and PM Phase 2 died with "LiteLLM
+# fallback package is not installed". The venv DOES have litellm.
+$VenvUvicorn = Join-Path $ScriptDir ".venv\Scripts\uvicorn.exe"
+if (-not (Test-Path $VenvUvicorn)) {
+    Write-Host "[restart] FATAL: $VenvUvicorn not found. Run 'python -m venv .venv && .venv\Scripts\pip install -e .' first." -ForegroundColor Red
+    exit 1
+}
+Write-Host "[restart] using $VenvUvicorn" -ForegroundColor DarkGray
+& $VenvUvicorn bootstrap.app:create_app --factory --host 127.0.0.1 --port $Port $reloadFlag

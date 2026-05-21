@@ -150,6 +150,32 @@ class HarnessStateMachine:
         # writing tasks while project is STALLED on some paths).
         if self.state == ProjectState.STALLED:
             self._transition_project(ProjectState.RUNNING)
+
+        # Done-rerun (2026-05-20): TaskNode's canRetry condition surfaces
+        # a Retry button for `done` tasks too (when project not running)
+        # — used to re-execute a task after editing its prompt, or to
+        # re-verify after script_qa upgrades. The static transitions
+        # table forbids DONE → RUNNING because most paths mustn't
+        # silently re-run completed work; explicit retry is a user
+        # action, not a scheduler decision. Pump the task back through
+        # PENDING (legal: DONE has no outgoing edges, but we rebuild
+        # the row directly here) before the RUNNING transition.
+        cur = self._tasks.get(task_id, {})
+        if TaskState(cur.get("status", TaskState.PENDING)) == TaskState.DONE:
+            cur["status"] = TaskState.PENDING
+            # When the user re-runs a finished node, cascade: every
+            # downstream task that was done because this one was done
+            # must also reset, otherwise the scheduler will skip them
+            # and the rerun has no observable effect.
+            for t in self._tasks.values():
+                if t["id"] == task_id:
+                    continue
+                if TaskState(t.get("status", TaskState.PENDING)) != TaskState.DONE:
+                    continue
+                deps = t.get("deps") or []
+                if task_id in deps:
+                    t["status"] = TaskState.PENDING
+
         self._transition_task(task_id, TaskState.RUNNING)
         for t in self._tasks.values():
             if t["status"] == TaskState.BLOCKED:
@@ -170,10 +196,20 @@ class HarnessStateMachine:
         return [t for t in self._tasks.values() if t["status"] == TaskState.RUNNING]
 
     def get_ready_tasks(self) -> list[dict]:
-        """Tasks whose deps are all done and that are pending."""
+        """Tasks whose deps are all done and that are pending.
+
+        Crew v5: skip any task with a non-NULL `parent_task_id` — those
+        are children of a crew_group parent, dispatched by the parent's
+        runner via `_fanout_step`, NOT by the main scheduler. Without
+        this filter, a child's deps=[parent_id] would clear once the
+        parent ran, and the scheduler would race the parent's runner to
+        execute the same child — duplicate dispatch or deadlock.
+        """
         ready = []
         for t in self._tasks.values():
             if t["status"] != TaskState.PENDING:
+                continue
+            if t.get("parent_task_id"):
                 continue
             deps = t.get("deps", [])
             if all(self._tasks[d]["status"] == TaskState.DONE for d in deps if d in self._tasks):

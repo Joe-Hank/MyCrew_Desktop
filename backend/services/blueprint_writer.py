@@ -46,8 +46,10 @@ def write_blueprint_to_disk(
     project: dict,
     architecture_overview: str,
     tasks: list[dict],
+    art_style_spec: dict | None = None,
 ) -> tuple[Path, bool]:
-    """Write blueprint.json + architecture.md + per-task .md files.
+    """Write blueprint.json + architecture.md + per-task .md files
+    (+ optional art_style.json from PM Phase 7).
 
     Returns (base_path, is_pending). Raises on filesystem error — callers
     decide whether to surface that as a user-visible failure or roll back."""
@@ -76,6 +78,15 @@ def write_blueprint_to_disk(
 
     # architecture.md
     (base / "architecture.md").write_text(architecture_overview, encoding="utf-8")
+
+    # art_style.json (Phase 7, optional — only present when project has
+    # art assets). workflow_svc reads this when launching art Crews and
+    # injects it into the first fanout step's head_spec.
+    if isinstance(art_style_spec, dict) and art_style_spec:
+        (base / "art_style.json").write_text(
+            json.dumps(art_style_spec, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
     # tasks/task_NN.md
     for i, t in enumerate(blueprint["tasks"], start=1):

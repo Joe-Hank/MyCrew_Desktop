@@ -1,9 +1,8 @@
-"""Tests for workflow_svc.required_mcps — the walk that powers the
-TaskHeader MCP chip row + the Start pre-flight gate.
+"""Tests for workflow_svc.required_mcps (2026-05-19 template-driven rewrite).
 
-Mocks the DB and the MCP pool so we test pure logic: given some tasks
-bound to agents (single or via Crew) whose tools live in specific MCP
-servers, the right set of servers comes back with the right tool list.
+Replaces the old agent.tool_ids → mcp.discovered_tools intersection.
+The new logic reads `project.template_id` and looks up
+`TEMPLATE_REQUIRED_MCPS` to get the hard-coded whitelist.
 """
 from __future__ import annotations
 
@@ -13,68 +12,25 @@ from unittest.mock import patch
 import pytest
 
 from services.workflow_svc import WorkflowService
-from tests.conftest import FakeCRUD, make_project, make_task
+from tests.conftest import FakeCRUD, make_project
 
 
 @pytest.fixture
 def env():
     crud = FakeCRUD()
 
-    # Project + two tasks: one bound to a single agent, one to a Crew.
-    crud.seed("projects", [make_project("proj_1")])
-    crud.seed("tasks", [
-        {**make_task("t_agent", project_id="proj_1"),
-         "agent_id": "agent_alpha",
-         "performer_kind": "agent",
-         "performer_id": "agent_alpha"},
-        {**make_task("t_crew", project_id="proj_1"),
-         "agent_id": None,
-         "performer_kind": "crew",
-         "performer_id": "crew_x"},
-    ])
-    # The Crew references agents agent_beta + agent_gamma.
-    crud.seed("crews", [{
-        "id": "crew_x",
-        "name": "Test Crew",
-        "agent_sequence": json.dumps([
-            {"role": "head", "agent_id": "agent_beta"},
-            {"role": "qa", "agent_id": "agent_gamma"},
-        ]),
-    }])
-    crud.seed("agents", [
-        {"id": "agent_alpha", "role": "alpha",
-         "tool_ids": json.dumps(["tool_comfy", "tool_write"])},
-        {"id": "agent_beta", "role": "beta",
-         "tool_ids": json.dumps(["tool_unity_asset"])},
-        {"id": "agent_gamma", "role": "gamma",
-         "tool_ids": json.dumps(["tool_unity_asset", "tool_read_console"])},
-    ])
-    crud.seed("tools", [
-        {"id": "tool_comfy", "name": "comfy_enqueue_workflow"},
-        {"id": "tool_write", "name": "write_file"},
-        {"id": "tool_unity_asset", "name": "manage_asset"},
-        {"id": "tool_read_console", "name": "read_console"},
+    # Three projects, three templates
+    crud.seed("projects", [
+        {**make_project("proj_2d"), "template_id": "unity_universal_2d"},
+        {**make_project("proj_3d"), "template_id": "unity_universal_3d"},
+        {**make_project("proj_legacy"), "template_id": None},
     ])
     crud.seed("mcp_servers", [
-        {"id": "mcp_comfy", "name": "comfyui", "enabled": 1,
-         "discovered_tools": json.dumps([
-             {"name": "comfy_enqueue_workflow"},
-             {"name": "comfy_get_history"},
-         ])},
-        {"id": "mcp_unity", "name": "unity", "enabled": 1,
-         "discovered_tools": json.dumps([
-             {"name": "manage_asset"},
-             {"name": "read_console"},
-             {"name": "manage_scene"},
-         ])},
-        {"id": "mcp_unused", "name": "blender", "enabled": 1,
-         "discovered_tools": json.dumps([
-             {"name": "execute_blender_code"},
-         ])},
-        {"id": "mcp_disabled", "name": "tavily", "enabled": 0,
-         "discovered_tools": json.dumps([
-             {"name": "tavily_search"},
-         ])},
+        {"id": "mcp_unity", "name": "unity", "enabled": 1, "discovered_tools": "[]"},
+        {"id": "mcp_comfy", "name": "comfyui", "enabled": 1, "discovered_tools": "[]"},
+        {"id": "mcp_blender", "name": "blender", "enabled": 1, "discovered_tools": "[]"},
+        {"id": "mcp_tavily", "name": "tavily", "enabled": 1, "discovered_tools": "[]"},
+        {"id": "mcp_off", "name": "git", "enabled": 0, "discovered_tools": "[]"},
     ])
     return crud
 
@@ -90,44 +46,92 @@ class _FakePool:
 
 
 @pytest.mark.asyncio
-async def test_required_servers_intersect_tool_set(env):
+async def test_2d_template_requires_unity_and_comfyui_not_blender(env):
     pool = _FakePool({
-        "mcp_comfy": "connected",
-        "mcp_unity": "disconnected",
-        "mcp_unused": "connected",
-        "mcp_disabled": "disconnected",
+        "mcp_unity": "connected",
+        "mcp_comfy": "disconnected",
+        "mcp_blender": "connected",
     })
     with patch("services.workflow_svc.crud", env), \
          patch("infra.mcp.pool.mcp_pool", pool):
         svc = WorkflowService()
-        result = await svc.required_mcps("proj_1")
+        result = await svc.required_mcps("proj_2d")
 
+    names = {s["name"] for s in result}
+    assert names == {"unity", "comfyui"}, \
+        f"2D should require {{unity, comfyui}}; got {names}"
     by_name = {s["name"]: s for s in result}
-    # comfyui is needed (agent_alpha uses comfy_enqueue_workflow)
-    assert "comfyui" in by_name
-    assert by_name["comfyui"]["status"] == "connected"
-    assert by_name["comfyui"]["tools_used"] == ["comfy_enqueue_workflow"]
-
-    # unity is needed (Crew agents use manage_asset + read_console)
-    assert "unity" in by_name
-    assert by_name["unity"]["status"] == "disconnected"
-    assert sorted(by_name["unity"]["tools_used"]) == [
-        "manage_asset", "read_console",
-    ]
-
-    # blender NOT needed — no agent uses any blender tool
-    assert "blender" not in by_name
-
-    # tavily is disabled in DB → excluded even if it discovered tools
-    assert "tavily" not in by_name
+    assert by_name["unity"]["status"] == "connected"
+    assert by_name["comfyui"]["status"] == "disconnected"
 
 
 @pytest.mark.asyncio
-async def test_no_tasks_returns_empty(env):
-    pool = _FakePool({})
-    env.seed("projects", [make_project("proj_empty")])
+async def test_3d_template_requires_all_three(env):
+    pool = _FakePool({
+        "mcp_unity": "connected",
+        "mcp_comfy": "connected",
+        "mcp_blender": "connected",
+    })
     with patch("services.workflow_svc.crud", env), \
          patch("infra.mcp.pool.mcp_pool", pool):
         svc = WorkflowService()
-        result = await svc.required_mcps("proj_empty")
-    assert result == []
+        result = await svc.required_mcps("proj_3d")
+
+    names = {s["name"] for s in result}
+    assert names == {"unity", "comfyui", "blender"}, \
+        f"3D should require {{unity, comfyui, blender}}; got {names}"
+
+
+@pytest.mark.asyncio
+async def test_legacy_template_returns_empty(env):
+    pool = _FakePool({})
+    with patch("services.workflow_svc.crud", env), \
+         patch("infra.mcp.pool.mcp_pool", pool):
+        svc = WorkflowService()
+        result = await svc.required_mcps("proj_legacy")
+    assert result == [], "legacy (no template) should not block start"
+
+
+@pytest.mark.asyncio
+async def test_disabled_mcp_excluded(env):
+    """Even if the template would whitelist a server, enabled=0 means
+    the user has explicitly turned it off — don't gate on it."""
+    # Patch the whitelist for this test so we don't depend on the
+    # production set.
+    from services import template_cloner_svc
+    with patch.object(
+        template_cloner_svc, "TEMPLATE_REQUIRED_MCPS",
+        {"unity_universal_2d": {"unity", "git"}},  # git is disabled in env
+    ):
+        pool = _FakePool({"mcp_unity": "connected"})
+        with patch("services.workflow_svc.crud", env), \
+             patch("infra.mcp.pool.mcp_pool", pool):
+            svc = WorkflowService()
+            result = await svc.required_mcps("proj_2d")
+
+    names = {s["name"] for s in result}
+    # `git` is whitelisted but disabled — must NOT appear as required
+    assert "git" not in names
+    assert names == {"unity"}
+
+
+@pytest.mark.asyncio
+async def test_missing_required_mcp_surfaces_as_not_configured(env):
+    """A whitelisted MCP that the user hasn't configured at all should
+    show as status='not_configured' so the UI can flag it explicitly."""
+    from services import template_cloner_svc
+    with patch.object(
+        template_cloner_svc, "TEMPLATE_REQUIRED_MCPS",
+        {"unity_universal_2d": {"unity", "neverheardofthis_mcp"}},
+    ):
+        pool = _FakePool({"mcp_unity": "connected"})
+        with patch("services.workflow_svc.crud", env), \
+             patch("infra.mcp.pool.mcp_pool", pool):
+            svc = WorkflowService()
+            result = await svc.required_mcps("proj_2d")
+
+    by_name = {s["name"]: s for s in result}
+    assert by_name["unity"]["status"] == "connected"
+    assert "neverheardofthis_mcp" in by_name
+    assert by_name["neverheardofthis_mcp"]["status"] == "not_configured"
+    assert by_name["neverheardofthis_mcp"]["server_id"] == ""

@@ -267,6 +267,20 @@ def _parse_contract_signature(sig: str, kind: str) -> dict | None:
             if m["kind"] == "event":
                 return m
         return None
+    elif kind == "field":
+        # `public int RageLevel` — a bare field decl needs the trailing
+        # `;` to parse as field_declaration; without it tree-sitter sees
+        # the next `{` and decides it's a property with an empty
+        # accessor list (kind='property') → contract lookup misses.
+        # 2026-05-19 fix: PlayerController contract had `public int
+        # RageLevel` as kind=field which previously returned None →
+        # "契约 signature 无法解析" → Debugger skipped it.
+        wrapped = f"class _D {{ {sig}; }}"
+        members = _extract_members(wrapped.encode("utf-8"))
+        for m in members:
+            if m["kind"] == "field":
+                return m
+        return None
 
     # method / fallback
     wrapped = f"class _D {{ {sig} {body} }}"

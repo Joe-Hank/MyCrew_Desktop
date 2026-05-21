@@ -211,6 +211,10 @@ function ProjectCard({ project }: { project: Project }) {
     rootParentPath, slug,
   }: { rootParentPath: string; slug: string }) {
     setScaffoldModalOpen(false);
+    // Remember the chosen parent for next time. Persisted via
+    // usePrefsStore so a returning user starts pre-filled with their
+    // last F:\UnityProjects (or wherever) instead of an empty field.
+    usePrefsStore.getState().setScaffoldParent(rootParentPath);
     try {
       await scaffoldMut.mutateAsync({
         projectId: project.id,
@@ -566,8 +570,12 @@ function ProjectCard({ project }: { project: Project }) {
 
       {scaffoldModalOpen && (
         <ScaffoldConfigModal
-          defaultSlug={deriveSlugFromName(project.name)}
-          defaultParent={project.root_parent_path ?? ""}
+          defaultSlug={deriveSlugFromName(project.name, project.id)}
+          defaultParent={
+            project.root_parent_path
+            ?? usePrefsStore.getState().scaffoldParent
+            ?? ""
+          }
           templateLabel={
             project.template_id ? TEMPLATE_LABELS[project.template_id] : undefined
           }

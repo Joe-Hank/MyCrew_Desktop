@@ -57,6 +57,14 @@ def _resolve_tools(tool_name_to_id: dict[str, str], names: list[str]) -> list[st
 #   - QA agents only read + emit_output verdict.
 
 _UNIVERSAL = ["write_file", "read_file_local", "list_directory_local", "emit_output", "mkdir"]
+# Head agents are spec-emitters only — they read upstream, decide what
+# the Executor will do, emit_output. Giving them `write_file` / `mkdir`
+# tempts the LLM to skip emit_output and "just write the .cs/.png"
+# itself (real production failure: 2026-05-20 System Designer dumped
+# both MenuController + GameManager into one file via write_file
+# instead of producing a spec). Strip the writers from Head's toolset
+# so the only `Action` an LLM can pick is `emit_output`.
+_HEAD_READONLY = ["read_file_local", "list_directory_local", "emit_output"]
 # Git tools — Unity projects are git repos; the implementing developer
 # needs status / log / diff to know what they changed and add/commit
 # to checkpoint progress.
@@ -101,36 +109,111 @@ SEED_AGENTS: list[dict] = [
     {
         "role": "Art Director",
         "goal": "把任务的 output_paths 转化为可执行的美术规格（分辨率/风格/配色/命名），交给下游 Executor。",
-        "backstory": "你是 MyCrew Art / 3D / Animation / VFX Crew 共享的 Head。只产规格，不直接动手做资产。",
-        "tools": _UNIVERSAL,
+        "backstory": (
+            "你是 MyCrew Art / 3D / Animation / VFX Crew 共享的 Head。"
+            "**你不写文件、不动磁盘**——只产 spec 通过 emit_output 提交。"
+            "工具栏里只有 read / list / emit_output，没有 write_file 是故意的。"
+        ),
+        "tools": _HEAD_READONLY,
+    },
+    {
+        # 2026-05-20 image flow v2: PromptSmith 替代 Art Director 在
+        # 2D 美术 / UI 实现 Crew 里的 Head 位置。它**只为单张图写
+        # 主体提示词**——风格已由 PM Phase 7 StyleArchitect 项目级
+        # 决定，PromptSmith 在 prev_payload.art_style_spec 里能看到。
+        "role": "PromptSmith",
+        "goal": (
+            "为每张待生成的图写出**单一主体**的 subject_prompt（不含风格、"
+            "不含负面、不含项目级关键词）。风格已经在项目 art_style_spec 里"
+            "定好——你只补主体、动作、构图角度。"
+        ),
+        "backstory": (
+            "你是 ComfyUI 图流的提示词工程师。\n\n"
+            "# 输入信号（按重要性）\n"
+            "- task.detail：单张图的具体描述\n"
+            "- task.output_paths：决定文件名（暗示主体）\n"
+            "- task.output_schema：决定尺寸\n"
+            "- prev_payload.art_style_spec：**项目级**风格 + checkpoint + "
+            "  background_mode。你不该重复 style_prompt 的内容——它会被"
+            "  自动拼到你输出的前面。\n\n"
+            "# 你必须输出（emit_output payload）\n"
+            "```\n"
+            "{\n"
+            "  'prompts': {\n"
+            "    '<output_path>': {\n"
+            "      'subject_prompt': '单一主体描述',\n"
+            "      'seed': <int>\n"
+            "    }, ...\n"
+            "  }\n"
+            "}\n"
+            "```\n\n"
+            "# 单图单主体铁律\n"
+            "- ✅ 'Billy Butcher, frontal portrait shot, leather coat, "
+            "stern expression, shoulders up'\n"
+            "- ❌ 'Billy Butcher and Homelander side-by-side'（多主体）\n"
+            "- ❌ 'character turnaround, front side back views'（三视图）\n"
+            "- ❌ 'character in multiple poses'（多姿势）\n"
+            "- ❌ 'three different angles'（多角度）\n"
+            "**禁止任何让 ComfyUI 在一张图里画多个主体/多个视角/多个姿势"
+            "的描述**。需要 N 张不同视角 → PM 应该拆 N 个 task，每个 "
+            "task 一张图。\n\n"
+            "# 严禁\n"
+            "- 在 subject_prompt 里加风格关键词（如 'pixel art / "
+            "  photorealistic'）——会跟项目级 style_prompt 冲突\n"
+            "- 在 subject_prompt 里加质量词（'high quality / masterpiece / "
+            "  detailed'）——SD 自己会处理\n"
+            "- 写 negative_prompt（FLUX 不支持，未来扩展再说）\n"
+            "- 直接生图（你只出 prompt，下游 Generator 是脚本）\n"
+            "- 多主体 / 多视角 / 多姿势 / spritesheet / atlas 类描述\n\n"
+            "# 风格\n"
+            "用 emit_output **工具**调用提交。完事用一句中文确认。"
+        ),
+        "tools": _HEAD_READONLY,
+    },
+    {
+        "role": "StyleArchitect",
+        "goal": "项目级美术风格决策——一次性敲定风格关键词 + checkpoint + 透明背景模式。",
+        "backstory": (
+            "PM Phase 7 的 head agent。**项目一次性**——所有 art Crew 共享。"
+            "看用户原始 prompt + ConceptDoc，产 ArtStyleSpec。详细规则见 "
+            "_planner_prompts.PHASE7_BACKSTORY。"
+        ),
+        "tools": _HEAD_READONLY,
     },
     {
         "role": "System Designer",
         "goal": "把任务的 output_paths（C# 脚本）转化为实现规格：类名/方法签名/状态机/算法步骤。",
-        "backstory": "你是 System Impl Crew 的 Head。task.detail 给业务，你把它细化到方法级别。",
-        "tools": _UNIVERSAL,
+        "backstory": (
+            "你是 System Impl Crew 的 Head。task.detail 给业务，你把它细化到方法级别。"
+            "**你不写 .cs 文件**——那是下游 Unity Developer 的活。"
+            "你只通过 emit_output 提交 spec dict。"
+        ),
+        "tools": _HEAD_READONLY,
     },
     {
         "role": "UI/UX Designer",
         "goal": "把任务的 UI Prefab + 图片路径转化为 UI 规格：布局、图片清单、交互行为。",
-        "backstory": "你是 UI Impl Crew 的 Head。产规格，不做实装。",
-        "tools": _UNIVERSAL,
+        "backstory": (
+            "你是 UI Impl Crew 的 Head。**产规格不写文件**——emit_output 提交。"
+        ),
+        "tools": _HEAD_READONLY,
     },
     {
         "role": "Audio Designer",
         "goal": "把 task.output_paths（.wav）转化为音效规格：类型/时长/8-bit 关键词。",
-        "backstory": "你是 Audio Crew 的 Head。产规格，不调合成器。",
-        "tools": _UNIVERSAL,
+        "backstory": (
+            "你是 Audio Crew 的 Head。**产规格不调合成器**——emit_output 提交。"
+        ),
+        "tools": _HEAD_READONLY,
     },
     {
         "role": "Level Designer",
         "goal": "扫描上游已完成 task 的产物，生成场景装配清单（prefab/位置/层级/脚本挂载/引用）。",
-        "backstory": "你是 Scene Assembly Crew 的 Head；也可以作为单 agent 出关卡设计文档。",
-        # _UNIVERSAL already includes read_file_local + list_directory_local;
-        # listing them again here produced duplicate tool instances at
-        # runtime (the original "ensure they're really there" intent
-        # was a copy-paste from before _UNIVERSAL grew those entries).
-        "tools": _UNIVERSAL,
+        "backstory": (
+            "你是 Scene Assembly Crew 的 Head；也可以作为单 agent 出关卡设计文档。"
+            "**只读 + emit_output，不写 .unity 文件**。"
+        ),
+        "tools": _HEAD_READONLY,
     },
     # ── Executors ─────────────────────────────────────────────────
     {
@@ -285,54 +368,127 @@ SEED_AGENTS: list[dict] = [
 # _STEP_PREAMBLE (hard constraint) and then the step-specific body.
 
 def _seq_step(role: str, instructions: str, *,
-              step_role: str, progress_template: str = "") -> dict:
-    return {
+              step_role: str, progress_template: str = "",
+              fanout: dict | None = None,
+              kind: str | None = None) -> dict:
+    """Build one step dict for a Crew's agent_sequence.
+
+    `fanout`: when non-None, marks this step as a parallel fan-out point.
+    The runner (workflow_svc._run_crew) will look up every task row whose
+    `parent_task_id == <this Crew task>.id` and dispatch them concurrently
+    (asyncio.gather + asyncio.Semaphore(fanout["concurrency_cap"]))
+    rather than running the step once on the parent. Crew v5 (2026-05-19):
+    homogeneous sub-tasks (5 AI scripts / 4 sprites / 6 SFX) get one
+    parent crew_group + N children; only the Executor step inside the
+    Crew fans out, while Head/QA stay sequential and see unified spec/
+    aggregated results.
+
+    Shape: `{"concurrency_cap": int}` — extensible to future fields like
+    `mode`, `batch_size`, etc.
+
+    `kind`: optional dispatch override. Currently only one value used:
+    `"script_qa"` swaps the LLM QA step for `services.qa_script.
+    verify_task_qa` — deterministic Python checks (file/dim/magic/
+    contract) rather than a CrewAI agent. The `agent_role` is kept for
+    UI continuity (QA Engineer card stays in the team page) but the
+    agent record isn't dispatched.
+    """
+    step: dict = {
         "role": step_role,             # 'head' | 'executor' | 'qa'
         "agent_role": role,            # human-readable, resolved to agent_id at insert
         "step_instructions": _STEP_PREAMBLE + instructions,
         "progress_template": progress_template,
     }
+    if fanout is not None:
+        step["fanout"] = fanout
+    if kind is not None:
+        step["kind"] = kind
+    return step
 
 
 SEED_CREWS: list[dict] = [
     # ── Art Crew (2D sprite / concept / UI image) ─────────────────
     {
-        "name": "美术资产组",
-        "applicable_scenarios": "2D sprite / 概念图 / UI 图 / 任何 PNG 图像资源（含 ComfyUI 真生图 + Unity 导入）",
+        "name": "2D 美术资产组",
+        "applicable_scenarios": "**.png / .jpg / .jpeg 二维图像专属**（2D sprite / 概念图 / UI 图标 / 角色立绘 / 物品图）。ComfyUI 真生图 + Unity sprite 导入。**禁止用于 .fbx / .blend / .obj —— 那是 3D 模型组**。",
         "sequence": [
             _seq_step(
-                "Art Director",
-                "把 task.output_paths 里的每一项转化为「产物执行规格」：**尺寸从 task.output_schema 读 width / height（PM 已定，不要重定）**、风格关键词 + 配色码、命名差异点。"
-                "把 spec 写到一个 dict 里调 emit_output(payload={'width': <from output_schema>, 'height': <from output_schema>, 'style': ..., 'palette': ..., 'naming': ...})，供下游使用。",
+                # 2026-05-20 image flow v2: 替换 Art Director 为
+                # PromptSmith。风格已由 PM Phase 7 定到项目级；这一
+                # 步只针对每张图写「单一主体」的 subject_prompt。
+                "PromptSmith",
+                "为 task.output_paths 里**每一张**待生成的图写主体 prompt。\n\n"
+                "## 你看到什么\n"
+                "- task.detail：本任务每张图的具体描述\n"
+                "- task.output_paths：决定文件名（暗示主体）\n"
+                "- prev_payload.art_style_spec：**项目级风格**——你 **不要**"
+                "  在 subject_prompt 里重复任何风格/调性/媒介关键词，那是"
+                "  下游 Generator 自动拼到前面的事\n\n"
+                "## 你必须输出（emit_output payload）\n"
+                "```\n"
+                "{\n"
+                "  'prompts': {\n"
+                "    '<output_path_1>': {\n"
+                "      'subject_prompt': '单一主体的描述',\n"
+                "      'seed': <int>\n"
+                "    },\n"
+                "    '<output_path_2>': { ... }\n"
+                "  }\n"
+                "}\n"
+                "```\n\n"
+                "## 单图单主体铁律（违反就重做）\n"
+                "- ✅ 'Billy Butcher, frontal head-and-shoulders portrait, "
+                "leather coat, stern expression'\n"
+                "- ❌ 'Billy Butcher, Homelander, Train, side by side'（多主体）\n"
+                "- ❌ 'character turnaround front side back'（三视图）\n"
+                "- ❌ 'spritesheet of 4 walking frames'（多帧）\n"
+                "- ❌ 'in different poses'（多姿势）\n"
+                "**如果 task 要求多张图，每张图各写一个 subject_prompt，"
+                "不要把多个主体塞进同一张图。**\n\n"
+                "## 严禁\n"
+                "- 在 subject_prompt 里写 'pixel art / photorealistic / "
+                "masterpiece / high quality'——风格和质量词由 Generator 拼\n"
+                "- 写 negative_prompt（当前不支持）\n"
+                "- 多主体 / 多视角 / spritesheet 类描述\n"
+                "- 在 Thought 里写 'Action: emit_output' 当成调用（必须真用工具）\n",
                 step_role="head",
-                progress_template="制定 {n} 项美术规格",
+                progress_template="为 {n} 张图写单图主体 prompt",
             ),
-            _seq_step(
-                "Concept Artist",
-                "基于 Head 的 spec + task.output_paths 清单，用 ComfyUI 出「风格参考图」作为视觉锚点。"
-                "参考图放 `<project>/output/_crew_cache/<task_id>/concept_*.png`（不入 task.output_paths）。"
-                "不要直接生成最终资产。调 emit_output(payload={'reference_paths': [...]}) 报告。",
-                step_role="executor",
-                progress_template="出参考图 ({count}/{total})",
-            ),
+            # 2026-05-19: 删掉 Concept Artist 步骤。原设计是"出参考图作为
+            # 视觉锚点"，但 ComfyUI `comfy_create_workflow_from_template`
+            # 接收的 params 是 width/height/positive_prompt/negative_prompt
+            # 字符串，没有 reference image 输入字段（除非模板用
+            # IP-Adapter/ControlNet，目前没用）。Concept Artist 出的 PNG
+            # 下游完全消费不了 → 浪费一次 ComfyUI 调用 + 中间步骤失败时
+            # halt rule 把整个 Crew 拖死。Head 直接产 prompt 给 Generator。
             _seq_step(
                 "ComfyUI Image Generator",
-                "对 task.output_paths 中**每一个**目标路径，调 comfy_create_workflow_from_template + comfy_enqueue_workflow 真生 PNG。"
-                "**width / height 必须显式从 task.output_schema 读取并传给 params**（不是 Head spec）—— 例如 params={'width': task.output_schema.width, 'height': task.output_schema.height, 'positive_prompt': ...}。"
-                "风格/配色取 Head spec，视觉参考取 Concept Artist 的 reference_paths。"
-                "生成后建议自调 verify_image_dimensions 一遍，确保尺寸符契约再 emit。"
-                "严禁用 write_file 写空 png 占位。"
-                "调 emit_output(payload={'file_paths': [全部 task.output_paths], 'width': <契约值>, 'height': <契约值>}) 报告。",
+                # Stage 3 (2026-05-20): the executor step is now executed
+                # by `services.image_gen_script.generate_image_for_child`
+                # — a deterministic Python ComfyUI HTTP client. No LLM
+                # involved. Step instructions retained as documentation
+                # of what the script does, but workflow_svc dispatches
+                # by `kind="script_comfy_generate"` and never reads the
+                # text below.
+                "[脚本执行，不调 LLM] 取 Head emit_output 的 prompts 映射，"
+                "对每个 output_path 调 ComfyUI HTTP API 真生图：build txt2img "
+                "workflow JSON → POST /prompt → poll /history → fetch PNG → "
+                "PIL 缩放到契约尺寸 → 落盘到 root_path/output_path。",
                 step_role="executor",
                 progress_template="生成 ({count}/{total}) PNG",
+                # ComfyUI is local + GPU-bound — 1 generation at a time.
+                fanout={"concurrency_cap": 1},
+                kind="script_comfy_generate",
             ),
             _seq_step(
                 "Technical Artist",
-                "对每个生成的 PNG：用 manage_asset 设置 TextureType=Sprite + 配 pixel-per-unit；"
-                "task.detail 暗示是 sprite sheet 时用 manage_texture 切片。"
-                "不修改路径/文件名。调 emit_output(payload={'imported': [...]}) 报告导入 status。",
+                "[脚本执行，不调 LLM] 按 suffix 规则映射 Unity TextureImporter 字段："
+                "textureType (Sprite/Default/NormalMap) / filterMode (Point/Bilinear) / "
+                "wrapMode / mipmapEnabled / spriteMode / alphaIsTransparency / maxTextureSize。"
+                "对每个产出文件调 Unity MCP `manage_asset action=modify`，最后 refresh_unity。",
                 step_role="executor",
                 progress_template="导入 ({count}/{total}) sprite",
+                kind="script_unity_import",
             ),
             _seq_step(
                 "QA Engineer",
@@ -341,8 +497,10 @@ SEED_CREWS: list[dict] = [
                 "4) **对每个图像文件调 verify_image_dimensions(file_path=<路径>, expected_width=task.output_schema.width, expected_height=task.output_schema.height)，返回 ok=false 直接 verdict=fail，issues 必须带实际 actual_width × actual_height 与契约尺寸的对比**。"
                 "**不参考 Head spec 作为补充验收**——尺寸 source of truth 是 task.output_schema。"
                 "**emit_output 的 payload 必须含 task.output_schema 里 required 列的全部字段**——本任务为 file_paths / width / height，缺一个 schema 校验就 fail。"
+                "**Crew v5 fan-out 模式**：若 prev_step_payload 含 `results` 数组（N 个子 task 的 captured），逐项校验每个 sub-result.verdict；任一非 pass 则整体 verdict=fail，issues 汇总所有失败子的原因。"
                 "调 emit_output(payload={'verdict': 'pass'|'fail', 'file_paths': [...], 'width': <契约值>, 'height': <契约值>, 'issues': [...], 'summary': '...'})。",
                 step_role="qa",
+                kind="script_qa",
                 progress_template="验收 {n} 个 PNG",
             ),
         ],
@@ -350,7 +508,7 @@ SEED_CREWS: list[dict] = [
     # ── 3D Asset Crew ─────────────────────────────────────────────
     {
         "name": "3D 模型组",
-        "applicable_scenarios": "3D 模型（角色 / 道具 / 环境，输出 .fbx / .blend / .obj）",
+        "applicable_scenarios": "**.fbx / .blend / .obj 三维模型专属**（3D 角色 / 道具 / 环境网格）。Blender MCP 建模。**禁止用于 .png 平面图 —— 那是 2D 美术资产组**。",
         "sequence": [
             _seq_step(
                 "Art Director",
@@ -369,17 +527,19 @@ SEED_CREWS: list[dict] = [
             ),
             _seq_step(
                 "Technical Artist",
-                "对每个 .fbx：用 manage_asset 配 Unity Model Importer（rig type / animation type / read-write enabled）。"
-                "task.detail 提到 LOD → manage_asset 设置 LODGroup。"
-                "调 emit_output(payload={'imported': [...]}) 报告。",
+                "[脚本执行，不调 LLM] 按 task.detail 关键字映射 Unity ModelImporter："
+                "meshCompression / isReadable / importNormals / animationType (None/Generic/Humanoid)。"
+                "对每个 .fbx/.obj/.blend 调 manage_asset action=modify。",
                 step_role="executor",
                 progress_template="导入 ({count}/{total}) 模型",
+                kind="script_unity_import",
             ),
             _seq_step(
                 "QA Engineer",
                 "对照 PM 契约验收：1) 每个 .fbx 文件存在 + 非空；2) FBX 文件首部 magic 合法（首字符 'K' 或 binary FBX 头）；3) 同名 .meta 已生成。"
                 "调 emit_output(payload={'verdict': ..., 'file_paths': [...], 'issues': [...]})。",
                 step_role="qa",
+                kind="script_qa",
                 progress_template="验收 {n} 个 .fbx",
             ),
         ],
@@ -421,6 +581,7 @@ SEED_CREWS: list[dict] = [
                 "对照 PM 契约验收文件存在 + 非空 + .meta 齐全。"
                 "调 emit_output(payload={'verdict': ..., 'file_paths': [...], 'issues': [...]})。",
                 step_role="qa",
+                kind="script_qa",
                 progress_template="验收 {n} 个动画",
             ),
         ],
@@ -456,6 +617,7 @@ SEED_CREWS: list[dict] = [
                 "对照 PM 契约验收：prefab 文件存在 + 可加载（无 Missing reference）+ meta 齐全。"
                 "调 emit_output(payload={'verdict': ..., 'file_paths': [...], 'issues': [...]})。",
                 step_role="qa",
+                kind="script_qa",
                 progress_template="验收 VFX prefab",
             ),
         ],
@@ -484,14 +646,18 @@ SEED_CREWS: list[dict] = [
                 "**如果你因 max_iter 提前停手 → 当前未覆盖的签名留给 QA 报 fail，整个 task 失败、下游阻塞**。",
                 step_role="executor",
                 progress_template="写脚本 ({count}/{total})",
+                # LLM-bound; DeepSeek 单 API key 健康并发上限 ~3.
+                fanout={"concurrency_cap": 3},
             ),
             _seq_step(
                 "QA Engineer",
                 "对照 PM **code_contract**（runtime 注入）+ 文件存在性 双重验收："
                 "1) 每个 .cs 文件存在 + .meta 齐全 + validate_script 通过；"
                 "2) **对契约里列的每个 signature 调 find_in_file(path, signature)**，缺一个即 verdict='fail'，issues 必须列具体缺失符号（让 Debugger 能定位）。"
+                "**Crew v5 fan-out 模式**：若 prev_step_payload 含 `results` 数组，逐项校验每个 sub-result.verdict；任一非 pass 则整体 verdict=fail，issues 汇总所有失败子的缺失符号。"
                 "调 emit_output(payload={'verdict': ..., 'file_paths': [...], 'issues': [...]})。",
                 step_role="qa",
+                kind="script_qa",
                 progress_template="验收 {n} 个 .cs",
             ),
         ],
@@ -537,6 +703,7 @@ SEED_CREWS: list[dict] = [
                 "**emit_output 的 payload 必须含 task.output_schema.required 全部字段（任务含图像 → 必带 width/height）**。"
                 "调 emit_output(payload={'verdict': ..., 'file_paths': [...], 'width': <如有>, 'height': <如有>, 'issues': [...]})。",
                 step_role="qa",
+                kind="script_qa",
                 progress_template="验收 UI prefab",
             ),
         ],
@@ -560,20 +727,27 @@ SEED_CREWS: list[dict] = [
                 "调 emit_output(payload={'file_paths': [...]}) 报告。",
                 step_role="executor",
                 progress_template="合成 ({count}/{total}) wav",
+                # 8-bit synthesis is CPU-light + pure Python, safe to fan-out.
+                fanout={"concurrency_cap": 3},
             ),
             _seq_step(
                 "Unity Developer",
-                "把每个 .wav 通过 manage_asset 配为 AudioClip（import setting：mono / load type / preload）。"
-                "如 task.detail 要求，建一个 AudioManager.cs 关联这些 clip（可选）。"
-                "调 emit_output(payload={'imported': [...]}) 报告。",
+                "[脚本执行，不调 LLM] 按文件时长 + task.detail 关键字映射 Unity AudioImporter："
+                "loadType (Streaming/DecompressOnLoad/CompressedInMemory) / "
+                "compressionFormat (Vorbis/ADPCM) / forceToMono / preloadAudioData。"
+                "对每个 .wav/.mp3/.ogg 调 manage_asset action=modify。"
+                "AudioManager.cs 创建不在此步——属于系统实现组的活。",
                 step_role="executor",
                 progress_template="导入 ({count}/{total}) AudioClip",
+                kind="script_unity_import",
             ),
             _seq_step(
                 "QA Engineer",
                 "对照 PM 契约：.wav 存在 + size > 44 字节（RIFF 头）+ RIFF/WAVE header 合法（首 4 字节 b'RIFF'、字节 8-12 b'WAVE'）+ .meta 齐全。"
+                "**Crew v5 fan-out 模式**：若 prev_step_payload 含 `results` 数组，逐项校验每个 sub-result.verdict；任一非 pass 则整体 verdict=fail。"
                 "调 emit_output(payload={'verdict': ..., 'file_paths': [...], 'issues': [...]})。",
                 step_role="qa",
+                kind="script_qa",
                 progress_template="验收 {n} 个 wav",
             ),
         ],
@@ -605,6 +779,7 @@ SEED_CREWS: list[dict] = [
                 "对照 PM 契约验收：1) 场景文件存在；2) 用 manage_scene load 能成功加载（无 Missing reference 错误，看 read_console）；3) spec 中列的每个 GameObject 在场景里能 find_gameobjects 到。"
                 "调 emit_output(payload={'verdict': ..., 'file_paths': [...], 'issues': [...]})。",
                 step_role="qa",
+                kind="script_qa",
                 progress_template="验收场景",
             ),
         ],
@@ -711,7 +886,11 @@ async def _ensure_crew(spec: dict, role_to_agent_id: dict[str, str]) -> str:
 # runs once per boot before the normal _ensure_crew loop; if the old
 # name is gone (fresh install) it's a no-op.
 _LEGACY_NAME_MAP: dict[str, str] = {
-    "Art Crew": "美术资产组",
+    "Art Crew": "2D 美术资产组",
+    # 2026-05-19: rename "美术资产组" → "2D 美术资产组" so Phase 5
+    # LLM can't confuse it with the 3D Crew (the bare "美术" prefix
+    # routinely got "角色 sprite" tasks misrouted to Blender).
+    "美术资产组": "2D 美术资产组",
     "3D Asset Crew": "3D 模型组",
     "Animation Crew": "动画组",
     "VFX Crew": "特效组",
@@ -799,5 +978,44 @@ async def ensure_crew_pool(tool_name_to_id: dict[str, str]) -> dict[str, str]:
     for crew_spec in SEED_CREWS:
         cid = await _ensure_crew(crew_spec, role_to_agent_id)
         crew_name_to_id[crew_spec["name"]] = cid
+
+    # 2026-05-19: refresh applicable_scenarios + agent_sequence + agent_ids
+    # on existing crew rows so prompt + sequence changes (e.g. dropping
+    # Concept Artist from 2D Crew) actually reach the runtime. _ensure_crew
+    # is INSERT-only; without this UPDATE pass, edits to SEED_CREWS only
+    # take effect on a freshly seeded DB. Cheap idempotent rewrite.
+    for crew_spec in SEED_CREWS:
+        cid = crew_name_to_id.get(crew_spec["name"])
+        if not cid:
+            continue
+        # Rebuild sequence + agent_ids using current role→id map. Skips
+        # any step whose agent_role doesn't resolve (logs warning, doesn't
+        # silently drop without notice — same _ensure_crew behavior).
+        sequence: list[dict] = []
+        agent_ids: list[str] = []
+        for step in crew_spec["sequence"]:
+            agent_role = step["agent_role"]
+            agent_id = role_to_agent_id.get(agent_role)
+            if not agent_id:
+                log.warning("seed.crew_refresh_missing_agent",
+                            crew=crew_spec["name"], role=agent_role)
+                continue
+            refreshed_step = {
+                "role": step["role"],
+                "agent_id": agent_id,
+                "step_instructions": step["step_instructions"],
+                "progress_template": step["progress_template"],
+            }
+            if step.get("fanout") is not None:
+                refreshed_step["fanout"] = step["fanout"]
+            if step.get("kind") is not None:
+                refreshed_step["kind"] = step["kind"]
+            sequence.append(refreshed_step)
+            agent_ids.append(agent_id)
+        await crud.update_by_id("crews", cid, {
+            "applicable_scenarios": crew_spec["applicable_scenarios"],
+            "agent_sequence": json.dumps(sequence, ensure_ascii=False),
+            "agent_ids": json.dumps(agent_ids),
+        })
 
     return crew_name_to_id

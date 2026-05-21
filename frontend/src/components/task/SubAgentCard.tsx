@@ -25,12 +25,19 @@ interface SubAgentCardProps {
   stepIndex: number;
   stepRole: "head" | "executor" | "qa";
   agentId: string;
-  totalSteps: number;
+  /** Retained for backward-compat with ContractCheckCard's spread call.
+   *  Sequential cards no longer render an n/m badge per V5 spec — the
+   *  expanded Crew shell already enumerates the chain visually. */
+  totalSteps?: number;
   status: SubStepStatus;
   /** Filled when status='failed' so we can show the kind in tooltips. */
   errorText?: string;
   /** Crew-defined template like "生成中 ({count}/{total} 完成)". */
   progressTemplate?: string;
+  /** When set, this step is dispatched by a deterministic Python check
+   *  rather than an agent. The card hides head-only affordances and
+   *  shows a「自动验收」label instead of the agent role. */
+  stepKind?: "script_qa" | null;
   onAction: (action: SubStepAction) => void;
 }
 
@@ -71,19 +78,24 @@ function SubAgentCard({
   stepIndex,
   stepRole,
   agentId,
-  totalSteps,
   status,
   errorText,
   progressTemplate,
+  stepKind,
   onAction,
 }: SubAgentCardProps) {
   const { data: agents } = useAgents();
-  const agentLabel =
-    (agents ?? []).find((a) => a.id === agentId)?.role ?? agentId.slice(-8);
+  const isScript = stepKind === "script_qa";
+  const agentLabel = isScript
+    ? "自动验收"
+    : ((agents ?? []).find((a) => a.id === agentId)?.role ?? agentId.slice(-8));
 
   // Q11 sub-card action gating. Head retains the full action set;
   // Executor + QA are read-only (chat + IO viewer only).
-  const isHead = stepRole === "head";
+  // Script-dispatched steps (kind="script_qa") never expose head
+  // affordances regardless of role — there's no LLM spec to edit, no
+  // run to pause, and "retry" is the parent task's retry button.
+  const isHead = stepRole === "head" && !isScript;
   // Mirror the parent task's status to decide which actions are alive.
   // ready: nothing; running: pause; paused: edit/resume; failed: edit/retry/chat;
   // done: nothing actionable except IO; stalled: edit/retry/chat.
@@ -115,32 +127,33 @@ function SubAgentCard({
       }}
       title={errorText || ""}
     >
-      {/* Role + step index header — same row layout as TaskNode's
-          top-row index pill + title pair. */}
-      <div className="mb-2 flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <span
-            className="flex h-5 items-center justify-center rounded-full px-1.5 text-[10px] font-semibold"
-            style={{
-              backgroundColor: ROLE_BADGE_BG[stepRole],
-              color: ROLE_BADGE_FG[stepRole],
-            }}
-          >
-            {ROLE_LABEL_ZH[stepRole]}
-          </span>
-          <span
-            className="text-sm font-medium truncate"
-            style={{ color: "var(--color-ink-soft)" }}
-            title={agentLabel}
-          >
-            {agentLabel}
-          </span>
-        </div>
+      {/* Role + agent header. V5 (2026-05-20) removed the top-right
+          n/m badge — the expanded Crew shell already enumerates the
+          step chain visually, so the per-card index was redundant +
+          stole title space. */}
+      <div className="mb-2 flex items-center gap-2">
         <span
-          className="shrink-0 text-[10px]"
-          style={{ color: "var(--color-ink-faint)" }}
+          className="flex h-5 shrink-0 items-center justify-center rounded-full px-1.5 text-[10px] font-semibold"
+          style={{
+            backgroundColor: isScript
+              ? "rgba(20, 184, 166, 0.16)"  // teal — matches ContractCheckCard
+              : ROLE_BADGE_BG[stepRole],
+            color: isScript ? "#0d9488" : ROLE_BADGE_FG[stepRole],
+          }}
+          title={
+            isScript
+              ? "脚本验收：确定性 Python 检查，不调用 LLM"
+              : ROLE_LABEL_ZH[stepRole]
+          }
         >
-          {stepIndex + 1}/{totalSteps}
+          {isScript ? "自动" : ROLE_LABEL_ZH[stepRole]}
+        </span>
+        <span
+          className="min-w-0 flex-1 truncate text-sm font-medium"
+          style={{ color: "var(--color-ink-soft)" }}
+          title={agentLabel}
+        >
+          {agentLabel}
         </span>
       </div>
 

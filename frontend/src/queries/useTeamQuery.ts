@@ -24,6 +24,18 @@ export interface CrewSequenceStep {
   agent_id: string;
   step_instructions: string;
   progress_template: string;
+  /** Crew v5 fan-out marker. When set, this step is executed once per
+   *  child task of the parent (parent_task_id pointer), bounded by
+   *  concurrency_cap. Drives the parallel sub-card UI: progress x/y +
+   *  expand button revealing the child row. */
+  fanout?: { concurrency_cap: number } | null;
+  /** Dispatch override. Currently only one value used:
+   *  - `"script_qa"` — the step is executed by the deterministic
+   *    Python QA (`services.qa_script.verify_task_qa`) instead of a
+   *    CrewAI agent. The card still renders, but with the「自动验收」
+   *    label instead of the agent role, and without head-style
+   *    affordances (edit / pause / retry) that don't apply. */
+  kind?: "script_qa" | null;
 }
 
 export interface Crew {

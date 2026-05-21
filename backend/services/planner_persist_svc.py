@@ -95,6 +95,7 @@ async def save_draft_as_project(
             refreshed_proj,
             blueprint.get("architecture_overview", ""),
             blueprint["tasks"],
+            art_style_spec=blueprint.get("art_style_spec"),
         )
     except Exception as exc:
         # Roll back: delete project row + its tasks (FK cascade in schema

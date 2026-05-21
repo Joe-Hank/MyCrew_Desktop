@@ -61,7 +61,9 @@ def test_eight_crews_exactly():
     assert len(SEED_CREWS) == 8
     names = {c["name"] for c in SEED_CREWS}
     expected = {
-        "美术资产组", "3D 模型组", "动画组", "特效组",
+        # 2026-05-19: "美术资产组" → "2D 美术资产组" rename to make
+        # Phase 5 routing's 2D vs 3D distinction harder to miss.
+        "2D 美术资产组", "3D 模型组", "动画组", "特效组",
         "系统实现组", "UI 实现组",
         "音频组", "场景装配组",
     }
