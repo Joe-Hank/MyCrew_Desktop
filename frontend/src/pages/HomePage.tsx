@@ -2,19 +2,47 @@ import { useState } from "react";
 import ProjectGrid from "../components/home/ProjectGrid";
 import StatusBars from "../components/home/StatusBars";
 import InceptionDrawer from "../components/inception/InceptionDrawer";
+import PillTabs from "../components/common/PillTabs";
 import { useInceptionStore } from "../stores/useInceptionStore";
 import { useProjects } from "../queries/useProjectQuery";
+import { usePrefsStore, type HomeCategory } from "../stores/usePrefsStore";
 
 function HomePage() {
   const { openDrawer } = useInceptionStore();
   const [page, setPage] = useState(1);
-  const { data } = useProjects(page);
+  const category = usePrefsStore((s) => s.homeCategory);
+  const setCategory = usePrefsStore((s) => s.setHomeCategory);
+  // 2026-05-21: server-side category filter replaces the client-side
+  // template_id-prefix hack — totalPages now reflects the filtered count.
+  const { data } = useProjects(page, 4, category);
   const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / 4));
+
+  // Category toggle mirrors TeamPage's PillTabs design (sliding pill +
+  // theme-aware active surface). 2026-05-21: 3 categories matching the
+  // pivot direction in docs/personal_journey_short.md — Unity stays
+  // primary (filter shows existing projects), AI 视频 / PPT 视频 are
+  // placeholders that empty out today and fill as new template_id
+  // prefixes (`aivideo_*`, `ppt_*`) get added.
+  const categoryTabs = [
+    { key: "unity" as const, label: "Unity 项目" },
+    { key: "ai_video" as const, label: "AI 视频" },
+    { key: "ppt" as const, label: "PPT 视频" },
+  ];
 
   return (
     <div className="flex h-full flex-col px-6 pb-3 pt-4">
       {/* Top toolbar */}
-      <div className="mb-4 flex items-center">
+      <div className="mb-4 flex items-center gap-3">
+        <PillTabs<HomeCategory>
+          tabs={categoryTabs}
+          active={category}
+          onChange={(k) => {
+            setCategory(k);
+            // Reset pagination when switching category so we don't land
+            // on page 3 of a category that only has 1 page of results.
+            setPage(1);
+          }}
+        />
         <button
           onClick={() => openDrawer()}
           className="flex items-center gap-1 rounded-2xl px-5 py-2 text-sm font-medium text-white shadow-sm transition-opacity hover:opacity-90"
@@ -55,7 +83,7 @@ function HomePage() {
 
       {/* Project grid */}
       <div className="min-h-0 flex-1">
-        <ProjectGrid page={page} />
+        <ProjectGrid page={page} category={category} />
       </div>
 
       {/* Bottom status bars */}

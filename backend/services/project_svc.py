@@ -25,9 +25,17 @@ class ProjectService:
         "COALESCE(unfavorited_at, created_at) DESC"
     )
 
-    async def list_projects(self, page: int = 1, size: int = 4) -> dict:
+    async def list_projects(
+        self, page: int = 1, size: int = 4, category: str | None = None,
+    ) -> dict:
+        # 2026-05-21: category filter (server-side) replaces the brittle
+        # client-side template_id-prefix hack the home toggle introduced.
+        where, params = "", ()
+        if category:
+            where, params = "category = ?", (category,)
         result = await crud.paginate("projects", page=page, size=size,
-                                      order_by=self.LIST_ORDER_BY)
+                                      order_by=self.LIST_ORDER_BY,
+                                      where=where, params=params)
         for item in result["items"]:
             tasks = await crud.get_all("tasks", "project_id = ?", (item["id"],))
             total = len(tasks)
@@ -66,6 +74,10 @@ class ProjectService:
             "progress_pct": 0,
             "execution_kind": data.get("execution_kind", "sequential"),
             "scaffold_status": scaffold_status,
+            # 2026-05-21: category lives on the row so list filtering can
+            # be server-side. Default 'unity' matches the migration 0023
+            # default and the historical product focus.
+            "category": data.get("category", "unity"),
         }, id_prefix="proj_")
         log.info("project.created",
                  id=row["id"], name=data["name"],
@@ -224,6 +236,9 @@ class ProjectService:
             "execution_kind": source.get("execution_kind", "sequential"),
             "copied_from": project_id,
             "scaffold_status": scaffold_status,
+            # 2026-05-21: clone stays in source's category — a Unity
+            # project's副本 is still a Unity project.
+            "category": source.get("category", "unity"),
         }, id_prefix="proj_")
 
         old_to_new: dict[str, str] = {}

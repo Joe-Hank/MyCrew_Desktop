@@ -69,6 +69,13 @@ backend/mycrew.db-journal
 backend/mycrew.db-wal
 backend/mycrew.db-shm
 
+# 2026-05-21: docs/ 整体退出公开仓。包含 PRD / 内部复盘 / 求职文章 /
+# 失败实验记录等不适合放在公开 GitHub 上的内容。本地仍保留完整。
+# 注意：本规则仅影响后续 commit，过去 commit 里仍有这些文件 — 任何
+# 拿到老 commit hash 的人仍能 checkout 看到。彻底抹除需要 force-push
+# 重写历史，目前不做。
+docs/
+
 # 测试产物
 /tests/playwright-report/
 /tests/test-results/

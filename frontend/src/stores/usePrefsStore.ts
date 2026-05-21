@@ -15,6 +15,12 @@ import { persist } from "zustand/middleware";
 export type LogTab = "后端日志" | "Agent 输出" | "LLM 调用";
 export type TeamTab = "agents" | "crews" | "tools";
 export type SettingsTab = "llm" | "mcp" | "permission";
+// 2026-05-21: home page top-left toggle. Categories are scoped to the
+// kind of project the user is browsing — drives which template_id
+// patterns the project grid shows. Default 'unity' matches the
+// historical product focus; AI 视频 / PPT 视频 are the lightweight
+// scenarios the project is pivoting toward (see docs/personal_journey_short).
+export type HomeCategory = "unity" | "ai_video" | "ppt";
 
 export interface LogDrawerFilters {
   level: "" | "debug" | "info" | "warning" | "error";
@@ -36,6 +42,9 @@ interface PrefsState {
   // Team / Settings active tab
   teamActiveTab: TeamTab;
   settingsActiveTab: SettingsTab;
+
+  // Home page category toggle (Unity / AI 视频 / PPT 视频).
+  homeCategory: HomeCategory;
 
   // Most-recently-opened project (used by TaskPage to auto-restore when
   // the user re-enters /tasks without an id — both via the sidebar nav
@@ -61,6 +70,7 @@ interface PrefsState {
   setLogDrawerFilters: (patch: Partial<LogDrawerFilters>) => void;
   setTeamActiveTab: (v: TeamTab) => void;
   setSettingsActiveTab: (v: SettingsTab) => void;
+  setHomeCategory: (v: HomeCategory) => void;
   setLastProjectId: (v: string | null) => void;
   setIoViewerWidth: (v: number) => void;
   setScaffoldParent: (v: string | null) => void;
@@ -77,6 +87,7 @@ export const usePrefsStore = create<PrefsState>()(
       logDrawerFilters: { level: "", source: "", query: "" },
       teamActiveTab: "agents",
       settingsActiveTab: "llm",
+      homeCategory: "unity",
       lastProjectId: null,
       ioViewerWidth: 380,
       scaffoldParent: null,
@@ -95,6 +106,7 @@ export const usePrefsStore = create<PrefsState>()(
       })),
       setTeamActiveTab: (v) => set({ teamActiveTab: v }),
       setSettingsActiveTab: (v) => set({ settingsActiveTab: v }),
+      setHomeCategory: (v) => set({ homeCategory: v }),
       setLastProjectId: (v) => set({ lastProjectId: v }),
       // Clamp 280-1200 — below 280 the JSON tree becomes unreadable;
       // above 1200 the canvas behind gets squeezed off-screen.
@@ -105,10 +117,11 @@ export const usePrefsStore = create<PrefsState>()(
     }),
     {
       name: "mycrew-prefs",
-      version: 2,
+      version: 3,
       // v1 → v2: 「应用日志」 tab renamed to 「后端日志」 + new
       // logDrawerHeight / logDrawerFilters fields. Old persisted state
       // may have any of these missing or with the old tab label.
+      // v2 → v3: added homeCategory toggle (Unity / AI 视频 / PPT 视频).
       migrate: (persisted: any, _from) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         if (persisted.logDrawerActiveTab === "应用日志") {
@@ -119,6 +132,9 @@ export const usePrefsStore = create<PrefsState>()(
         }
         if (!persisted.logDrawerFilters) {
           persisted.logDrawerFilters = { level: "", source: "", query: "" };
+        }
+        if (!persisted.homeCategory) {
+          persisted.homeCategory = "unity";
         }
         return persisted;
       },

@@ -164,6 +164,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from bootstrap.seed_plan_maker import ensure_plan_maker_agent
     from bootstrap.seed_planner_agents import ensure_project_initializer_agent
     from bootstrap.seed_crews import ensure_crew_pool
+    from bootstrap.seed_templates import ensure_templates
     from bootstrap.wipe_v4 import run_v4_reset_once
 
     tool_ids = await ensure_builtin_tools()
@@ -178,6 +179,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await ensure_plan_maker_agent(tool_ids)
     await ensure_project_initializer_agent(tool_ids)
     await ensure_crew_pool(tool_ids)
+    # 2026-05-21: per-scenario templates (Unity + AI 视频 + PPT). Must
+    # run after Crew seeding because templates reference Crew names in
+    # `seed_crew_names`.
+    await ensure_templates()
     log.info("startup.seeded")
 
     # WS connection manager — imported up front because steps 3/4/5 all use it

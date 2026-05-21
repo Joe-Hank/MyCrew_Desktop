@@ -9,6 +9,10 @@ export interface Project {
   is_running: boolean;
   progress_pct: number;
   execution_kind: string;
+  /** 2026-05-21: scenario discriminator. Persisted on the row; the home
+   *  toggle uses it for server-side filtering. Default 'unity' for any
+   *  row that predates migration 0023. */
+  category: string;
   created_at: string;
   copied_from: string | null;
   /** Non-null = starred. Server sorts starred rows to the head of page 1
@@ -121,11 +125,16 @@ export interface ProjectPage {
   size: number;
 }
 
-export function useProjects(page = 1, size = 4) {
+export function useProjects(page = 1, size = 4, category?: string) {
   return useQuery({
-    queryKey: ["projects", page, size],
+    queryKey: ["projects", page, size, category ?? ""],
     queryFn: async () => {
-      const res = await apiFetch<ProjectPage>(`/projects?page=${page}&size=${size}`);
+      const qs = new URLSearchParams({
+        page: String(page),
+        size: String(size),
+      });
+      if (category) qs.set("category", category);
+      const res = await apiFetch<ProjectPage>(`/projects?${qs.toString()}`);
       return res.data ?? { items: [], total: 0, page: 1, size: 4 };
     },
   });

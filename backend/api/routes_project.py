@@ -14,6 +14,9 @@ class ProjectCreate(BaseModel):
     name: str
     root_path: str | None = None
     execution_kind: str = "sequential"
+    # 2026-05-21: category isolates scenarios (unity / ai_video / ppt).
+    # Default 'unity' keeps callers that don't pass it on the legacy bucket.
+    category: str = "unity"
 
 
 class RootPathUpdate(BaseModel):
@@ -25,8 +28,14 @@ class DeleteConfirm(BaseModel):
 
 
 @router.get("")
-async def list_projects(page: int = 1, size: int = 4):
-    data = await project_svc.list_projects(page=page, size=size)
+async def list_projects(
+    page: int = 1, size: int = 4, category: str | None = None,
+):
+    # 2026-05-21: optional category filter. Missing/empty = all categories
+    # (preserves pre-pivot behaviour for any caller that hasn't migrated).
+    data = await project_svc.list_projects(
+        page=page, size=size, category=category,
+    )
     return {"ok": True, "data": data}
 
 
